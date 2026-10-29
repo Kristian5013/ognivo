@@ -1,0 +1,208 @@
+{
+  "url": "http://127.0.0.1:18093",
+  "health": [
+    200,
+    {
+      "status": "ok"
+    }
+  ],
+  "props": {
+    "build_info": "b11924-12cc59ba4",
+    "model_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+    "total_slots": 1,
+    "modalities": {
+      "vision": false,
+      "video": false,
+      "audio": false
+    },
+    "chat_template_caps": {
+      "supports_object_arguments": true,
+      "supports_parallel_tool_calls": true,
+      "supports_preserve_reasoning": true,
+      "supports_reasoning_effort": true,
+      "supports_string_content": true,
+      "supports_system_role": true,
+      "supports_tool_calls": true,
+      "supports_tools": true,
+      "supports_typed_content": true
+    },
+    "n_ctx": 16384,
+    "chat_template_sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce",
+    "default_sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "repeat_penalty": 1.0
+    }
+  },
+  "models": {
+    "models": [
+      {
+        "name": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+        "model": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+        "modified_at": "",
+        "size": "",
+        "digest": "",
+        "type": "model",
+        "description": "",
+        "tags": [
+          ""
+        ],
+        "capabilities": [
+          "completion"
+        ],
+        "parameters": "",
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "",
+          "families": [
+            ""
+          ],
+          "parameter_size": "",
+          "quantization_level": ""
+        }
+      }
+    ],
+    "object": "list",
+    "data": [
+      {
+        "id": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+        "aliases": [
+          "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf"
+        ],
+        "tags": [],
+        "object": "model",
+        "architecture": {
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "created": 1793284025,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 248320,
+          "n_ctx": 16384,
+          "n_ctx_train": 262144,
+          "n_embd": 5120,
+          "n_params": 27320697856,
+          "size": 16045481984,
+          "ftype": "Q4_0"
+        }
+      }
+    ]
+  },
+  "slots_endpoint_http_status": 200,
+  "family": "qwen-xml",
+  "special_tokens": {
+    "<|im_start|>": {
+      "id": 248045,
+      "parse_special_false": [
+        27,
+        91,
+        316,
+        4747,
+        91,
+        29
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<|im_end|>": {
+      "id": 248046,
+      "parse_special_false": [
+        27,
+        91,
+        316,
+        6018,
+        91,
+        29
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<tool_call>": {
+      "id": 248058,
+      "parse_special_false": [
+        248058
+      ],
+      "recognised_without_parse_special": true
+    },
+    "</tool_call>": {
+      "id": 248059,
+      "parse_special_false": [
+        248059
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<think>": {
+      "id": 248068,
+      "parse_special_false": [
+        248068
+      ],
+      "recognised_without_parse_special": true
+    },
+    "</think>": {
+      "id": 248069,
+      "parse_special_false": [
+        248069
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<tool_response>": {
+      "id": 248066,
+      "parse_special_false": [
+        248066
+      ],
+      "recognised_without_parse_special": true
+    }
+  },
+  "stream_ids": {
+    "prompt_tokens": 43,
+    "stream_ids": 57,
+    "predicted_n": 57,
+    "stream_ids_complete": true,
+    "detokenize_matches_content": false,
+    "detokenize_without_last_matches_content": true,
+    "last_id": 248046,
+    "last_id_text": "<|im_end|>",
+    "n_probs_ids": 39,
+    "n_probs_ids_complete": false,
+    "stop_type": "eos",
+    "sample": "🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語",
+    "errors": []
+  },
+  "accepts": {
+    "grammar_lazy_word_trigger": {
+      "http_status": 200,
+      "error": null
+    },
+    "reasoning_budget_fields": {
+      "http_status": 200,
+      "error": null
+    },
+    "logit_bias_ban": {
+      "http_status": 200,
+      "error": null
+    }
+  },
+  "chat_tools": {
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "arguments": "{\"city\":\"Paris\"}"
+        },
+        "id": "Qp6jLShnOsEYYyaHjnFbSlzKLyIgQxu8"
+      }
+    ],
+    "has_reasoning_content": true,
+    "content": ""
+  }
+}

@@ -1,0 +1,12 @@
+{
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in /repo. Keep answers short."
+  },
+  {
+   "role": "user",
+   "content": "Hi"
+  }
+ ]
+}

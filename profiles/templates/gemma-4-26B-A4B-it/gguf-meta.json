@@ -1,0 +1,179 @@
+{
+ "file": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+ "gguf_version": 3,
+ "n_tensors": 658,
+ "templates": {
+  "tokenizer.chat_template": {
+   "saved_as": "gguf-embedded.jinja",
+   "len": 18922,
+   "sha256": "845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b"
+  }
+ },
+ "general.architecture": "gemma4",
+ "general.type": "model",
+ "general.sampling.top_k": 64,
+ "general.sampling.top_p": 0.949999988079071,
+ "general.sampling.temp": 1.0,
+ "general.name": "Gemma-4-26B-A4B-It",
+ "general.finetune": "it",
+ "general.basename": "Gemma-4-26B-A4B-It",
+ "general.quantized_by": "Unsloth",
+ "general.size_label": "26B-A4B",
+ "general.license": "apache-2.0",
+ "general.license.link": "https://ai.google.dev/gemma/docs/gemma_4_license",
+ "general.repo_url": "https://huggingface.co/unsloth",
+ "general.base_model.count": 1,
+ "general.base_model.0.name": "Gemma 4 26B A4B It",
+ "general.base_model.0.organization": "Google",
+ "general.base_model.0.repo_url": "https://huggingface.co/google/gemma-4-26B-A4B-it",
+ "general.tags": [
+  "unsloth",
+  "image-text-to-text"
+ ],
+ "tokenizer.ggml.model": "gemma4",
+ "tokenizer.ggml.bos_token_id": 2,
+ "tokenizer.ggml.eos_token_id": 106,
+ "tokenizer.ggml.unknown_token_id": 3,
+ "tokenizer.ggml.padding_token_id": 0,
+ "tokenizer.ggml.mask_token_id": 4,
+ "tokenizer.ggml.add_space_prefix": false,
+ "tokenizer.ggml.add_bos_token": true,
+ "general.quantization_version": 2,
+ "general.file_type": 15,
+ "special_ids": {
+  "bos_token_id": [
+   2,
+   "<bos>"
+  ],
+  "eos_token_id": [
+   106,
+   "<turn|>"
+  ],
+  "padding_token_id": [
+   0,
+   "<pad>"
+  ],
+  "unknown_token_id": [
+   3,
+   "<unk>"
+  ]
+ },
+ "n_control_or_user_defined": 23,
+ "control_or_user_defined_sample": [
+  [
+   0,
+   "<pad>",
+   3
+  ],
+  [
+   2,
+   "<bos>",
+   3
+  ],
+  [
+   3,
+   "<unk>",
+   3
+  ],
+  [
+   4,
+   "<mask>",
+   3
+  ],
+  [
+   46,
+   "<|tool>",
+   3
+  ],
+  [
+   47,
+   "<tool|>",
+   3
+  ],
+  [
+   48,
+   "<|tool_call>",
+   4
+  ],
+  [
+   49,
+   "<tool_call|>",
+   4
+  ],
+  [
+   50,
+   "<|tool_response>",
+   4
+  ],
+  [
+   51,
+   "<tool_response|>",
+   4
+  ],
+  [
+   52,
+   "<|\"|>",
+   4
+  ],
+  [
+   98,
+   "<|think|>",
+   3
+  ],
+  [
+   100,
+   "<|channel>",
+   4
+  ],
+  [
+   101,
+   "<channel|>",
+   4
+  ],
+  [
+   105,
+   "<|turn>",
+   3
+  ],
+  [
+   106,
+   "<turn|>",
+   3
+  ],
+  [
+   255999,
+   "<|image>",
+   3
+  ],
+  [
+   256000,
+   "<|audio>",
+   3
+  ],
+  [
+   258880,
+   "<|image|>",
+   3
+  ],
+  [
+   258881,
+   "<|audio|>",
+   3
+  ],
+  [
+   258882,
+   "<image|>",
+   3
+  ],
+  [
+   258883,
+   "<audio|>",
+   3
+  ],
+  [
+   258884,
+   "<|video|>",
+   3
+  ]
+ ]
+}

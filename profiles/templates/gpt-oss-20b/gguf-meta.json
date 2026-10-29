@@ -1,0 +1,98 @@
+{
+ "file": "gpt-oss-20b-F16.gguf",
+ "gguf_version": 3,
+ "n_tensors": 459,
+ "templates": {
+  "tokenizer.chat_template": {
+   "saved_as": "gguf-embedded.jinja",
+   "len": 17221,
+   "sha256": "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01"
+  }
+ },
+ "general.architecture": "gpt-oss",
+ "general.type": "model",
+ "general.name": "Gpt-Oss-20B",
+ "general.basename": "Gpt-Oss-20B",
+ "general.quantized_by": "Unsloth",
+ "general.size_label": "20B",
+ "general.license": "apache-2.0",
+ "general.repo_url": "https://huggingface.co/unsloth",
+ "general.tags": [
+  "vllm",
+  "text-generation"
+ ],
+ "general.file_type": 1,
+ "general.quantization_version": 2,
+ "tokenizer.ggml.model": "gpt2",
+ "tokenizer.ggml.pre": "gpt-4o",
+ "tokenizer.ggml.bos_token_id": 199998,
+ "tokenizer.ggml.eos_token_id": 200002,
+ "tokenizer.ggml.padding_token_id": 200017,
+ "special_ids": {
+  "bos_token_id": [
+   199998,
+   "<|startoftext|>"
+  ],
+  "eos_token_id": [
+   200002,
+   "<|return|>"
+  ],
+  "padding_token_id": [
+   200017,
+   "<|reserved_200017|>"
+  ]
+ },
+ "n_control_or_user_defined": 21,
+ "control_or_user_defined_sample": [
+  [
+   199998,
+   "<|startoftext|>",
+   3
+  ],
+  [
+   199999,
+   "<|endoftext|>",
+   3
+  ],
+  [
+   200002,
+   "<|return|>",
+   3
+  ],
+  [
+   200003,
+   "<|constrain|>",
+   3
+  ],
+  [
+   200005,
+   "<|channel|>",
+   3
+  ],
+  [
+   200006,
+   "<|start|>",
+   3
+  ],
+  [
+   200007,
+   "<|end|>",
+   3
+  ],
+  [
+   200008,
+   "<|message|>",
+   3
+  ],
+  [
+   200012,
+   "<|call|>",
+   3
+  ],
+  [
+   200018,
+   "<|endofprompt|>",
+   3
+  ]
+ ]
+}

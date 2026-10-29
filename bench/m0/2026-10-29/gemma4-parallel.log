@@ -1,0 +1,4 @@
+0.00.386.974 W load: control-looking token:    212 '</s>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.386.999 W load: control-looking token:     50 '<|tool_response>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.387.005 W load: control-looking token:      1 '<eos>' was not control-type; this is probably a bug in the model. its type will be overridden
+0.00.391.644 W load: '</s>' is a normal token here, removing it from EOG list

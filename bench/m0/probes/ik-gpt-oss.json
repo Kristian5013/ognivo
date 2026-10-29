@@ -1,0 +1,193 @@
+{
+  "url": "http://127.0.0.1:18094",
+  "health": [
+    200,
+    {
+      "status": "ok",
+      "slots_idle": 1,
+      "slots_processing": 0
+    }
+  ],
+  "props": {
+    "build_info": null,
+    "model_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+    "total_slots": 1,
+    "modalities": {
+      "vision": false,
+      "audio": false
+    },
+    "chat_template_caps": {},
+    "n_ctx": 16384,
+    "chat_template_sha256": "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01",
+    "default_sampling": {
+      "temperature": null,
+      "top_k": null,
+      "top_p": null,
+      "min_p": null,
+      "repeat_penalty": null
+    }
+  },
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "object": "model",
+        "created": 1793284032,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 201088,
+          "n_ctx_train": 131072,
+          "n_embd": 2880,
+          "n_params": 20914757184,
+          "size": 13779630336
+        },
+        "max_model_len": 16384
+      }
+    ],
+    "models": [
+      {
+        "slug": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "display_name": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "description": null,
+        "default_reasoning_level": null,
+        "supported_reasoning_levels": [],
+        "shell_type": "default",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
+        "default_service_tier": null,
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "",
+        "model_messages": null,
+        "supports_reasoning_summaries": false,
+        "default_reasoning_summary": "auto",
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "web_search_tool_type": "text",
+        "truncation_policy": {
+          "mode": "tokens",
+          "limit": 16384
+        },
+        "supports_parallel_tool_calls": false,
+        "supports_image_detail_original": false,
+        "context_window": 16384,
+        "max_context_window": 16384,
+        "auto_compact_token_limit": 14745,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": [
+          "text"
+        ],
+        "supports_search_tool": false,
+        "use_responses_lite": false,
+        "auto_review_model_override": null,
+        "tool_mode": null,
+        "multi_agent_version": null
+      }
+    ]
+  },
+  "slots_endpoint_http_status": 200,
+  "family": "harmony",
+  "special_tokens": {
+    "<|start|>": {
+      "id": 200006,
+      "parse_special_false": [
+        200006
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|end|>": {
+      "id": 200007,
+      "parse_special_false": [
+        200007
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|message|>": {
+      "id": 200008,
+      "parse_special_false": [
+        200008
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|channel|>": {
+      "id": 200005,
+      "parse_special_false": [
+        200005
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|constrain|>": {
+      "id": 200003,
+      "parse_special_false": [
+        200003
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|call|>": {
+      "id": 200012,
+      "parse_special_false": [
+        200012
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|return|>": {
+      "id": 200002,
+      "parse_special_false": [
+        200002
+      ],
+      "recognised_without_parse_special": true
+    }
+  },
+  "stream_ids": {
+    "prompt_tokens": 97,
+    "stream_ids": 0,
+    "predicted_n": 72,
+    "stream_ids_complete": false,
+    "detokenize_matches_content": false,
+    "detokenize_without_last_matches_content": false,
+    "last_id": null,
+    "last_id_text": null,
+    "n_probs_ids": 0,
+    "n_probs_ids_complete": false,
+    "stop_type": null,
+    "sample": "<|channel|>analysis<|message|>Just repeat line three times.<|end|><|start|>assistant<|channel|>final<|message|>🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語",
+    "errors": []
+  },
+  "accepts": {
+    "grammar_lazy_word_trigger": {
+      "http_status": 200,
+      "error": null
+    },
+    "reasoning_budget_fields": {
+      "http_status": 200,
+      "error": null
+    },
+    "logit_bias_ban": {
+      "http_status": 200,
+      "error": null
+    }
+  },
+  "chat_tools": {
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "arguments": "{\"city\":\"Paris\"}"
+        },
+        "id": "kvWNj9B8mS3Q8Icpi0T4uPMLGsZ7uuxc"
+      }
+    ],
+    "has_reasoning_content": true,
+    "content": ""
+  }
+}

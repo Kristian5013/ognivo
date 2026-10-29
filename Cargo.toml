@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+authors = ["Kristian Pilatovich"]
+publish = false
+
+[workspace.dependencies]
+ognivo-core = { path = "crates/ognivo-core" }
+ognivo-models = { path = "crates/ognivo-models" }
+ognivo-protocol = { path = "crates/ognivo-protocol" }
+ognivo-store = { path = "crates/ognivo-store" }
+ognivo-tools = { path = "crates/ognivo-tools" }
+
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+futures = "0.3.34"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
+toml = "1.1.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,206 @@
+{
+  "url": "http://127.0.0.1:18091",
+  "health": [
+    200,
+    {
+      "status": "ok"
+    }
+  ],
+  "props": {
+    "build_info": "b11924-12cc59ba4",
+    "model_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+    "total_slots": 1,
+    "modalities": {
+      "vision": false,
+      "video": false,
+      "audio": false
+    },
+    "chat_template_caps": {
+      "supports_object_arguments": true,
+      "supports_parallel_tool_calls": false,
+      "supports_preserve_reasoning": false,
+      "supports_reasoning_effort": true,
+      "supports_string_content": true,
+      "supports_system_role": true,
+      "supports_tool_calls": true,
+      "supports_tools": true,
+      "supports_typed_content": false
+    },
+    "n_ctx": 16384,
+    "chat_template_sha256": "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01",
+    "default_sampling": {
+      "temperature": 0.800000011920929,
+      "top_k": 40,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "repeat_penalty": 1.0
+    }
+  },
+  "models": {
+    "models": [
+      {
+        "name": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "model": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "modified_at": "",
+        "size": "",
+        "digest": "",
+        "type": "model",
+        "description": "",
+        "tags": [
+          ""
+        ],
+        "capabilities": [
+          "completion"
+        ],
+        "parameters": "",
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "",
+          "families": [
+            ""
+          ],
+          "parameter_size": "",
+          "quantization_level": ""
+        }
+      }
+    ],
+    "object": "list",
+    "data": [
+      {
+        "id": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+        "aliases": [
+          "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf"
+        ],
+        "tags": [],
+        "object": "model",
+        "architecture": {
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "created": 1793284009,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 201088,
+          "n_ctx": 16384,
+          "n_ctx_train": 131072,
+          "n_embd": 2880,
+          "n_params": 20914757184,
+          "size": 13779630336,
+          "ftype": "F16"
+        }
+      }
+    ]
+  },
+  "slots_endpoint_http_status": 200,
+  "family": "harmony",
+  "special_tokens": {
+    "<|start|>": {
+      "id": 200006,
+      "parse_special_false": [
+        200006
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|end|>": {
+      "id": 200007,
+      "parse_special_false": [
+        200007
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|message|>": {
+      "id": 200008,
+      "parse_special_false": [
+        200008
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|channel|>": {
+      "id": 200005,
+      "parse_special_false": [
+        200005
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|constrain|>": {
+      "id": 200003,
+      "parse_special_false": [
+        200003
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|call|>": {
+      "id": 200012,
+      "parse_special_false": [
+        27,
+        91,
+        9925,
+        91,
+        29
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<|return|>": {
+      "id": 200002,
+      "parse_special_false": [
+        27,
+        91,
+        1034,
+        91,
+        29
+      ],
+      "recognised_without_parse_special": false
+    }
+  },
+  "stream_ids": {
+    "prompt_tokens": 97,
+    "stream_ids": 72,
+    "predicted_n": 72,
+    "stream_ids_complete": true,
+    "detokenize_matches_content": false,
+    "detokenize_without_last_matches_content": true,
+    "last_id": 200002,
+    "last_id_text": "<|return|>",
+    "n_probs_ids": 57,
+    "n_probs_ids_complete": false,
+    "stop_type": "eos",
+    "sample": "<|channel|>analysis<|message|>Just repeat line three times.<|end|><|start|>assistant<|channel|>final<|message|>🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語",
+    "errors": []
+  },
+  "accepts": {
+    "grammar_lazy_word_trigger": {
+      "http_status": 200,
+      "error": null
+    },
+    "reasoning_budget_fields": {
+      "http_status": 200,
+      "error": null
+    },
+    "logit_bias_ban": {
+      "http_status": 200,
+      "error": null
+    }
+  },
+  "chat_tools": {
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "arguments": "{\"city\":\"Paris\"}"
+        },
+        "id": "fZr5wdsv8RdlFtrGiwsAMHfRwzUaAogE"
+      }
+    ],
+    "has_reasoning_content": true,
+    "content": ""
+  }
+}

@@ -1,0 +1,246 @@
+{
+ "checked_on": "2026-10-29",
+ "canonical": {
+  "repo": "openai/gpt-oss-20b",
+  "main_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
+  "file": "chat_template.jinja",
+  "blob_oid": "dc7bb11927d29f653ba2740f2db2c688fd77592f",
+  "size": 16738,
+  "lfs_sha256": null,
+  "last_commit": {
+   "id": "cbf31f62664d4b1360b3a78427f7b3c3ed8f0fa8",
+   "date": "2025-08-08T22:46:37.000Z",
+   "title": "Update chat_template.jinja (#94)"
+  },
+  "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+  "url": "https://huggingface.co/openai/gpt-oss-20b/resolve/6cee5e81ee83917806bbde320786a8fb61efebee/chat_template.jinja",
+  "tokenizer_config_json": {
+   "sha256": "9279e942392b742d633c7adbb89ebe002c98399db8926a7af5125c726f404070",
+   "has_chat_template": false
+  },
+  "note": "identical blob in openai/gpt-oss-120b (dc7bb119..., 2025-08-08); chat_template.json removed in ef533c92 (#59)",
+  "saved_as": "canonical.jinja"
+ },
+ "upstream_history": [
+  {
+   "commit": "f81fef1ddd90d214968e951a76834f1ded130a18",
+   "date": "2025-08-04T23:37:24.000Z",
+   "title": "Upload folder using huggingface_hub",
+   "chat_template_sha256": "3aff18eca7ee88d43372b19f7e3784fb15d1acd014f31fa2e71614d9453576fa",
+   "saved_as": "upstream/history/f81fef1ddd90.chat_template.jinja"
+  },
+  {
+   "commit": "5a5e34ebd2116c2c6062ff22751c357fb7eef0ca",
+   "date": "2025-08-05T01:15:10.000Z",
+   "title": "Upload folder using huggingface_hub",
+   "chat_template_sha256": "3aff18eca7ee88d43372b19f7e3784fb15d1acd014f31fa2e71614d9453576fa",
+   "saved_as": "upstream/history/5a5e34ebd211.chat_template.jinja"
+  },
+  {
+   "commit": "ec854da5735f125fe36f080d8013482590f9ad7d",
+   "date": "2025-08-05T15:40:37.000Z",
+   "title": "Upload folder using huggingface_hub",
+   "chat_template_sha256": "f8d9255777615591a7cc1a7c932f5a69e181128902295e1b81221d20d983cac7",
+   "saved_as": "upstream/history/ec854da5735f.chat_template.jinja"
+  },
+  {
+   "commit": "ef533c924d202f1bffdd43e1f0593ad7d42484d6",
+   "date": "2025-08-06T16:49:12.000Z",
+   "title": "Remove chat_template.json (#59)",
+   "chat_template_sha256": "f8d9255777615591a7cc1a7c932f5a69e181128902295e1b81221d20d983cac7",
+   "saved_as": "upstream/history/ef533c924d20.chat_template.jinja"
+  },
+  {
+   "commit": "10e9d713f8e4a9281c59c40be6c58537480635ea",
+   "date": "2025-08-07T17:43:45.000Z",
+   "title": "Updated chat template (#82)",
+   "chat_template_sha256": "b474759b33c21342e73abceae7fe3789f062e289f69749801f722a508f92180a",
+   "saved_as": "upstream/history/10e9d713f8e4.chat_template.jinja"
+  },
+  {
+   "commit": "cbf31f62664d4b1360b3a78427f7b3c3ed8f0fa8",
+   "date": "2025-08-08T22:46:37.000Z",
+   "title": "Update chat_template.jinja (#94)",
+   "chat_template_sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+   "saved_as": "upstream/history/cbf31f62664d.chat_template.jinja"
+  }
+ ],
+ "gguf_embedded": {
+  "gguf_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+  "source_repo": "unsloth/gpt-oss-20b-GGUF",
+  "downloaded_revision": "d449b42d93e1c2c7bda5312f5c25c8fb91dfa9b4",
+  "file": {
+   "blob_oid": "333332366a43eb2188db57edeac2e01ba2d21a9f",
+   "size": 13792639168,
+   "lfs_sha256": "4e4f9cd88d6456e4f389e7262eca4a8d565211e2b22ece9ca7a8556168ff3c66",
+   "last_commit": {
+    "id": "a1b6de7b9f9540e2e00885ca1a96614a187c9c3a",
+    "date": "2025-08-08T17:21:40.000Z",
+    "title": "Upload folder using huggingface_hub"
+   }
+  },
+  "identical_to_repo_main_on_check_date": true,
+  "metadata": {
+   "file": "gpt-oss-20b-F16.gguf",
+   "templates": {
+    "tokenizer.chat_template": {
+     "saved_as": "gguf-embedded.jinja",
+     "len": 17221,
+     "sha256": "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01"
+    }
+   },
+   "general.architecture": "gpt-oss",
+   "general.type": "model",
+   "general.name": "Gpt-Oss-20B",
+   "general.basename": "Gpt-Oss-20B",
+   "general.quantized_by": "Unsloth",
+   "general.size_label": "20B",
+   "general.license": "apache-2.0",
+   "general.repo_url": "https://huggingface.co/unsloth",
+   "general.tags": [
+    "vllm",
+    "text-generation"
+   ],
+   "general.file_type": 1,
+   "general.quantization_version": 2,
+   "special_ids": {
+    "bos_token_id": [
+     199998,
+     "<|startoftext|>"
+    ],
+    "eos_token_id": [
+     200002,
+     "<|return|>"
+    ],
+    "padding_token_id": [
+     200017,
+     "<|reserved_200017|>"
+    ]
+   }
+  },
+  "saved_as": "gguf-embedded.jinja",
+  "sha256": "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01",
+  "author": "Unsloth (header: \"Chat template fixes by Unsloth\")"
+ },
+ "other_copies": [
+  {
+   "path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-bf16/chat_template.jinja",
+   "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+   "equals": "canonical",
+   "hf_download_metadata": "openai/gpt-oss-20b@6cee5e81, blob dc7bb119"
+  },
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/openai-gpt-oss-120b.jinja",
+   "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+   "equals": "canonical",
+   "llama_cpp_checkout": "5e03a1ff4 (2026-10-16)"
+  }
+ ],
+ "reference_renderer": {
+  "name": "openai/harmony (openai-harmony 0.0.8, git abd677f7ac962629c808197caa1feb9e3e95d2b0)",
+  "golden_render_seq": "rendered/seq.effort-high.harmony-reference-0.0.8.txt",
+  "golden_render_seq_sha256": "aa65385fbc8e8970f5faa3dcbf54327b525c610e8b12ff0745d91bffd4ca4621",
+  "vocab": "o200k_base rebuilt from local tokenizer.json, sha256 446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d (matches tiktoken)"
+ },
+ "kwargs_surface": {
+  "canonical": [
+   "messages",
+   "tools",
+   "add_generation_prompt",
+   "reasoning_effort",
+   "model_identity",
+   "builtin_tools"
+  ],
+  "gguf_embedded_extra": [
+   "developer_instructions"
+  ],
+  "globals": [
+   "strftime_now",
+   "raise_exception"
+  ]
+ },
+ "llama_cpp_5e03a1ff4": {
+  "canonical": {
+   "detected_format": "peg-native",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": false,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": true,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": false
+   }
+  },
+  "gguf": {
+   "detected_format": "peg-native",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": false,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": true,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": false
+   }
+  }
+ },
+ "pins": {
+  "generic_chat_template_file": {
+   "file": "canonical.jinja",
+   "sha256": "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146",
+   "source": "openai/gpt-oss-20b@6cee5e81 (file commit cbf31f62, 2025-08-08)"
+  },
+  "oracle": {
+   "primary": "openai-harmony 0.0.8 (abd677f7) + manual CoT-drop rule",
+   "secondary_jinja": "canonical.jinja a4c9919c... (only for system/developer header, tool namespace of flat schemas, CoT-drop parity)"
+  },
+  "kwargs": {
+   "reasoning_effort": "low|medium|high (set explicitly; template default medium)",
+   "model_identity": "leave undefined",
+   "builtin_tools": "leave undefined",
+   "llama_server": "--reasoning-effort <level>; --reasoning-preserve has no effect (caps.preserve_reasoning=false)"
+  }
+ },
+ "kwargs_inventory_raw": {
+  "gpt-oss canonical": [
+   "add_generation_prompt",
+   "available_builtin_tools",
+   "builtin_tools",
+   "developer_message",
+   "future_final_message",
+   "has_object_variants",
+   "inner_type",
+   "loop_messages",
+   "messages",
+   "model_identity",
+   "raise_exception",
+   "reasoning_effort",
+   "strftime_now",
+   "tool_call",
+   "tools"
+  ],
+  "gpt-oss gguf(unsloth)": [
+   "add_generation_prompt",
+   "available_builtin_tools",
+   "builtin_tools",
+   "developer_instructions",
+   "developer_message",
+   "future_final_message",
+   "has_object_variants",
+   "inner_type",
+   "loop_messages",
+   "messages",
+   "model_identity",
+   "raise_exception",
+   "reasoning_effort",
+   "strftime_now",
+   "tool_call",
+   "tools"
+  ]
+ }
+}

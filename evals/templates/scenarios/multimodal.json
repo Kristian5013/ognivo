@@ -1,0 +1,142 @@
+{
+ "messages": [
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "What is on this screenshot?"
+    },
+    {
+     "type": "image_url",
+     "image_url": {
+      "url": "data:image/png;base64,AAAA"
+     }
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "Need a second capture.",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_s",
+     "type": "function",
+     "function": {
+      "name": "read_file",
+      "arguments": {
+       "path": "shot2.png"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_s",
+   "content": [
+    {
+     "type": "text",
+     "text": "image follows"
+    },
+    {
+     "type": "image_url",
+     "image_url": {
+      "url": "data:image/png;base64,BBBB"
+     }
+    }
+   ]
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read_file",
+    "description": "Read a UTF-8 file from the workspace.\nReturns numbered lines.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string",
+       "description": "Workspace-relative path"
+      },
+      "start_line": {
+       "type": "integer",
+       "description": "First line (1-based)"
+      },
+      "end_line": {
+       "type": [
+        "integer",
+        "null"
+       ],
+       "description": "Last line or null for EOF"
+      }
+     },
+     "required": [
+      "path"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "apply_patch",
+    "description": "Apply a patch in the *** Begin Patch format.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "patch": {
+       "type": "string",
+       "description": "Patch text"
+      },
+      "dry_run": {
+       "type": "boolean",
+       "description": "Only validate",
+       "default": false
+      }
+     },
+     "required": [
+      "patch"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "run_command",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "cmd": {
+       "type": "string",
+       "description": "Command line"
+      },
+      "Cwd": {
+       "type": "string",
+       "description": "Working directory (mixed-case key on purpose)"
+      },
+      "timeout_s": {
+       "type": "integer",
+       "description": "Timeout in seconds"
+      },
+      "env": {
+       "type": "object",
+       "description": "Extra environment",
+       "additionalProperties": {
+        "type": "string"
+       }
+      }
+     },
+     "required": [
+      "cmd"
+     ]
+    }
+   }
+  }
+ ]
+}

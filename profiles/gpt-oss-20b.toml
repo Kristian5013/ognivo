@@ -1,0 +1,48 @@
+# gpt-oss-20b, Harmony format.
+# Sources: docs/research/2026-10-29/gpt-oss.md, docs/m0/measurements.md.
+id = "gpt-oss-20b"
+family = "harmony"
+display_name = "gpt-oss-20b"
+
+[detect]
+# With parse_special=true this text must tokenize to exactly this one id.
+probe = { text = "<|channel|>", id = 200005 }
+name_hints = ["gpt-oss-20b"]
+
+[tokens]
+# Must never appear as ids inside content spans (special-token injection guard).
+structural = ["<|start|>", "<|end|>", "<|message|>", "<|channel|>", "<|constrain|>", "<|call|>", "<|return|>"]
+eog = [200002, 200012] # <|return|>, <|call|>
+# Other named specials; <|reserved_N|> are covered by the "<|" prefix rule of the content guard.
+specials = ["<|startoftext|>", "<|endoftext|>", "<|endofprompt|>"]
+# Harmony prompts start without BOS.
+
+[sampling.main]
+temperature = 1.0
+top_p = 1.0
+top_k = 0
+min_p = 0.0
+
+[reasoning]
+control = "effort"              # lives in the system message: fixed for the session
+levels = ["low", "medium", "high"]
+default = "high"                # SWE-bench Verified 60.7 / 53.2 / 37.4 at high / medium / low
+history = "drop-after-final"    # OpenAI rule: keep CoT inside a tool loop, drop it after a final answer
+
+[context]
+working_max = 98304
+compact_at = 0.70
+
+[template]
+# Vetted copy for the Generic path; the Native path renders prompts itself and ignores it.
+dir = "profiles/templates/gpt-oss-20b"
+file_sha256 = "a4c9919cbbd4acdd51ccffe22da049264b1b73e59055fa58811a99efbd7c8146"
+# sha256 of the served form, as /props reports it (template.rs: served_form)
+known = [
+    { sha256 = "b2215de6da8ba369957eece8c5aa18f4af94f6c4d311d85e691373a421d80e89", verdict = "canonical", note = "openai/gpt-oss-20b, 2025-08-08" },
+    { sha256 = "70da0d2348e40aaf8dad05f04a316835fd10547bd7e3392ce337e4c79ba91c01", verdict = "bad", note = "Unsloth GGUF template: relabels earlier final answers as analysis when reasoning_content is sent back" },
+]
+
+[server]
+recommended_flags = "-c 131072 -np 2 --kv-unified --swa-full -fa on -ngl 99 -b 2048 -ub 2048 --chat-template-file profiles/templates/gpt-oss-20b/canonical.jinja"
+notes = "f16 KV. --swa-full costs about +3 GiB at 128K and makes history rewinds free."

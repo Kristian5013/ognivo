@@ -1,0 +1,215 @@
+{
+  "url": "http://127.0.0.1:18092",
+  "health": [
+    200,
+    {
+      "status": "ok"
+    }
+  ],
+  "props": {
+    "build_info": "b11924-12cc59ba4",
+    "model_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+    "total_slots": 1,
+    "modalities": {
+      "vision": false,
+      "video": false,
+      "audio": false
+    },
+    "chat_template_caps": {
+      "supports_object_arguments": true,
+      "supports_parallel_tool_calls": true,
+      "supports_preserve_reasoning": false,
+      "supports_reasoning_effort": false,
+      "supports_string_content": true,
+      "supports_system_role": true,
+      "supports_tool_calls": true,
+      "supports_tools": true,
+      "supports_typed_content": true
+    },
+    "n_ctx": 16384,
+    "chat_template_sha256": "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b",
+    "default_sampling": {
+      "temperature": 1.0,
+      "top_k": 64,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "repeat_penalty": 1.0
+    }
+  },
+  "models": {
+    "models": [
+      {
+        "name": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "model": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "modified_at": "",
+        "size": "",
+        "digest": "",
+        "type": "model",
+        "description": "",
+        "tags": [
+          ""
+        ],
+        "capabilities": [
+          "completion"
+        ],
+        "parameters": "",
+        "details": {
+          "parent_model": "",
+          "format": "gguf",
+          "family": "",
+          "families": [
+            ""
+          ],
+          "parameter_size": "",
+          "quantization_level": ""
+        }
+      }
+    ],
+    "object": "list",
+    "data": [
+      {
+        "id": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "aliases": [
+          "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+        ],
+        "tags": [],
+        "object": "model",
+        "architecture": {
+          "input_modalities": [
+            "text"
+          ],
+          "output_modalities": [
+            "text"
+          ]
+        },
+        "created": 1793284016,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 262144,
+          "n_ctx": 16384,
+          "n_ctx_train": 262144,
+          "n_embd": 2816,
+          "n_params": 25233142046,
+          "size": 16931716216,
+          "ftype": "Q4_K - Medium"
+        }
+      }
+    ]
+  },
+  "slots_endpoint_http_status": 200,
+  "family": "gemma4",
+  "special_tokens": {
+    "<|turn>": {
+      "id": 105,
+      "parse_special_false": [
+        236820,
+        236909,
+        887,
+        236813
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<turn|>": {
+      "id": 106,
+      "parse_special_false": [
+        236820,
+        887,
+        111038
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<|tool_call>": {
+      "id": 48,
+      "parse_special_false": [
+        48
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<tool_call|>": {
+      "id": 49,
+      "parse_special_false": [
+        49
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|tool_response>": {
+      "id": 50,
+      "parse_special_false": [
+        236820,
+        236909,
+        13205,
+        236779,
+        6275,
+        236813
+      ],
+      "recognised_without_parse_special": false
+    },
+    "<|\"|>": {
+      "id": 52,
+      "parse_special_false": [
+        52
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|channel>": {
+      "id": 100,
+      "parse_special_false": [
+        100
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<channel|>": {
+      "id": 101,
+      "parse_special_false": [
+        101
+      ],
+      "recognised_without_parse_special": true
+    }
+  },
+  "stream_ids": {
+    "prompt_tokens": 39,
+    "stream_ids": 42,
+    "predicted_n": 42,
+    "stream_ids_complete": true,
+    "detokenize_matches_content": false,
+    "detokenize_without_last_matches_content": true,
+    "last_id": 106,
+    "last_id_text": "<turn|>",
+    "n_probs_ids": 42,
+    "n_probs_ids_complete": true,
+    "stop_type": "eos",
+    "sample": "🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語",
+    "errors": []
+  },
+  "accepts": {
+    "grammar_lazy_word_trigger": {
+      "http_status": 200,
+      "error": null
+    },
+    "reasoning_budget_fields": {
+      "http_status": 200,
+      "error": null
+    },
+    "logit_bias_ban": {
+      "http_status": 200,
+      "error": null
+    }
+  },
+  "chat_tools": {
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "arguments": "{\"city\":\"Paris\"}"
+        },
+        "id": "9jlp1e6ZgED7aqjTtf6ExmRmLhMvEAd3"
+      }
+    ],
+    "has_reasoning_content": true,
+    "content": ""
+  }
+}

@@ -1,0 +1,304 @@
+{
+ "checked_on": "2026-10-29",
+ "canonical": {
+  "repo": "google/gemma-4-26B-A4B-it",
+  "main_revision": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+  "file": "chat_template.jinja",
+  "blob_oid": "4741bf6e4132ba23a5537f9d6e74e9a6d613d7cd",
+  "size": 18683,
+  "lfs_sha256": null,
+  "last_commit": {
+   "id": "35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122",
+   "date": "2026-07-15T16:35:17.000Z",
+   "title": "fix: chat template — null handling, reasoning preservation, turn-tag balance, input validation (#47)"
+  },
+  "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "url": "https://huggingface.co/google/gemma-4-26B-A4B-it/resolve/4d7ae4984b7db7de8f8457170b3f1a419ee76d52/chat_template.jinja",
+  "tokenizer_config_json": {
+   "sha256": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+   "has_chat_template": false,
+   "has_response_template": true,
+   "last_commit": {
+    "id": "4d7ae4984b7db7de8f8457170b3f1a419ee76d52",
+    "date": "2026-07-20T16:42:12.000Z",
+    "title": "Add response_template to tokenizer_config.json (#50)"
+   }
+  },
+  "header": "Published: 2026-07-09 (Google Gemma 4 Canonical Chat Template)",
+  "saved_as": "canonical.jinja"
+ },
+ "upstream_history": [
+  {
+   "commit": "47b6801b24d15ff9bcd8c96dfaea0be9ed3a0301",
+   "date": "2026-04-02T10:52:44.000Z",
+   "title": "Preparing for release!",
+   "chat_template_sha256": "2dfbfc7d538912f4ea11d29d85b4e25d7bc26386e53f57529f1d707c28b5828c",
+   "saved_as": "upstream/history/47b6801b24d1.chat_template.jinja"
+  },
+  {
+   "commit": "1db3cff1840c2ae59759d8e842ff37831cf8cb63",
+   "date": "2026-04-10T02:02:07.000Z",
+   "title": "fix: prefix-preserving tool calls + dialog compliance (#21)",
+   "chat_template_sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+   "saved_as": "upstream/history/1db3cff1840c.chat_template.jinja"
+  },
+  {
+   "commit": "7d4c97e54145f8ffd1a4dd1b4986a5015a517842",
+   "date": "2026-04-10T16:35:25.000Z",
+   "title": "Update response schema (#22)",
+   "chat_template_sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+   "saved_as": "upstream/history/7d4c97e54145.chat_template.jinja"
+  },
+  {
+   "commit": "4c55b528bdc40b4e79ed7fd4e2f8e46fa5aaed5a",
+   "date": "2026-04-28T17:33:25.000Z",
+   "title": "fix(chat_template): update SI and tool call handling (#36)",
+   "chat_template_sha256": "94899c0f917d93f6fe81c95744d1e8ddab2d21d39228d2e4aec1fb2a25bff413",
+   "saved_as": "upstream/history/4c55b528bdc4.chat_template.jinja"
+  },
+  {
+   "commit": "b2a81a03d25f927590a91d84ba43f96e8ef7349f",
+   "date": "2026-05-18T16:25:07.000Z",
+   "title": "fix(chat_template): Emit multimodal placeholders in tool response content-parts (#38)",
+   "chat_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+   "saved_as": "upstream/history/b2a81a03d25f.chat_template.jinja"
+  },
+  {
+   "commit": "35b4173cf6211bf5ee1f4c3c8d97cf2a0d89c122",
+   "date": "2026-07-15T16:35:17.000Z",
+   "title": "fix: chat template — null handling, reasoning preservation, turn-tag balance, input validation (#47)",
+   "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+   "saved_as": "upstream/history/35b4173cf621.chat_template.jinja"
+  }
+ ],
+ "gguf_embedded": {
+  "gguf_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+  "source_repo": "unsloth/gemma-4-26B-A4B-it-GGUF",
+  "downloaded_revision": "c099eb48e663fd284577b04978a94ffccb261841",
+  "file": {
+   "blob_oid": "f5c4a0fda98ac1b2d4a4d0133995b50fc871e5a3",
+   "size": 16947541728,
+   "lfs_sha256": "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f",
+   "last_commit": {
+    "id": "c099eb48e663fd284577b04978a94ffccb261841",
+    "date": "2026-07-17T13:00:49.000Z",
+    "title": "Added Gemma official chat template update"
+   }
+  },
+  "identical_to_repo_main_on_check_date": true,
+  "metadata": {
+   "file": "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+   "templates": {
+    "tokenizer.chat_template": {
+     "saved_as": "gguf-embedded.jinja",
+     "len": 18922,
+     "sha256": "845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b"
+    }
+   },
+   "general.architecture": "gemma4",
+   "general.type": "model",
+   "general.sampling.top_k": 64,
+   "general.sampling.top_p": 0.949999988079071,
+   "general.sampling.temp": 1.0,
+   "general.name": "Gemma-4-26B-A4B-It",
+   "general.finetune": "it",
+   "general.basename": "Gemma-4-26B-A4B-It",
+   "general.quantized_by": "Unsloth",
+   "general.size_label": "26B-A4B",
+   "general.license": "apache-2.0",
+   "general.license.link": "https://ai.google.dev/gemma/docs/gemma_4_license",
+   "general.repo_url": "https://huggingface.co/unsloth",
+   "general.base_model.count": 1,
+   "general.base_model.0.name": "Gemma 4 26B A4B It",
+   "general.base_model.0.organization": "Google",
+   "general.base_model.0.repo_url": "https://huggingface.co/google/gemma-4-26B-A4B-it",
+   "general.tags": [
+    "unsloth",
+    "image-text-to-text"
+   ],
+   "general.quantization_version": 2,
+   "general.file_type": 15,
+   "special_ids": {
+    "bos_token_id": [
+     2,
+     "<bos>"
+    ],
+    "eos_token_id": [
+     106,
+     "<turn|>"
+    ],
+    "padding_token_id": [
+     0,
+     "<pad>"
+    ],
+    "unknown_token_id": [
+     3,
+     "<unk>"
+    ]
+   }
+  },
+  "saved_as": "gguf-embedded.jinja",
+  "sha256": "845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b",
+  "author": "Unsloth: July canonical minus header comment + string-arguments fallback"
+ },
+ "other_copies": [
+  {
+   "path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gemma4-26b-nvfp4/chat_template.jinja",
+   "sha256": "94899c0f917d93f6fe81c95744d1e8ddab2d21d39228d2e4aec1fb2a25bff413",
+   "equals": "upstream 4c55b528 (2026-04-28, #36)",
+   "hf_download_metadata": "nvidia/Gemma-4-26B-A4B-NVFP4@a19cfe00, blob f62ca843 (still main on 2026-10-29)"
+  },
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/google-gemma-4-31B-it.jinja",
+   "sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+   "equals": "upstream 1db3cff1 (2026-04-10, #21) of the 26B-A4B repo",
+   "llama_cpp_checkout": "5e03a1ff4"
+  },
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/google-gemma-4-31B-it-interleaved.jinja",
+   "sha256": "65f93a25708c952457106a30e185ba7beffddd726121c8d7e3f3e08b23c16c67",
+   "equals": "llama.cpp-local variant of the 2026-04-02 release (test fixture only)"
+  }
+ ],
+ "kwargs_surface": {
+  "canonical": [
+   "messages",
+   "tools",
+   "add_generation_prompt",
+   "bos_token",
+   "enable_thinking",
+   "preserve_thinking"
+  ],
+  "globals": [
+   "raise_exception"
+  ]
+ },
+ "llama_cpp_5e03a1ff4": {
+  "canonical": {
+   "detected_format": "peg-gemma4",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": false,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  },
+  "gguf": {
+   "detected_format": "peg-gemma4",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": false,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  },
+  "disk-nvfp4-2026-04-28": {
+   "detected_format": "peg-gemma4",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": false,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  },
+  "llamacpp-bundled-2026-04-10": {
+   "detected_format": "peg-gemma4",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": false,
+    "supports_reasoning_effort": false,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  }
+ },
+ "pins": {
+  "generic_chat_template_file": {
+   "file": "canonical.jinja",
+   "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+   "source": "google/gemma-4-26B-A4B-it@4d7ae498 (file commit 35b4173c, 2026-07-15, #47)"
+  },
+  "oracle": {
+   "primary": "canonical.jinja ae53464b... under Jinja2 (transformers env)",
+   "parse_rules": "tokenizer_config.json response_template @4d7ae498 sha256 9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+  },
+  "kwargs": {
+   "enable_thinking": "true (explicit; template default false)",
+   "preserve_thinking": "false = Google-documented behaviour (template default); llama-server default flips it to true -> pass --no-reasoning-preserve unless deliberately testing preserve",
+   "bos_token": "<bos> (llama.cpp strips it and adds the BOS token)"
+  }
+ },
+ "kwargs_inventory_raw": {
+  "gemma canonical(07-15)": [
+   "add_generation_prompt",
+   "bos_token",
+   "captured_content",
+   "continue_same_model_turn",
+   "continues_into_next",
+   "enable_thinking",
+   "follow",
+   "has_content",
+   "messages",
+   "next_nt",
+   "ns_args",
+   "ns_items",
+   "ns_tname",
+   "ns_tool_scan",
+   "ns_tr_out",
+   "ns_txt",
+   "preserve_thinking",
+   "raise_exception",
+   "response_declaration",
+   "role",
+   "thinking_gate",
+   "thinking_text",
+   "tool_body",
+   "tools"
+  ],
+  "gemma gguf(unsloth)": [
+   "add_generation_prompt",
+   "argstr",
+   "bos_token",
+   "captured_content",
+   "continue_same_model_turn",
+   "continues_into_next",
+   "enable_thinking",
+   "follow",
+   "has_content",
+   "messages",
+   "next_nt",
+   "ns_args",
+   "ns_items",
+   "ns_tname",
+   "ns_tool_scan",
+   "ns_tr_out",
+   "ns_txt",
+   "preserve_thinking",
+   "response_declaration",
+   "role",
+   "thinking_gate",
+   "thinking_text",
+   "tool_body",
+   "tools"
+  ]
+ }
+}

@@ -1,0 +1,52 @@
+# Gemma 4 26B A4B, native tool-call DSL (<|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>).
+# Sources: docs/research/2026-10-29/gemma4.md, docs/m0/measurements.md.
+id = "gemma-4-26b-a4b"
+family = "gemma4"
+display_name = "Gemma 4 26B A4B"
+
+[detect]
+probe = { text = "<|tool_call>", id = 48 }
+name_hints = ["gemma-4-26b"]
+
+[tokens]
+structural = [
+    "<|turn>", "<turn|>", "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
+    "<|tool_response>", "<tool_response|>", '<|"|>', "<|think|>", "<|channel>", "<channel|>",
+]
+eog = [1, 106, 50] # <eos>, <turn|>, <|tool_response>
+specials = [
+    "<pad>", "<eos>", "<bos>", "<unk>", "<mask>",
+    "<|image>", "<|audio>", "<|image|>", "<|audio|>", "<image|>", "<audio|>", "<|video|>",
+]
+bos = 2            # token-array prompts get no BOS from the server: the agent adds it
+
+[sampling.main]
+temperature = 1.0
+top_p = 0.95
+top_k = 64
+min_p = 0.0
+
+[reasoning]
+control = "toggle"              # <|think|> in the system turn: fixed for the session
+levels = ["on", "off"]
+default = "on"                  # the 26B degrades sharply in agent tasks without thinking
+history = "preserve"            # preserve_thinking=true (llama.cpp default); A/B against strip
+
+[context]
+working_max = 65536             # MRCR v2 128K is only 44.1%
+compact_at = 0.65
+
+[template]
+dir = "profiles/templates/gemma-4-26B-A4B-it"
+file_sha256 = "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+# enable_thinking/preserve_thinking come from [reasoning] and are always sent explicitly:
+# the template defaults are false/false, llama-server defaults to true/true.
+# sha256 of the served form, as /props reports it (template.rs: served_form)
+known = [
+    { sha256 = "6a1015c47ccfcfa67c3b772385bccee357a4d37c3cda37bd202e9047f391ab82", verdict = "canonical", note = "google/gemma-4-26B-A4B-it, 2026-07-15" },
+    { sha256 = "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b", verdict = "ok", note = "Unsloth GGUF template (file 845f1ee4); renders byte-identically to canonical under llama.cpp" },
+]
+
+[server]
+recommended_flags = "-c 131072 -np 1 -fa on -ngl 99 -b 2048 -ub 2048 --ctx-checkpoints 16 --checkpoint-min-step 2048 --cache-ram 12288 --chat-template-file profiles/templates/gemma-4-26B-A4B-it/canonical.jinja"
+notes = "No --swa-full (about +25 GiB at 128K). KV f16, never below q8_0."

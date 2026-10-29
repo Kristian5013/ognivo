@@ -1,0 +1,9 @@
+date_utc=2026-10-29T14:15:51Z
+llama_bench=/home/kristian/.cache/llama-pinned/build-12cc59ba4914/bin/llama-bench
+llama: version: 0.7.0-dev (build 11924, commit 12cc59ba4)
+llama: built with GNU 15.3.0 for Linux x86_64
+gpu: NVIDIA GeForce RTX 5090 Laptop GPU, 580.178.04, 24463 MiB, 34, [N/A], 3090 MHz
+cuda: Build cuda_13.3.r13.3/compiler.38244171_0
+power_profile: Active profile: Performance
+kernel: 7.3.0-9-generic
+gpu_temp_after: 60

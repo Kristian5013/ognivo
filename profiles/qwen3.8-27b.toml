@@ -1,0 +1,55 @@
+# Qwen3.8-27B (arch qwen35: 16 x (3 Gated DeltaNet + 1 full attention) + MTP head), XML tool calls
+# (<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>).
+# Sources: docs/research/2026-10-29/qwen38.md, templates.md; docs/m0/measurements.md.
+id = "qwen3.8-27b"
+family = "qwen-xml"
+display_name = "Qwen3.8-27B"
+
+[detect]
+probe = { text = "<tool_call>", id = 248058 }
+name_hints = ["qwen3.8-27b"]
+
+[tokens]
+structural = [
+    "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>",
+    "<think>", "</think>", "<tool_response>", "</tool_response>",
+]
+eog = [248046, 248044] # <|im_end|>, <|endoftext|>
+specials = [
+    "<|endoftext|>", "<|object_ref_start|>", "<|object_ref_end|>", "<|box_start|>", "<|box_end|>",
+    "<|quad_start|>", "<|quad_end|>", "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>",
+    "<|image_pad|>", "<|video_pad|>", "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>", "<|fim_pad|>",
+    "<|repo_name|>", "<|file_sep|>", "<|audio_start|>", "<|audio_end|>", "<|audio_pad|>",
+    "<tts_pad>", "<tts_text_bos>", "<tts_text_eod>", "<tts_text_bos_single>",
+]
+# No BOS.
+
+[sampling.main]
+# Model card, thinking mode; min_p must be sent as 0 (llama.cpp keeps 0.05 otherwise).
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[reasoning]
+control = "effort"              # a level in the system turn; "high" is an error in the official template
+levels = ["xhigh", "medium", "low", "off"]
+default = "medium"              # matches xhigh on agentic coding at a fraction of the tokens
+history = "preserve"            # official default: every past reasoning block stays (append-only, perfect KV reuse)
+
+[context]
+working_max = 98304             # instant EOS beyond ~130K (#27756); decode 46 -> 34 tok/s from 0 to 96K
+compact_at = 0.90               # compaction near 90K; the recurrent state cannot be rewound, so append-only
+
+[template]
+dir = "profiles/templates/Qwen3.8-27B"
+file_sha256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+# sha256 of the served form, as /props reports it (template.rs: served_form)
+known = [
+    { sha256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041", verdict = "canonical", note = "Qwen/Qwen3.8-27B, 2026-08-13" },
+    { sha256 = "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce", verdict = "ok", note = "Unsloth GGUF template: merges system/developer messages and maps high to xhigh" },
+]
+
+[server]
+recommended_flags = "-c 98304 -np 1 -fa on -ngl 99 -b 2048 -ub 1024 --ctx-checkpoints 16 --cache-ram 12288 --chat-template-file profiles/templates/Qwen3.8-27B/canonical.jinja"
+notes = "Dense hybrid: ~46 tok/s decode, 64K cache miss ~48 s on the RTX 5090 Laptop. Each checkpoint holds the 150 MiB recurrent state. For 131K use -ctk q8_0 -ctv q8_0. MTP (--spec-type draft-mtp) only after a soak test. Never offload DeltaNet layers to CPU (#30906)."

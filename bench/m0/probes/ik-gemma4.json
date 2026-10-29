@@ -1,0 +1,200 @@
+{
+  "url": "http://127.0.0.1:18095",
+  "health": [
+    200,
+    {
+      "status": "ok",
+      "slots_idle": 1,
+      "slots_processing": 0
+    }
+  ],
+  "props": {
+    "build_info": null,
+    "model_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+    "total_slots": 1,
+    "modalities": {
+      "vision": false,
+      "audio": false
+    },
+    "chat_template_caps": {},
+    "n_ctx": 16384,
+    "chat_template_sha256": "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b",
+    "default_sampling": {
+      "temperature": null,
+      "top_k": null,
+      "top_p": null,
+      "min_p": null,
+      "repeat_penalty": null
+    }
+  },
+  "models": {
+    "object": "list",
+    "data": [
+      {
+        "id": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "object": "model",
+        "created": 1793284058,
+        "owned_by": "llamacpp",
+        "meta": {
+          "vocab_type": 2,
+          "n_vocab": 262144,
+          "n_ctx_train": 262144,
+          "n_embd": 2816,
+          "n_params": 25971340574,
+          "size": 17716055160
+        },
+        "max_model_len": 16384
+      }
+    ],
+    "models": [
+      {
+        "slug": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "display_name": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        "description": null,
+        "default_reasoning_level": null,
+        "supported_reasoning_levels": [],
+        "shell_type": "default",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "additional_speed_tiers": [],
+        "service_tiers": [],
+        "default_service_tier": null,
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "",
+        "model_messages": null,
+        "supports_reasoning_summaries": false,
+        "default_reasoning_summary": "auto",
+        "support_verbosity": false,
+        "default_verbosity": null,
+        "apply_patch_tool_type": null,
+        "web_search_tool_type": "text",
+        "truncation_policy": {
+          "mode": "tokens",
+          "limit": 16384
+        },
+        "supports_parallel_tool_calls": false,
+        "supports_image_detail_original": false,
+        "context_window": 16384,
+        "max_context_window": 16384,
+        "auto_compact_token_limit": 14745,
+        "effective_context_window_percent": 95,
+        "experimental_supported_tools": [],
+        "input_modalities": [
+          "text"
+        ],
+        "supports_search_tool": false,
+        "use_responses_lite": false,
+        "auto_review_model_override": null,
+        "tool_mode": null,
+        "multi_agent_version": null
+      }
+    ]
+  },
+  "slots_endpoint_http_status": 200,
+  "family": "gemma4",
+  "special_tokens": {
+    "<|turn>": {
+      "id": 105,
+      "parse_special_false": [
+        105
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<turn|>": {
+      "id": 106,
+      "parse_special_false": [
+        106
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|tool_call>": {
+      "id": 48,
+      "parse_special_false": [
+        48
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<tool_call|>": {
+      "id": 49,
+      "parse_special_false": [
+        49
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|tool_response>": {
+      "id": 50,
+      "parse_special_false": [
+        50
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|\"|>": {
+      "id": 52,
+      "parse_special_false": [
+        52
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<|channel>": {
+      "id": 100,
+      "parse_special_false": [
+        100
+      ],
+      "recognised_without_parse_special": true
+    },
+    "<channel|>": {
+      "id": 101,
+      "parse_special_false": [
+        101
+      ],
+      "recognised_without_parse_special": true
+    }
+  },
+  "stream_ids": {
+    "prompt_tokens": 39,
+    "stream_ids": 0,
+    "predicted_n": 42,
+    "stream_ids_complete": false,
+    "detokenize_matches_content": false,
+    "detokenize_without_last_matches_content": false,
+    "last_id": null,
+    "last_id_text": null,
+    "n_probs_ids": 0,
+    "n_probs_ids_complete": false,
+    "stop_type": null,
+    "sample": "🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語\n🚀 ⚠️ └── ├── │ ✅ 🔥 привет 日本語",
+    "errors": []
+  },
+  "accepts": {
+    "grammar_lazy_word_trigger": {
+      "http_status": 200,
+      "error": null
+    },
+    "reasoning_budget_fields": {
+      "http_status": 200,
+      "error": null
+    },
+    "logit_bias_ban": {
+      "http_status": 200,
+      "error": null
+    }
+  },
+  "chat_tools": {
+    "http_status": 200,
+    "finish_reason": "tool_calls",
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_time",
+          "arguments": "{\"city\":\"Paris\"}"
+        },
+        "id": "bJEWtfFGLps290SC404cnhyIR6Ya95Y4"
+      }
+    ],
+    "has_reasoning_content": true,
+    "content": ""
+  }
+}

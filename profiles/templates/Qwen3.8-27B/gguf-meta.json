@@ -1,0 +1,220 @@
+{
+ "file": "Qwen3.8-27B-Q4_0.gguf",
+ "gguf_version": 3,
+ "n_tensors": 866,
+ "templates": {
+  "tokenizer.chat_template": {
+   "saved_as": "gguf-embedded.jinja",
+   "len": 9993,
+   "sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+  }
+ },
+ "general.architecture": "qwen35",
+ "general.type": "model",
+ "general.sampling.top_k": 20,
+ "general.sampling.top_p": 0.949999988079071,
+ "general.sampling.temp": 1.0,
+ "general.name": "Qwen3.8-27B",
+ "general.basename": "Qwen3.8-27B",
+ "general.description": "Renewal of the beloved Qwen model, delivering unmatched intelligence density.",
+ "general.quantized_by": "Unsloth",
+ "general.size_label": "27B",
+ "general.license": "apache-2.0",
+ "general.repo_url": "https://huggingface.co/unsloth",
+ "general.base_model.count": 1,
+ "general.base_model.0.name": "Qwen3.8 27B",
+ "general.base_model.0.organization": "Qwen",
+ "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen3.8-27B",
+ "general.tags": [
+  "unsloth"
+ ],
+ "tokenizer.ggml.model": "gpt2",
+ "tokenizer.ggml.pre": "qwen35",
+ "tokenizer.ggml.eos_token_id": 248046,
+ "tokenizer.ggml.padding_token_id": 248055,
+ "tokenizer.ggml.bos_token_id": 248044,
+ "general.quantization_version": 2,
+ "general.file_type": 2,
+ "special_ids": {
+  "bos_token_id": [
+   248044,
+   "<|endoftext|>"
+  ],
+  "eos_token_id": [
+   248046,
+   "<|im_end|>"
+  ],
+  "padding_token_id": [
+   248055,
+   "<|vision_pad|>"
+  ]
+ },
+ "n_control_or_user_defined": 33,
+ "control_or_user_defined_sample": [
+  [
+   248044,
+   "<|endoftext|>",
+   3
+  ],
+  [
+   248045,
+   "<|im_start|>",
+   3
+  ],
+  [
+   248046,
+   "<|im_end|>",
+   3
+  ],
+  [
+   248047,
+   "<|object_ref_start|>",
+   3
+  ],
+  [
+   248048,
+   "<|object_ref_end|>",
+   3
+  ],
+  [
+   248049,
+   "<|box_start|>",
+   3
+  ],
+  [
+   248050,
+   "<|box_end|>",
+   3
+  ],
+  [
+   248051,
+   "<|quad_start|>",
+   3
+  ],
+  [
+   248052,
+   "<|quad_end|>",
+   3
+  ],
+  [
+   248053,
+   "<|vision_start|>",
+   3
+  ],
+  [
+   248054,
+   "<|vision_end|>",
+   3
+  ],
+  [
+   248055,
+   "<|vision_pad|>",
+   3
+  ],
+  [
+   248056,
+   "<|image_pad|>",
+   3
+  ],
+  [
+   248057,
+   "<|video_pad|>",
+   3
+  ],
+  [
+   248058,
+   "<tool_call>",
+   4
+  ],
+  [
+   248059,
+   "</tool_call>",
+   4
+  ],
+  [
+   248060,
+   "<|fim_prefix|>",
+   3
+  ],
+  [
+   248061,
+   "<|fim_middle|>",
+   3
+  ],
+  [
+   248062,
+   "<|fim_suffix|>",
+   3
+  ],
+  [
+   248063,
+   "<|fim_pad|>",
+   3
+  ],
+  [
+   248064,
+   "<|repo_name|>",
+   3
+  ],
+  [
+   248065,
+   "<|file_sep|>",
+   3
+  ],
+  [
+   248066,
+   "<tool_response>",
+   4
+  ],
+  [
+   248067,
+   "</tool_response>",
+   4
+  ],
+  [
+   248068,
+   "<think>",
+   4
+  ],
+  [
+   248069,
+   "</think>",
+   4
+  ],
+  [
+   248070,
+   "<|audio_start|>",
+   3
+  ],
+  [
+   248071,
+   "<|audio_end|>",
+   3
+  ],
+  [
+   248072,
+   "<tts_pad>",
+   3
+  ],
+  [
+   248073,
+   "<tts_text_bos>",
+   3
+  ],
+  [
+   248074,
+   "<tts_text_eod>",
+   3
+  ],
+  [
+   248075,
+   "<tts_text_bos_single>",
+   3
+  ],
+  [
+   248076,
+   "<|audio_pad|>",
+   3
+  ]
+ ]
+}

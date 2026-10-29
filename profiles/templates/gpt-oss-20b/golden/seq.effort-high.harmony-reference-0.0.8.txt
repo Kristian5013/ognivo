@@ -1,0 +1,56 @@
+<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.
+Knowledge cutoff: 2024-06
+Current date: 2026-10-29
+
+Reasoning: high
+
+# Valid channels: analysis, commentary, final. Channel must be included for every message.
+Calls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions
+
+You are a coding agent working in /repo. Keep answers short.
+
+# Tools
+
+## functions
+
+namespace functions {
+
+// Read a UTF-8 file from the workspace.
+// Returns numbered lines.
+type read_file = (_: {
+// Workspace-relative path
+path: string,
+// First line (1-based)
+start_line?: number,
+// Last line or null for EOF
+end_line?: number | null,
+}) => any;
+
+// Apply a patch in the *** Begin Patch format.
+type apply_patch = (_: {
+// Patch text
+patch: string,
+// Only validate
+dry_run?: boolean, // default: false
+}) => any;
+
+// Run a shell command.
+type run_command = (_: {
+// Command line
+cmd: string,
+// Working directory (mixed-case key on purpose)
+Cwd?: string,
+// Timeout in seconds
+timeout_s?: number,
+// Extra environment
+env?:     // Extra environment
+{
+    },
+}) => any;
+
+} // namespace functions<|end|><|start|>user<|message|>The test `add_works` fails. Fix it.<|end|><|start|>assistant to=functions.read_file<|channel|>commentary <|constrain|>json<|message|>{"path": "src/lib.rs", "start_line": 1, "end_line": null}<|call|><|start|>functions.read_file to=assistant<|channel|>commentary<|message|>1| pub fn add(a: i32, b: i32) -> i32 {
+2|     a - b // "bug" ünï → ✓ 😀
+3| }
+<|end|><|start|>assistant to=functions.apply_patch<|channel|>commentary <|constrain|>json<|message|>{"patch": "*** Begin Patch\n*** Update File: src/lib.rs\n-    a - b // \"bug\"\n+    a + b\n*** End Patch", "dry_run": false}<|call|><|start|>functions.apply_patch to=assistant<|channel|>commentary<|message|>{"ok": true, "files": ["src/lib.rs"]}<|end|><|start|>assistant<|channel|>final<|message|>Fixed: `add` now returns `a + b`.<|end|><|start|>user<|message|>Run the tests.<|end|><|start|>assistant<|channel|>analysis<|message|>Run cargo test.<|end|><|start|>assistant to=functions.run_command<|channel|>commentary <|constrain|>json<|message|>{"cmd": "cargo test -q", "Cwd": "/repo", "timeout_s": 120, "env": {"RUST_BACKTRACE": "1"}}<|call|><|start|>functions.run_command to=assistant<|channel|>commentary<|message|>running 1 test
+.
+test result: ok. 1 passed; 0 failed<|end|><|start|>assistant

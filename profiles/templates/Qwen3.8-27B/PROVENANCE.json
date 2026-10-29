@@ -1,0 +1,228 @@
+{
+ "checked_on": "2026-10-29",
+ "canonical": {
+  "repo": "Qwen/Qwen3.8-27B",
+  "main_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "file": "chat_template.jinja",
+  "blob_oid": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3",
+  "size": 8952,
+  "lfs_sha256": null,
+  "last_commit": {
+   "id": "412f8b6bd7f5e922bea27645dcc3c80246b7f6a8",
+   "date": "2026-08-13T10:16:05.000Z",
+   "title": "Upload chat_template.jinja with huggingface_hub"
+  },
+  "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+  "url": "https://huggingface.co/Qwen/Qwen3.8-27B/resolve/1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0/chat_template.jinja",
+  "tokenizer_config_json": {
+   "sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+   "has_chat_template": true,
+   "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "identical_to_chat_template_jinja": true,
+   "last_commit": {
+    "id": "452438ec4174bda2b53c6bedd8f9c15ca721ea37",
+    "date": "2026-08-13T10:15:48.000Z",
+    "title": "Upload tokenizer_config.json with huggingface_hub"
+   }
+  },
+  "saved_as": "canonical.jinja"
+ },
+ "upstream_history": [
+  {
+   "commit": "72a217afab8029b39e4af1c7273a829995a3dbaf",
+   "date": "2026-08-13T08:23:30.000Z",
+   "title": "Upload folder using huggingface_hub",
+   "chat_template_sha256": "49d20d090bd09c0030f3f12d5e05c5e2c57c6864825ef2f640ca73e7578dfe24",
+   "saved_as": "upstream/history/72a217afab80.chat_template.jinja"
+  },
+  {
+   "commit": "452438ec4174bda2b53c6bedd8f9c15ca721ea37",
+   "date": "2026-08-13T10:15:48.000Z",
+   "title": "Upload tokenizer_config.json with huggingface_hub",
+   "chat_template_sha256": "49d20d090bd09c0030f3f12d5e05c5e2c57c6864825ef2f640ca73e7578dfe24",
+   "saved_as": "upstream/history/452438ec4174.chat_template.jinja"
+  },
+  {
+   "commit": "412f8b6bd7f5e922bea27645dcc3c80246b7f6a8",
+   "date": "2026-08-13T10:16:05.000Z",
+   "title": "Upload chat_template.jinja with huggingface_hub",
+   "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "saved_as": "upstream/history/412f8b6bd7f5.chat_template.jinja"
+  }
+ ],
+ "gguf_embedded": {
+  "gguf_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+  "source_repo": "unsloth/Qwen3.8-27B-GGUF",
+  "downloaded_revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "file": {
+   "blob_oid": "6d2baf8fc599e207662ad3039f2699efc6688119",
+   "size": 16056478688,
+   "lfs_sha256": "ede16c7b36e578ca87a8c70e011e4b4633a32c831c0ce76d0f474582384e671d",
+   "last_commit": {
+    "id": "8fe26993eb8842a62935aa0fbcd07816ba89bc1d",
+    "date": "2026-08-14T16:06:40.000Z",
+    "title": "Add Unsloth style chat template - UD all fine"
+   }
+  },
+  "identical_to_repo_main_on_check_date": true,
+  "metadata": {
+   "file": "Qwen3.8-27B-Q4_0.gguf",
+   "templates": {
+    "tokenizer.chat_template": {
+     "saved_as": "gguf-embedded.jinja",
+     "len": 9993,
+     "sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+    }
+   },
+   "general.architecture": "qwen35",
+   "general.type": "model",
+   "general.sampling.top_k": 20,
+   "general.sampling.top_p": 0.949999988079071,
+   "general.sampling.temp": 1.0,
+   "general.name": "Qwen3.8-27B",
+   "general.basename": "Qwen3.8-27B",
+   "general.description": "Renewal of the beloved Qwen model, delivering unmatched intelligence density.",
+   "general.quantized_by": "Unsloth",
+   "general.size_label": "27B",
+   "general.license": "apache-2.0",
+   "general.repo_url": "https://huggingface.co/unsloth",
+   "general.base_model.count": 1,
+   "general.base_model.0.name": "Qwen3.8 27B",
+   "general.base_model.0.organization": "Qwen",
+   "general.base_model.0.repo_url": "https://huggingface.co/Qwen/Qwen3.8-27B",
+   "general.tags": [
+    "unsloth"
+   ],
+   "general.quantization_version": 2,
+   "general.file_type": 2,
+   "special_ids": {
+    "bos_token_id": [
+     248044,
+     "<|endoftext|>"
+    ],
+    "eos_token_id": [
+     248046,
+     "<|im_end|>"
+    ],
+    "padding_token_id": [
+     248055,
+     "<|vision_pad|>"
+    ]
+   }
+  },
+  "saved_as": "gguf-embedded.jinja",
+  "sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce",
+  "author": "Unsloth (\"Unsloth fixes - developer role, merged system messages, tool calling\")"
+ },
+ "other_copies": [
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/Qwen3.5-4B.jinja",
+   "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+   "equals": "none - Qwen3.5 ancestor (no reasoning_effort/preserve_thinking; non-string args via |string)"
+  }
+ ],
+ "kwargs_surface": {
+  "canonical": [
+   "messages",
+   "tools",
+   "add_generation_prompt",
+   "enable_thinking",
+   "preserve_thinking",
+   "reasoning_effort",
+   "add_vision_id"
+  ],
+  "globals": [
+   "raise_exception"
+  ]
+ },
+ "llama_cpp_5e03a1ff4": {
+  "canonical": {
+   "detected_format": "peg-native",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": true,
+    "supports_reasoning_effort": true,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  },
+  "gguf": {
+   "detected_format": "peg-native",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": true,
+    "supports_reasoning_effort": true,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  },
+  "upstream-initial-72a217af": {
+   "detected_format": "peg-native",
+   "caps": {
+    "supports_object_arguments": true,
+    "supports_parallel_tool_calls": true,
+    "supports_preserve_reasoning": true,
+    "supports_reasoning_effort": true,
+    "supports_string_content": true,
+    "supports_system_role": true,
+    "supports_tool_calls": true,
+    "supports_tools": true,
+    "supports_typed_content": true
+   }
+  }
+ },
+ "pins": {
+  "generic_chat_template_file": {
+   "file": "canonical.jinja",
+   "sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+   "source": "Qwen/Qwen3.8-27B@1d4bf0f2 (file commit 412f8b6b, 2026-08-13)"
+  },
+  "oracle": {
+   "primary": "canonical.jinja c3cf9e34... under Jinja2 (transformers env)"
+  },
+  "kwargs": {
+   "enable_thinking": "true (explicit)",
+   "preserve_thinking": "true (explicit; template and model-card default)",
+   "reasoning_effort": "one of xhigh|medium|low, explicit (undefined => xhigh line injected into system; \"high\" raises)",
+   "add_vision_id": "leave undefined unless multi-image numbering is wanted",
+   "llama_server": "--reasoning-effort xhigh|medium|low (never high); keep default --reasoning-preserve"
+  }
+ },
+ "kwargs_inventory_raw": {
+  "qwen canonical": [
+   "add_generation_prompt",
+   "add_vision_id",
+   "content",
+   "enable_thinking",
+   "messages",
+   "preserve_thinking",
+   "raise_exception",
+   "reasoning_content",
+   "reasoning_effort",
+   "resolved_reasoning_effort",
+   "tools"
+  ],
+  "qwen gguf(unsloth)": [
+   "add_generation_prompt",
+   "add_vision_id",
+   "content",
+   "enable_thinking",
+   "messages",
+   "preserve_thinking",
+   "raise_exception",
+   "reasoning_content",
+   "reasoning_effort",
+   "resolved_reasoning_effort",
+   "sys_content",
+   "tools"
+  ]
+ }
+}

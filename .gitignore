@@ -1,0 +1,25 @@
+# Rust
+/target/
+
+# Node / Electron
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+
+# Python (dev-only harnesses)
+__pycache__/
+*.pyc
+.venv/
+
+# Local server logs from probe runs (reports stay)
+bench/**/*.server.log
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+
+# ik_llama.cpp writes this into the working directory
+llama.log
