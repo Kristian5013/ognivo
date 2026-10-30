@@ -1,0 +1,44 @@
+# Packages to hold for the length of an M0 baseline campaign (owner's decision 2026-10-30).
+# unattended-upgrades updates the whole archive every morning (06:00-07:00). An NVIDIA userspace
+# update without a reboot leaves the loaded kernel module mismatched (nvidia-smi fails: the next
+# night ends as gpu-busy), and a podman/passt/runc update changes the container runtime between
+# nights. The kernel meta-packages are held too, so no new kernel arrives without its matching
+# NVIDIA module. Lines starting with # are comments; the rest are package names.
+#
+#   hold:    sudo apt-mark hold $(grep -v '^#' hold-packages.txt)
+#   check:   apt-mark showhold
+#   release: sudo apt-mark unhold $(grep -v '^#' hold-packages.txt)    (after the campaign)
+#
+# Versions on 2026-10-30: NVIDIA 580.178.04-0ubuntu1, kernel 7.3.0-9.9, podman 5.8.6+ds1-2,
+# passt 0.0~git20260728.f8df3f1-1, conmon 2.1.13+ds1-2, containerd.io (runc) 2.4.2-3.
+nvidia-driver-580-open
+nvidia-utils-580
+nvidia-compute-utils-580
+nvidia-kernel-common-580
+nvidia-kernel-source-580-open
+nvidia-firmware-580-580.178.04
+xserver-xorg-video-nvidia-580
+libnvidia-cfg1-580:amd64
+libnvidia-common-580
+libnvidia-compute-580:amd64
+libnvidia-compute-580:i386
+libnvidia-decode-580:amd64
+libnvidia-decode-580:i386
+libnvidia-encode-580:amd64
+libnvidia-encode-580:i386
+libnvidia-extra-580:amd64
+libnvidia-fbc1-580:amd64
+libnvidia-fbc1-580:i386
+libnvidia-gl-580:amd64
+libnvidia-gl-580:i386
+linux-modules-nvidia-580-open-7.3.0-9-generic
+linux-modules-nvidia-580-open-generic-hwe-26.04
+linux-generic-hwe-26.04
+linux-image-generic-hwe-26.04
+linux-headers-generic-hwe-26.04
+podman
+passt
+conmon
+netavark
+aardvark-dns
+containerd.io

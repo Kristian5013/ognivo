@@ -1,0 +1,198 @@
+{
+  "schema": "ognivo.m0.tasks/1",
+  "date": "2026-10-30",
+  "note": "Hidden tests, reference solutions and prompts stay outside git (owner's decision 2026-10-30: a public repository would make them training data). task_sha256 = scripts/manifest.py task <dir> (the task dir plus its _common/<group>); the same value is in every result.json as versions.task_sha256.",
+  "location": "~/.local/share/ognivo/m0-baseline/tasks",
+  "backup": {
+    "file": "~/.local/share/ognivo/backups/m0-baseline-tasks-2026-10-30.tar.gz",
+    "sha256": "991fab7b3899c5e6d7a25e4725b86eae22d8c0dbe5de679cc4f98e8adc2237d1"
+  },
+  "tasks": [
+    {
+      "id": "asusctl-armoury-attr-names",
+      "role": "selected",
+      "group": "asusctl",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "title": "asus-armoury: PPT attributes misclassified and nv_base_tgp named wrongly",
+      "task_sha256": "dc308de702748134fd229312e812d288b237f134699aca9a271dd217b29f5701",
+      "token_hazard": null
+    },
+    {
+      "id": "asusctl-aura-match-tests",
+      "role": "reserve",
+      "group": "asusctl",
+      "category": "test-writing",
+      "difficulty": "medium",
+      "title": "Write regression tests for LedSupportFile::match_device (aura board matching)",
+      "task_sha256": "eb587e078cdc69e029b2ff9d2fa8753a80a1e2d243a53c2d668dbe50261f8ad2",
+      "token_hazard": null
+    },
+    {
+      "id": "asusctl-aura-ron-ci",
+      "role": "reserve",
+      "group": "asusctl",
+      "category": "build-or-terminal-debugging",
+      "difficulty": "easy",
+      "title": "rog_aura test suite broken by the new G615JHR entry in aura_support.ron",
+      "task_sha256": "29a08f761b1eecf9ba2915a7fd8e16fa787ada1378128f4629e7d3a81b3ca323",
+      "token_hazard": null
+    },
+    {
+      "id": "asusctl-g635l-anime-packets",
+      "role": "selected",
+      "group": "asusctl",
+      "category": "multi-file",
+      "difficulty": "hard",
+      "title": "G635L AniMe Matrix shows garbled frames (USB packet chunking and headers)",
+      "task_sha256": "d3085f0c1efd013cfd4e7336cc2957dd3d8f90e8d807e181fd08bffb5233d575",
+      "token_hazard": null
+    },
+    {
+      "id": "asusctl-profile-lowpower-parse",
+      "role": "reserve",
+      "group": "asusctl",
+      "category": "feature",
+      "difficulty": "easy",
+      "title": "Accept LowPower / low_power / lowpower as platform profile names",
+      "task_sha256": "1fc55dd0b8639574c3227fb0a5969f85e7995fffc9dbbf68407f1cdda25dcdab",
+      "token_hazard": null
+    },
+    {
+      "id": "cforge-cpuset-tests",
+      "role": "selected",
+      "group": "cforge",
+      "category": "test-writing",
+      "difficulty": "medium",
+      "title": "Write the CpuSet test suite (graded against 12 hidden mutants)",
+      "task_sha256": "cc1ee56fe9f01a0c57b2465bf9ab6547693fec04bbefbabae3aa238f401dca7e",
+      "token_hazard": null
+    },
+    {
+      "id": "cforge-inspect-metadata",
+      "role": "reserve",
+      "group": "cforge",
+      "category": "feature",
+      "difficulty": "hard",
+      "title": "cforge inspect --metadata: list every GGUF key/value pair (text and JSON)",
+      "task_sha256": "018a3270b19a26fb6924e90a550ee4b80f1125a9da85d6c3d6a218ad08672789",
+      "token_hazard": null
+    },
+    {
+      "id": "cforge-split-dot-prefix",
+      "role": "reserve",
+      "group": "cforge",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "title": "Split GGUF shards with a '.'/'..' file-name prefix are looked up outside the model directory",
+      "task_sha256": "fc22f16952ed45d22e0e3d3329e0e7923866b1e146309697959a2cc847717ba9",
+      "token_hazard": null
+    },
+    {
+      "id": "cforge-timefmt-february",
+      "role": "selected",
+      "group": "cforge",
+      "category": "bugfix",
+      "difficulty": "easy",
+      "title": "Benchmark report timestamps are a year off in February",
+      "task_sha256": "b62edff5b2ddd2d5a935a67c6e3c3210aeb0da45642d7e96da30547c54d69b89",
+      "token_hazard": null
+    },
+    {
+      "id": "cforge-weighted-stripe-move",
+      "role": "selected",
+      "group": "cforge",
+      "category": "refactor",
+      "difficulty": "medium",
+      "title": "Move WeightedStripe from cforge-bench into cforge_format::stripe",
+      "task_sha256": "58064c62ccd826e049e0171284ae860f52a097398ddc7b643c09a8ae7f690ddb",
+      "token_hazard": null
+    },
+    {
+      "id": "flowcoin-ct-memeq-multibit",
+      "role": "selected",
+      "group": "flowcoin",
+      "category": "bugfix",
+      "difficulty": "easy",
+      "title": "flc_ct_memeq reports some different buffers as equal",
+      "task_sha256": "202a04aa177947a067d8245be5cfc08a4020eb18d0441cebd6337276f2ae41d5",
+      "token_hazard": null
+    },
+    {
+      "id": "flowcoin-fuzz-replay-dirs",
+      "role": "reserve",
+      "group": "flowcoin",
+      "category": "feature",
+      "difficulty": "medium",
+      "title": "Fuzz replay binary accepts corpus directories",
+      "task_sha256": "42448dc9e0f61333d57af6ad35e02e472496f89831a359f8027c60c01400d280",
+      "token_hazard": null
+    },
+    {
+      "id": "flowcoin-hex-ct",
+      "role": "selected",
+      "group": "flowcoin",
+      "category": "multi-file",
+      "difficulty": "hard",
+      "title": "Constant-time hex codec in flowcoin_util",
+      "task_sha256": "b20f891b57979fa9e02ca7cf5800adf4a43314ec2f2af3b606cc82fb2b591af4",
+      "token_hazard": null
+    },
+    {
+      "id": "flowcoin-lint-build-trees",
+      "role": "selected",
+      "group": "flowcoin",
+      "category": "build-or-terminal-debugging",
+      "difficulty": "easy",
+      "title": "Lints scan the preset build trees in a fresh clone",
+      "task_sha256": "dd6ba6fd3a1ccd32ee11616a32f83e24b66c958c90b76f83f735a45cc3ba0dfd",
+      "token_hazard": null
+    },
+    {
+      "id": "flowcoin-security-check-selftest",
+      "role": "reserve",
+      "group": "flowcoin",
+      "category": "test-writing",
+      "difficulty": "medium",
+      "title": "Self-test for security-check.py, scored by mutants",
+      "task_sha256": "e1350f1686486d45717c67eecf5fd9824b2c0defbe4bc1048cd9131a78e73e8f",
+      "token_hazard": null
+    },
+    {
+      "id": "misc-ai-chat-multiturn",
+      "role": "selected",
+      "group": "misc",
+      "category": "feature",
+      "difficulty": "medium",
+      "title": "Multi-turn conversations in byte_tokenizer.encode_chat / prompt_ids",
+      "task_sha256": "fbe1b677f328c5cea666e781b6aea521ceee3a1a91b95932907c9c7306105ce1",
+      "token_hazard": [
+        "gemma-4-26b-a4b",
+        "qwen3.8-27b"
+      ]
+    },
+    {
+      "id": "misc-ai-moe-balance",
+      "role": "selected",
+      "group": "misc",
+      "category": "bugfix",
+      "difficulty": "medium",
+      "title": "K3-mini MoE load balance diverges (aux-loss-free selection bias)",
+      "task_sha256": "fbe7edb0c742cc36ca64738f421e473f43ea92ded40ca0f4fb6212d9e3457510",
+      "token_hazard": [
+        "gemma-4-26b-a4b",
+        "qwen3.8-27b"
+      ]
+    },
+    {
+      "id": "misc-btc-ecdsa-der",
+      "role": "reserve",
+      "group": "misc",
+      "category": "bugfix",
+      "difficulty": "easy",
+      "title": "Test-framework ECDSA signatures are not strict DER (Bitcoin Core)",
+      "task_sha256": "e511e5fbe6edec88717220e3970c3fe715dca8874ac755291301c929133efd36",
+      "token_hazard": null
+    }
+  ]
+}

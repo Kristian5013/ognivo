@@ -1,0 +1,98 @@
+# M0 baseline image: OpenCode v2.2.1 headless, offline, talking only to the host llama-server.
+#
+# Built by ../prepare-image.sh, never by hand from this directory: it assembles the build
+# context in <m0-baseline>/cache/build-context (no file from the owner's repositories) from
+# these sources plus
+#   opencode        the v2.2.1 linux-x64 binary (sha256 checked below; pinned download in cache/)
+#   opencode.json   ../config/opencode.json, installed as /etc/opencode/opencode.json (system
+#                   config: the highest precedence, a workspace cannot override it)
+#   cargo-home/     read-only copy of the host's ~/.cargo/{registry/index,registry/cache,git/db}
+#                   (targets full and claude; empty for opencode)
+#   claude          Claude Code 2.1.311 from the owner's local installation (target claude only)
+#
+# Targets (each builds on the previous one):
+#   opencode  OpenCode + git + ripgrep + python3 + tini            localhost/m0-opencode:2.2.1
+#   full      + the toolchains of the task repos (night baseline)  localhost/m0-opencode:2.2.1-full
+#   claude    full + Claude Code --bare (optional 2nd baseline)    localhost/m0-opencode:2.2.1-claude
+ARG BASE=docker.io/library/ubuntu:26.10
+
+FROM ${BASE} AS opencode
+ARG DEBIAN_FRONTEND=noninteractive
+# ripgrep must be on PATH: without it OpenCode downloads rg 15.1.0 from GitHub on the first
+# grep/glob call, which fails offline. git: project detection and per-step snapshots.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      bash ca-certificates coreutils findutils diffutils patch file git jq less procps \
+      ripgrep tini python3 python3-venv tar xz-utils \
+ && rm -rf /var/lib/apt/lists/*
+COPY opencode /usr/local/bin/opencode
+RUN echo "32e95ec126d416ab833094447cf590290e17dd028a68b122b94d3539795c0dae  /usr/local/bin/opencode" | sha256sum -c - \
+ && chmod 0755 /usr/local/bin/opencode
+COPY opencode.json /etc/opencode/opencode.json
+COPY m0-entry.sh /usr/local/bin/m0-entry
+RUN chmod 0755 /usr/local/bin/m0-entry \
+ && git config --system user.name "m0-agent" \
+ && git config --system user.email "agent@localhost" \
+ && git config --system safe.directory '*' \
+ && mkdir -p /work /out /tmp/opencode
+ENV HOME=/root \
+    XDG_CONFIG_HOME=/root/.config \
+    XDG_DATA_HOME=/root/.local/share \
+    XDG_CACHE_HOME=/root/.cache \
+    XDG_STATE_HOME=/root/.local/state \
+    OPENCODE_DISABLE_AUTOUPDATE=1 \
+    OPENCODE_DISABLE_MODELS_FETCH=1 \
+    OPENCODE_DISABLE_FREE_MODELS=1 \
+    LLAMA_BASE_URL=http://127.0.0.1:8080/v1 \
+    TERM=dumb \
+    NO_COLOR=1 \
+    LANG=C.UTF-8
+RUN opencode --version && rm -rf /root/.local/share/opencode /root/.local/state/opencode /root/.cache/opencode
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/m0-entry"]
+
+# Toolchains for the task repos, at the host's versions, all usable offline:
+#  - C/C++ (flowcoin): gcc, cmake, ninja, clang-format (clang-format-22, 22.1.8 like the host;
+#    the unversioned `clang-format` package is only the 22.1.6-numbered metapackage), valgrind
+#    with its headers, binutils;
+#  - Rust (cforge, asusctl): rustup with exactly 1.99.0 + clippy + rustfmt. Both repos pin
+#    channel "stable" in rust-toolchain(.toml), which rustup would try to download offline, so
+#    RUSTUP_TOOLCHAIN overrides the file. libudev-dev + pkg-config for libudev-sys (asusctl);
+#    libusb is vendored by libusb1-sys and built with cc. Crates come from the baked copy of the
+#    host's registry and git db, CARGO_NET_OFFLINE=true;
+#  - Python (misc): python3 3.14, pytest, torch 2.13.0 CPU (misc-ai-moe-balance; the host has
+#    2.13.0+cu130, the hidden test forces CPU). TORCH_VERSION=none leaves torch out.
+FROM opencode AS full
+ARG DEBIAN_FRONTEND=noninteractive
+ARG RUST_VERSION=1.99.0
+ARG TORCH_VERSION=2.13.0
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential cmake ninja-build pkg-config clang-format clang-format-22 valgrind binutils \
+      libudev-dev curl python3-pip python3-pytest \
+ && rm -rf /var/lib/apt/lists/* \
+ && clang-format --version && cmake --version | head -1 && valgrind --version && test -f /usr/include/valgrind/memcheck.h
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/root/.cargo PATH=/root/.cargo/bin:$PATH
+RUN curl -fsSL --proto '=https' --tlsv1.2 https://sh.rustup.rs -o /tmp/rustup.sh \
+ && sh /tmp/rustup.sh -y --no-modify-path --profile minimal --default-toolchain "${RUST_VERSION}" -c clippy,rustfmt \
+ && rm /tmp/rustup.sh \
+ && rustc --version && cargo --version && cargo clippy --version && rustfmt --version
+ENV RUSTUP_TOOLCHAIN=${RUST_VERSION} CARGO_NET_OFFLINE=true CARGO_TERM_COLOR=never
+RUN if [ "${TORCH_VERSION}" != none ]; then \
+      pip install --break-system-packages --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+          "torch==${TORCH_VERSION}" \
+      && python3 -c 'import torch; print("torch", torch.__version__)'; \
+    fi
+# Offline crates: a read-only copy of the host's ~/.cargo/{registry/index,registry/cache,git/db}
+# (about 200 MB), made by prepare-image.sh. It merges into /root/.cargo next to rustup's bin/.
+COPY cargo-home/ /root/.cargo/
+
+# Optional second harness: Claude Code 2.1.311. The binary comes from the owner's installation
+# (~/.local/share/claude/versions/2.1.311); its sha256 is the one in the official release
+# manifest (downloads.claude.ai/claude-code-releases/2.1.311/manifest.json, linux-x64).
+FROM full AS claude
+COPY claude /usr/local/bin/claude
+COPY m0-entry-claude.sh /usr/local/bin/m0-entry-claude
+RUN echo "86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada  /usr/local/bin/claude" | sha256sum -c - \
+ && chmod 0755 /usr/local/bin/claude /usr/local/bin/m0-entry-claude \
+ && claude --version && rm -rf /root/.claude /root/.claude.json

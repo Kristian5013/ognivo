@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "The three M0 reference models. The key is the llama-server --alias, the OpenCode model key",
+    "(--model llama/<key>, config/opencode.json) and the ognivo profile id.",
+    "The llama-server flags come from <ognivo_repo>/<profile> [server].recommended_flags, with",
+    "--chat-template-file made absolute (scripts/llama_cmd.py). agent_timeout_s is the per-task",
+    "agent budget used by run-suite.sh unless --timeout or task.json agent_timeout_s say otherwise,",
+    "equal decode capacity (owner's decision 2026-10-30): 480 s x ~116 tok/s ~ 56K tokens for the MoE models, 1500 s x ~41 tok/s ~ 61K for the dense Qwen3.8 (900 s gave it only ~37K)."
+  ],
+  "ognivo_repo": "/home/kristian/Рабочий стол/cforge",
+  "llama_server": "~/.cache/llama-pinned/build-12cc59ba4914/bin/llama-server",
+  "llama_build": "b11924-12cc59ba4",
+  "host": "127.0.0.1",
+  "port": 8090,
+  "models": {
+    "gpt-oss-20b": {
+      "profile": "profiles/gpt-oss-20b.toml",
+      "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/models/gpt-oss-20b-gguf/gpt-oss-20b-F16.gguf",
+      "agent_timeout_s": 480
+    },
+    "gemma-4-26b-a4b": {
+      "profile": "profiles/gemma-4-26b-a4b.toml",
+      "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+      "agent_timeout_s": 480
+    },
+    "qwen3.8-27b": {
+      "profile": "profiles/qwen3.8-27b.toml",
+      "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
+      "agent_timeout_s": 1500
+    }
+  }
+}

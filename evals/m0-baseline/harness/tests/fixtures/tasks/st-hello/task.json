@@ -1,0 +1,12 @@
+{
+  "schema": "ognivo-m0-task/1",
+  "id": "st-hello",
+  "title": "self-test fixture st-hello",
+  "group": "selftest",
+  "role": "selected",
+  "category": "fixture",
+  "difficulty": "easy",
+  "verify_seconds": 1,
+  "prompt_file": "/home/kristian/.local/share/ognivo/m0-baseline/harness/tests/fixtures/tasks/st-hello/prompt.txt",
+  "prompt_sha256": "44f84463a95880c8466ca90eeb0b227495c15697ace48da115bd32264d66d66c"
+}

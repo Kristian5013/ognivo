@@ -1,0 +1,12 @@
+{
+  "schema": "ognivo-m0-task/1",
+  "id": "st-reserve",
+  "title": "self-test fixture st-reserve",
+  "group": "selftest",
+  "role": "reserve",
+  "category": "fixture",
+  "difficulty": "easy",
+  "verify_seconds": 1,
+  "prompt_file": "/home/kristian/.local/share/ognivo/m0-baseline/harness/tests/fixtures/tasks/st-reserve/prompt.txt",
+  "prompt_sha256": "f5646556ce4b3a91af28c59e9e0aba7ef062fed60f298b963ff2eefc7efbe219"
+}

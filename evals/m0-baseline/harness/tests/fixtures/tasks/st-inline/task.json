@@ -1,0 +1,12 @@
+{
+  "schema": "ognivo-m0-task/1",
+  "id": "st-inline",
+  "title": "self-test fixture st-inline",
+  "group": "selftest",
+  "role": "selected",
+  "category": "fixture",
+  "difficulty": "easy",
+  "verify_seconds": 1,
+  "prompt": "Write hello.txt with the text: hello from mock",
+  "prompt_sha256": "74f3259c3d367868ee927ff0341c561aba0ba30eacb6830bab4778f9feafac65"
+}

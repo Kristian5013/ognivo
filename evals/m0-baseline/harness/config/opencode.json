@@ -1,0 +1,128 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "llama/gpt-oss-20b",
+  "update": "disable",
+  "instructions": [
+    "CLAUDE.md"
+  ],
+  "plugins": [
+    "-opencode.provider.ollama",
+    "-opencode.provider.lmstudio",
+    "-opencode.provider.vllm"
+  ],
+  "permissions": [
+    {
+      "action": "webfetch",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "websearch",
+      "resource": "*",
+      "effect": "deny"
+    }
+  ],
+  "providers": {
+    "llama": {
+      "name": "llama-server (local)",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "{env:LLAMA_BASE_URL}"
+      },
+      "compatibility": {
+        "maxTokensField": "max_tokens",
+        "reasoningField": "reasoning_content"
+      },
+      "models": {
+        "gpt-oss-20b": {
+          "modelID": "gpt-oss-20b",
+          "name": "gpt-oss-20b (llama-server)",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true
+            }
+          },
+          "limit": {
+            "context": 98304,
+            "output": 32768
+          },
+          "body": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": 0,
+            "min_p": 0.0,
+            "reasoning_effort": "high"
+          }
+        },
+        "gemma-4-26b-a4b": {
+          "modelID": "gemma-4-26b-a4b",
+          "name": "Gemma 4 26B A4B (llama-server)",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true
+            }
+          },
+          "limit": {
+            "context": 65536,
+            "output": 32768
+          },
+          "body": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 64,
+            "min_p": 0.0,
+            "chat_template_kwargs": {
+              "enable_thinking": true,
+              "preserve_thinking": true
+            }
+          }
+        },
+        "qwen3.8-27b": {
+          "modelID": "qwen3.8-27b",
+          "name": "Qwen3.8-27B (llama-server)",
+          "capabilities": {
+            "tools": true,
+            "input": [
+              "text"
+            ],
+            "output": [
+              "text"
+            ],
+            "reasoning": {
+              "supported": true
+            }
+          },
+          "limit": {
+            "context": 98304,
+            "output": 32768
+          },
+          "body": {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "chat_template_kwargs": {
+              "enable_thinking": true,
+              "preserve_thinking": true,
+              "reasoning_effort": "medium"
+            }
+          }
+        }
+      }
+    }
+  }
+}
