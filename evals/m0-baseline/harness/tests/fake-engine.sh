@@ -13,6 +13,7 @@
 #      FAKE_ENGINE_NO_IMAGE=1   `image inspect` fails (no image built)
 #      FAKE_OPENCODE      the opencode binary (default <m0-baseline>/cache/opencode/2.2.1/bin/opencode)
 #      FAKE_CLAUDE        a Claude Code binary, put on PATH as `claude` (HARNESS=claude runs)
+#      FAKE_OGNIVO        an ognivo binary, put on PATH as `ognivo` (HARNESS=ognivo runs)
 set -euo pipefail
 HERE=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 H=$(dirname "$HERE")
@@ -120,6 +121,7 @@ prog() {
     case $1 in
         /usr/local/bin/m0-entry) echo "$H/container/m0-entry.sh" ;;
         /usr/local/bin/m0-entry-claude) echo "$H/container/m0-entry-claude.sh" ;;
+        /usr/local/bin/m0-entry-ognivo) echo "$H/container/m0-entry-ognivo.sh" ;;
         opencode | /usr/local/bin/opencode) echo "$OC_BIN" ;;
         *) echo "$1" ;;
     esac
@@ -141,6 +143,7 @@ work=$(map /work)
 # the claude target: FAKE_CLAUDE (a Claude Code binary) appears as `claude` on PATH
 mkdir -p "$root/bin"
 [[ -n ${FAKE_CLAUDE:-} ]] && ln -s "$FAKE_CLAUDE" "$root/bin/claude"
+[[ -n ${FAKE_OGNIVO:-} ]] && ln -s "$FAKE_OGNIVO" "$root/bin/ognivo"
 base_env=(PATH="$root/bin:$(dirname "$OC_BIN"):/usr/local/bin:/usr/bin:/bin" HOME="$root/root"
     XDG_CONFIG_HOME="$root/root/.config" XDG_DATA_HOME="$root/root/.local/share"
     XDG_CACHE_HOME="$root/root/.cache" XDG_STATE_HOME="$root/root/.local/state"

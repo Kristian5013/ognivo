@@ -3,7 +3,9 @@
 //! verification status (what the turn's tool calls show, not what the answer claims).
 //!
 //! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
-//! 3 the server failed.
+//! 3 the server failed; 128 + N stopped by signal N (TERM from `timeout`, INT from ^C): the
+//! turn is dropped, which kills the process group of a running command, and the end event
+//! is still written.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -15,6 +17,7 @@ use ognivo_core::approval::WorkspaceState;
 use ognivo_core::verify;
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{ChatDriver, doctor, profile};
+use tokio::signal::unix::{SignalKind, signal};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -127,8 +130,29 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     let mut agent = Agent::new(Box::new(driver), family, approver, opts);
     let jsonl = a.jsonl;
     let mut on = move |e: AgentEvent| show(&e, jsonl);
-    let end = agent.turn(&prompt, &mut on).await;
+    let mut term = signal(SignalKind::terminate())?;
+    let mut int = signal(SignalKind::interrupt())?;
+    let end = {
+        let turn = agent.turn(&prompt, &mut on);
+        tokio::pin!(turn);
+        tokio::select! {
+            end = &mut turn => Ok(end),
+            _ = term.recv() => Err(("SIGTERM", 143)),
+            _ = int.recv() => Err(("SIGINT", 130)),
+        }
+    };
     let stats = serde_json::to_value(&agent.stats)?;
+    let end = match end {
+        Ok(end) => end,
+        Err((name, code)) => {
+            eprintln!("ognivo run: stopped by {name}");
+            if jsonl {
+                let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "seed": seed, "stats": stats});
+                println!("{end}");
+            }
+            return Ok(ExitCode::from(code));
+        }
+    };
     let (code, answer) = match end {
         Ok(TurnEnd::Answer(a)) => (0, Some(a)),
         Ok(TurnEnd::StepLimit) => {

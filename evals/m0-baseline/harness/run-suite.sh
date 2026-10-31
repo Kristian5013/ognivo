@@ -25,7 +25,8 @@
 #   --deadline WHEN   epoch seconds or HH:MM (local, the next one): start a task only when it
 #                     can finish before WHEN; an agent still running at WHEN is stopped and its
 #                     run marked interrupted (re-run on resume); the server stops at WHEN
-#   --harness opencode|claude   (default opencode; claude results go to <model>.claude-code/)
+#   --harness opencode|claude|ognivo   (default opencode; claude results go to <model>.claude-code/,
+#                     ognivo results to <model>.ognivo/)
 #   --agent container|reference|none   container (default) = the model. reference = the task's
 #                     solve.sh on the host and none = no change, both followed by the real
 #                     verify container: they check setup, verify and the image without a model
@@ -105,7 +106,7 @@ while (($#)); do
 done
 [[ $STAMP =~ ^[A-Za-z0-9._-]*$ ]] || die "bad --stamp $STAMP"
 [[ $TIMEOUT =~ ^[0-9]*$ && $VERIFY_TIMEOUT =~ ^[0-9]+$ ]] || die "timeouts are whole seconds"
-case $HARNESS in opencode | claude) ;; *) die "--harness opencode|claude" ;; esac
+case $HARNESS in opencode | claude | ognivo) ;; *) die "--harness opencode|claude|ognivo" ;; esac
 case $AGENT_MODE in container | reference | none) ;; *) die "--agent container|reference|none" ;; esac
 for kv in "${VERIFY_ENV_LIST[@]}"; do [[ $kv =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*$ ]] || die "bad --verify-env $kv"; done
 
@@ -117,6 +118,7 @@ if [[ $AGENT_MODE == container ]]; then
     eval "$info"
     MODEL_LABEL=$MODEL
     [[ $HARNESS == claude ]] && MODEL_LABEL=$MODEL.claude-code
+    [[ $HARNESS == ognivo ]] && MODEL_LABEL=$MODEL.ognivo
     PORT=${PORT:-$M0_LLAMA_PORT}
 else
     MODEL=$AGENT_MODE M0_MODEL_TIMEOUT=0 M0_LLAMA_SERVER=
@@ -135,6 +137,7 @@ ENGINE=${ENGINE:-podman}
 if [[ -z ${IMAGE:-} ]]; then
     IMAGE=$(m0_image full)
     [[ $HARNESS == claude ]] && IMAGE=$(m0_image claude)
+    [[ $HARNESS == ognivo ]] && IMAGE=$(m0_image ognivo)
 fi
 export ENGINE IMAGE
 NVIDIA_SMI=${NVIDIA_SMI:-nvidia-smi}
@@ -622,7 +625,7 @@ r = json.load(open(sys.argv[1])); print(r["status"], int(bool(r["final"])))' "$r
 preflight() {
     command -v "$ENGINE" > /dev/null || die "container engine $ENGINE not found (sudo apt install podman passt)" 2
     "$ENGINE" image inspect --format '{{.Id}}' "$IMAGE" > /dev/null 2>&1 \
-        || die "image $IMAGE not found: build it with $HERE/prepare-image.sh $([[ $HARNESS == claude ]] && echo claude || echo full)" 2
+        || die "image $IMAGE not found: build it with $HERE/prepare-image.sh $(case $HARNESS in claude | ognivo) echo "$HARNESS" ;; *) echo full ;; esac)" 2
     if [[ $AGENT_MODE == container && ${ENGINE##*/} == podman && -z ${NETWORK:-} ]]; then
         command -v pasta > /dev/null || die "pasta not found (sudo apt install passt)" 2
         local help   # capture first: `pasta --help | grep -q` can SIGPIPE pasta under pipefail

@@ -22,7 +22,7 @@ HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "te"
        "content-length"}
 LOCK = threading.Lock()
 A = None
-MAX_LOG = 8 << 20
+MAX_LOG = 64 << 20   # M0's 8 MiB cut the 32K-token gpt-oss stream before its finish_reason
 # The client is the agent's container and this process runs on the host, outside the container's
 # memory and pids limits: bound what one client can make it buffer or spawn.
 MAX_BODY = 64 << 20

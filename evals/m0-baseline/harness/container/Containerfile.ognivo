@@ -1,0 +1,17 @@
+# ognivo under the M0 harness: the M0 `full` image exactly as the baseline used it (the same
+# toolchains, crates and Python) plus the ognivo binary, so a run differs from the OpenCode
+# baseline only by the agent.
+#
+# Built by ../prepare-image.sh ognivo from a context of its own (cache/build-context-ognivo):
+#   ognivo              the release binary built from the ognivo repository
+#   build               commit=..., dirty=..., binary_sha256=..., built=... (meta.json carries it)
+#   m0-entry-ognivo.sh  the entrypoint
+ARG FULL=localhost/m0-opencode:2.2.1-full
+FROM ${FULL}
+COPY ognivo /usr/local/bin/ognivo
+COPY m0-entry-ognivo.sh /usr/local/bin/m0-entry-ognivo
+COPY build /usr/local/share/ognivo/build
+RUN chmod 0755 /usr/local/bin/ognivo /usr/local/bin/m0-entry-ognivo \
+ && grep -q '^binary_sha256=' /usr/local/share/ognivo/build \
+ && echo "$(sed -n 's/^binary_sha256=//p' /usr/local/share/ognivo/build)  /usr/local/bin/ognivo" | sha256sum -c - \
+ && ognivo --version

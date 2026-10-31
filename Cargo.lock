@@ -900,6 +900,7 @@ dependencies = [
  "clap",
  "ognivo-core",
  "ognivo-models",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",

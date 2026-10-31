@@ -190,3 +190,67 @@ fn auto_approval_refuses_to_run_on_the_host() {
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("only inside a container"));
 }
+
+/// `timeout` stops the agent with SIGTERM: the end event is still written, exit 143.
+#[tokio::test]
+async fn sigterm_ends_the_run_with_an_end_event() {
+    // a server that accepts the request and never answers
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (_sock, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let bin = env!("CARGO_BIN_EXE_ognivo");
+    let out = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(bin)
+            .args([
+                "run",
+                "--url",
+                &url,
+                "--profile",
+                "qwen3.8-27b",
+                "--jsonl",
+                "--seed",
+                "1",
+                "--data-dir",
+            ])
+            .arg(&data)
+            .arg("--cwd")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let pid = rustix::process::Pid::from_raw(child.id() as i32).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(143),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let last = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_owned();
+    let end: Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(
+        (
+            end["type"].as_str(),
+            end["stopped"].as_str(),
+            end["exit"].as_i64()
+        ),
+        (Some("end"), Some("SIGTERM"), Some(143))
+    );
+}

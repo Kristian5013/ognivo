@@ -80,6 +80,7 @@ so it can be bind-mounted into containers. All commands below run from there
    harness/prepare-image.sh --dry-run  # what it will do; checks the inputs
    harness/prepare-image.sh            # = build full -> localhost/m0-opencode:2.2.1-full
    harness/prepare-image.sh claude     # optional: + Claude Code -> localhost/m0-opencode:2.2.1-claude
+   harness/prepare-image.sh ognivo     # ognivo itself: full + ognivo -> localhost/m0-opencode:2.2.1-ognivo
    ```
 
    - OpenCode comes from its pinned release URL, checked by sha256, into `cache/opencode/2.2.1/`.
@@ -96,6 +97,12 @@ so it can be bind-mounted into containers. All commands below run from there
    - Targets: `opencode` is OpenCode, git, ripgrep, python3 and tini. `full` adds gcc, cmake,
      ninja, clang-format 22, valgrind with its headers, libudev-dev, Rust 1.99.0 with clippy and
      rustfmt, pytest, torch 2.13.0 CPU and the crates. `claude` is `full` plus Claude Code.
+   - **ognivo** (target `ognivo`) is built on the existing `full` image, unchanged, so a run
+     differs from the OpenCode baseline only by the agent (`container/Containerfile.ognivo`).
+     The release binary is built from `models.json` `ognivo_repo` (or `OGNIVO_REPO`), whose
+     tree must be committed (`OGNIVO_ALLOW_DIRTY=1` overrides for smoke tests). The commit
+     and the binary's sha256 go into the image (`/usr/local/share/ognivo/build`) and into
+     every run's `meta.json` (`ognivo_build`).
 4. **Check everything that needs no GPU:**
 
    ```sh
@@ -156,6 +163,8 @@ harness/run-suite.sh --server --stamp <stamp> gpt-oss-20b   # resume: final resu
   and its run marked `interrupted`; the server stops then too.
 - `--no-tap` (no `llm.jsonl`), `--keep-ws` (keep finished workspaces), `--verify-env K=V`
   (for example `FC_SKIP_FORMAT=1`), `--harness claude` (results under `<model>.claude-code/`),
+  `--harness ognivo` (`ognivo run --approve auto`, results under `<model>.ognivo/`; ognivo
+  approves everything only inside a container, and `M0_OG_APPROVE=deny` makes it refuse),
   `--agent reference|none`: the task's `solve.sh`, or no change, followed by the real verify
   container. No model is involved; results go under `reference/` and `unsolved/`.
 - **Exit codes:**
@@ -264,9 +273,11 @@ runs/<stamp>/
       trajectory/  prompt.txt events.jsonl session.json session-<child>.json llm.jsonl
                    diff.patch diff.src.patch (without new build output) agent_commits.txt
                    base_commit git_status.txt meta.json exit_code
-                   (Claude Code: stream.jsonl claude-projects/)
+                   (Claude Code: stream.jsonl claude-projects/; ognivo: ognivo.jsonl, its events
+                   and an end event with its counters and the answer's verification status)
       logs/        run.env suite.env setup.log run-task.log container.stdout/.stderr
                    opencode.stderr export.stderr opencode-data/ (db + logs) tap.stderr
+                   (ognivo: ognivo.stderr, ognivo-data/ with the full output of every command)
                    verify.log verify_exit verify-task.log
 ```
 
@@ -317,10 +328,11 @@ child sessions from `session*.json`, which come from `opencode session export`.
 |---|---|
 | `run-suite.sh` | one model over a task list: setup, agent, verify, `result.json`; optional managed llama-server |
 | `run-night.sh` | the night plan, the 03:00-06:00 window, campaigns and resume |
-| `run-task.sh` | one agent run in its container (OpenCode or Claude Code), artifacts out |
+| `run-task.sh` | one agent run in its container (OpenCode, Claude Code or ognivo), artifacts out |
 | `verify-task.sh` | one hidden check in its `--network none` container |
 | `prepare-image.sh` | pinned OpenCode into `cache/`, the build context, `podman build`, smoke test |
 | `container/Containerfile`, `container/m0-entry.sh`, `container/m0-entry-claude.sh` | the image and its entrypoints |
+| `container/Containerfile.ognivo`, `container/m0-entry-ognivo.sh` | ognivo on top of the `full` image, and its entrypoint |
 | `config/opencode.json`, `config/models.json` | the OpenCode provider config; the models (profile, gguf, agent timeout) |
 | `lib/common.sh` | shared paths and helpers |
 | `scripts/llama_cmd.py` | llama-server argv from the ognivo profile; the `/props` check |

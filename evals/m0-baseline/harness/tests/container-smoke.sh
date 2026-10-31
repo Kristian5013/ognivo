@@ -2,7 +2,7 @@
 # Smoke test of the real container path, for the owner before the first night: needs rootless
 # Podman, pasta and the image (prepare-image.sh); no GPU, no model, no network.
 #
-#   tests/container-smoke.sh [--image IMAGE] [--port N] [--reference] [--keep]
+#   tests/container-smoke.sh [--image IMAGE] [--harness opencode|ognivo] [--port N] [--reference] [--keep]
 #
 # 1 network   a container with the runs' network flags reaches the host's 127.0.0.1:PORT (a
 #             mock llama-server) and nothing else: not host port 22, not another listening host
@@ -11,7 +11,9 @@
 # 2 suite     run-suite.sh --server on the fixture tasks with ENGINE=podman and the real image;
 #             the "llama-server" is tests/fake-llama-server.sh (scripts/mock_llama.py) and the
 #             GPU check tests/fake-nvidia-smi.sh: st-hello and st-inline solved, st-unsolvable
-#             failed, verify in its own --network none container
+#             failed, verify in its own --network none container. --harness ognivo runs ognivo
+#             (image target ognivo) instead of OpenCode: `--approve auto` works only because
+#             this is a real container
 # 3 reference (--reference) run-suite.sh --agent reference and --agent none over the real
 #             selected tasks: each setup.sh on the host, solve.sh (or nothing), then verify.sh in
 #             the image. Every reference must pass and every base must fail; this checks the
@@ -22,10 +24,11 @@ T=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 H=$(dirname "$T")
 # shellcheck source=../lib/common.sh
 source "$H/lib/common.sh"
-IMAGE=$(m0_image full) PORT=18090 REFERENCE=0 KEEP=0
+IMAGE= PORT=18090 REFERENCE=0 KEEP=0 HARNESS=opencode
 while (($#)); do
     case $1 in
         --image) IMAGE=$2; shift ;;
+        --harness) HARNESS=$2; shift ;;
         --port) PORT=$2; shift ;;
         --reference) REFERENCE=1 ;;
         --keep) KEEP=1 ;;
@@ -34,6 +37,11 @@ while (($#)); do
     esac
     shift
 done
+case $HARNESS in
+    opencode) IMAGE=${IMAGE:-$(m0_image full)} LABEL=gpt-oss-20b ;;
+    ognivo) IMAGE=${IMAGE:-$(m0_image ognivo)} LABEL=gpt-oss-20b.ognivo ;;
+    *) echo "container-smoke: --harness opencode|ognivo" >&2; exit 2 ;;
+esac
 FAILS=0
 ok() { printf '  ok    %s\n' "$*"; }
 bad() { FAILS=$((FAILS + 1)); printf '  FAIL  %s\n' "$*"; }
@@ -108,15 +116,24 @@ export M0_RUNS_ROOT=$SB/runs M0_WORK_ROOT=$SB/work
 M0_MODELS_JSON=$SB/models.json LLAMA_SERVER_BIN=$T/fake-llama-server.sh NVIDIA_SMI=$T/fake-nvidia-smi.sh \
     ENGINE=podman IMAGE=$IMAGE TAP_PORT=$((PORT + 1)) \
     "$H/run-suite.sh" --server --port "$PORT" --stamp smoke --tasks-root "$T/fixtures/tasks" --timeout 180 \
-    gpt-oss-20b > "$SB/suite.log" 2>&1
+    --harness "$HARNESS" gpt-oss-20b > "$SB/suite.log" 2>&1
 rc=$?
-st() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$M0_RUNS_ROOT/smoke/gpt-oss-20b/$1/result.json" 2> /dev/null; }
+st() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$M0_RUNS_ROOT/smoke/$LABEL/$1/result.json" 2> /dev/null; }
 ((rc == 0)) && ok "run-suite.sh exit 0" || bad "run-suite.sh exit $rc (log: $SB/suite.log)"
 [[ $(st st-hello) == solved && $(st st-inline) == solved && $(st st-unsolvable) == failed ]] \
     && ok "fixtures: solved, solved, failed" || bad "fixtures: $(st st-hello) $(st st-inline) $(st st-unsolvable)"
-grep -q '^network=pasta:--splice-only' "$M0_RUNS_ROOT/smoke/gpt-oss-20b/st-hello/logs/run.env" 2> /dev/null \
+grep -q '^network=pasta:--splice-only' "$M0_RUNS_ROOT/smoke/$LABEL/st-hello/logs/run.env" 2> /dev/null \
     && ok "agent container used pasta --splice-only" || bad "agent network (run.env)"
-[[ -s $M0_RUNS_ROOT/smoke/gpt-oss-20b/st-hello/trajectory/session.json ]] && ok "session exported" || bad "no session.json"
+if [[ $HARNESS == ognivo ]]; then
+    python3 -I -c 'import json,sys
+r = json.load(open(sys.argv[1])); og = r["summary"]["ognivo"]
+assert og["exit"] == 0 and og["stats"]["refused"] == 0 and r["summary"]["tools"] == {"write": 1, "shell": 1}, og
+assert json.load(open(sys.argv[2]))["approve"] == "auto"' \
+        "$M0_RUNS_ROOT/smoke/$LABEL/st-hello/result.json" "$M0_RUNS_ROOT/smoke/$LABEL/st-hello/trajectory/meta.json" 2> /dev/null \
+        && ok "ognivo: --approve auto inside the container, write and shell both ran" || bad "ognivo summary (result.json)"
+else
+    [[ -s $M0_RUNS_ROOT/smoke/$LABEL/st-hello/trajectory/session.json ]] && ok "session exported" || bad "no session.json"
+fi
 [[ -z $(podman ps -a --filter name=m0- --format '{{.Names}}') ]] && ok "no m0-* container left" \
     || bad "containers left: $(podman ps -a --filter name=m0- --format '{{.Names}}' | tr '\n' ' ')"
 

@@ -428,6 +428,41 @@ assert all(r["request"]["model"] == "gpt-oss-20b" for r in rows if r["path"].sta
         echo "  skip  --harness claude: no Claude Code 2.1.311 with the pinned sha256 in ~/.local/share/claude/versions"
     fi
 
+    # O: ognivo through the whole stand: run-suite, run-task, the fake engine, the entrypoint,
+    # the mock llama-server, verify and the scorer. M0_OG_APPROVE=deny: this sandbox is not a
+    # container, and ognivo approves everything only inside one
+    local ogb
+    ogb=${FAKE_OGNIVO:-$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["ognivo_repo"])' "$H/config/models.json")/target/debug/ognivo}
+    if [[ -x $ogb ]]; then
+        FAKE_OGNIVO=$ogb M0_OG_APPROVE=deny "$H/run-suite.sh" --server --port 18080 --stamp O --harness ognivo \
+            --timeout 120 gpt-oss-20b st-hello > "$SB/suite-O.log" 2>&1
+        rc=$?
+        d=$M0_RUNS_ROOT/O/gpt-oss-20b.ognivo/st-hello
+        ((rc == 0)) && [[ $(result_status O/gpt-oss-20b.ognivo/st-hello) == solved ]] \
+            && ok "--harness ognivo: ognivo solved st-hello through the stand" || bad "--harness ognivo: exit $rc"
+        check "ognivo: events, meta, its counters and the verification status in the summary" python3 -I -c 'import json,sys,os
+d = sys.argv[1]; r = json.load(open(os.path.join(d, "result.json")))
+assert r["harness"] == "ognivo" and os.path.getsize(os.path.join(d, "trajectory/ognivo.jsonl")) > 0, r["harness"]
+s = r["summary"]; og = s["ognivo"]
+assert s["tools"] == {"write": 1, "shell": 1}, s["tools"]
+assert og["exit"] == 0 and og["stats"]["malformed"] == 0 and og["stats"]["refused"] == 1, og
+assert og["verification"]["status"] == "unverified" and og["verification"]["changed"] == ["hello.txt"], og
+assert [f["status"] for f in s["failed_tools"]] == ["refused"], s["failed_tools"]' "$d"
+        check "ognivo: its logs went to logs/, never into the workspace diff" python3 -I -c 'import os,sys
+d = sys.argv[1]
+assert os.path.isdir(os.path.join(d, "logs/ognivo-data")) and os.path.isfile(os.path.join(d, "logs/ognivo.stderr"))
+assert not os.path.exists(os.path.join(d, "trajectory/ognivo-data"))
+patch = open(os.path.join(d, "trajectory/diff.patch")).read()
+assert "hello.txt" in patch and "ognivo" not in patch, patch[:500]' "$d"
+        check "ognivo: only chat completions and health checks on the wire, no User-Agent" python3 -I -c 'import json,sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+paths = {r["path"].split("?")[0] for r in rows}
+assert paths <= {"/v1/chat/completions", "/health"}, paths
+assert all(r.get("user_agent") is None for r in rows if r["path"].startswith("/v1/chat")), [r.get("user_agent") for r in rows]' "$d/trajectory/llm.jsonl"
+    else
+        echo "  skip  --harness ognivo: no ognivo binary at $ogb (cargo build -p ognivo-cli)"
+    fi
+
     # I: llama-server crashes during a run -> infra_error, restart, one more attempt -> solved
     rm -f "$SB/died"
     MOCK_ARGS="--die-after 1 --die-marker $SB/died" "$H/run-suite.sh" --server --port 18080 --stamp I \

@@ -9,6 +9,10 @@
 #     TARGET  full     OpenCode + the task toolchains: the night baseline (default)
 #             opencode OpenCode + git + ripgrep + python3 only (smoke tests)
 #             claude   full + Claude Code 2.1.311 (optional second baseline)
+#             ognivo   the existing full image + ognivo, built here from the ognivo repository
+#                      (models.json ognivo_repo, or OGNIVO_REPO); STEP does not apply. The tree
+#                      must be committed (OGNIVO_ALLOW_DIRTY=1 overrides); the commit and the
+#                      binary's sha256 go into the image and every run's meta.json
 #
 # Pinned inputs:
 #   OpenCode 2.2.1   https://github.com/anomalyco/opencode/releases/download/v2.2.1/opencode-linux-x64.tar.gz
@@ -39,7 +43,7 @@ STEP=build TARGET=full
 for a in "$@"; do
     case $a in
         fetch | context | build) STEP=$a ;;
-        full | opencode | claude) TARGET=$a ;;
+        full | opencode | claude | ognivo) TARGET=$a ;;
         -h | --help) sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p;}' "$0"; exit 0 ;;
         *) echo "prepare-image: unknown argument $a (see --help)" >&2; exit 2 ;;
     esac
@@ -63,6 +67,40 @@ TAG=$(m0_image "$TARGET")
 
 sha_ok() { [[ -f $1 ]] && echo "$2  $1" | sha256sum -c --status - 2> /dev/null; }
 say() { echo "prepare-image: $*" >&2; }
+
+# --- ognivo: the M0 full image as the baseline used it, plus the ognivo binary -------------
+if [[ $TARGET == ognivo ]]; then
+    OGNIVO_REPO=${OGNIVO_REPO:-$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["ognivo_repo"])' "$M0_MODELS_JSON")}
+    FULL=$(m0_image full)
+    OCTX=$M0_CACHE_DIR/build-context-ognivo
+    dirty=$(git -C "$OGNIVO_REPO" status --porcelain 2> /dev/null | wc -l)
+    if ((DRY_RUN)); then
+        echo "target   ognivo -> $TAG (engine $ENGINE, FROM $FULL)"
+        echo "repo     $OGNIVO_REPO at $(git -C "$OGNIVO_REPO" rev-parse --short HEAD 2> /dev/null || echo '?')$( ((dirty)) && echo " with $dirty uncommitted changes")"
+        echo "binary   cargo build --release --locked -p ognivo-cli"
+        echo "context  $OCTX"
+        echo "build    nice -n 10 $ENGINE build --pull=never --build-arg FULL=$FULL -t $TAG -f $OCTX/Containerfile $OCTX"
+        exit 0
+    fi
+    command -v "$ENGINE" > /dev/null || { say "$ENGINE is not installed: sudo apt install podman passt"; exit 1; }
+    "$ENGINE" image exists "$FULL" || { say "the M0 image $FULL is missing: build it first (prepare-image.sh full)"; exit 1; }
+    if ((dirty)) && [[ ${OGNIVO_ALLOW_DIRTY:-0} != 1 ]]; then
+        say "$OGNIVO_REPO has $dirty uncommitted changes: commit them (runs must name the commit they measured)"
+        exit 1
+    fi
+    (cd "$OGNIVO_REPO" && nice -n 10 cargo build --release --locked -p ognivo-cli)
+    rm -rf "$OCTX"
+    mkdir -p "$OCTX"
+    install -m 0755 "$OGNIVO_REPO/target/release/ognivo" "$OCTX/ognivo"
+    install -m 0755 "$HERE/container/m0-entry-ognivo.sh" "$OCTX/"
+    install -m 0644 "$HERE/container/Containerfile.ognivo" "$OCTX/Containerfile"
+    printf '%s\n' "commit=$(git -C "$OGNIVO_REPO" rev-parse HEAD)" "dirty=$dirty" \
+        "binary_sha256=$(sha256sum "$OCTX/ognivo" | cut -d' ' -f1)" "built=$(date -u +%FT%TZ)" > "$OCTX/build"
+    nice -n 10 "$ENGINE" build --pull=never --build-arg "FULL=$FULL" -t "$TAG" -f "$OCTX/Containerfile" "$OCTX"
+    "$ENGINE" run --rm --network none --entrypoint ognivo "$TAG" --version
+    say "image: $TAG ($(sed -n 's/^commit=//p' "$OCTX/build"))"
+    exit 0
+fi
 
 # --- 1. OpenCode ---------------------------------------------------------------------------
 fetch() {

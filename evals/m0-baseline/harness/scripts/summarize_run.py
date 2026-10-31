@@ -137,6 +137,46 @@ def summarize_claude(run):
     return {"steps": steps, "tools": dict(tools), "tokens": dict(tok), "outcome": outcome}
 
 
+def summarize_ognivo(run):
+    """Summary of an `ognivo run --jsonl` event stream (HARNESS=ognivo), with ognivo's own
+    counters (malformed and cut generations, edits, refusals, answers sent back) and the
+    verification status of its final answer."""
+    path = find(run, "ognivo.jsonl")
+    if not os.path.isfile(path):
+        return None
+    tools, failed, calls, end = collections.Counter(), [], [], None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            t = e.get("type")
+            if t == "tool_started":
+                tools[e.get("tool")] += 1
+                try:
+                    args = json.dumps(json.loads(e.get("arguments") or "null"), sort_keys=True)
+                except ValueError:
+                    args = e.get("arguments")
+                calls.append((e.get("tool"), args))
+            elif t == "tool_finished":
+                r = e.get("result") or ""
+                if r.startswith(("[error]", "[refused]")):
+                    failed.append({"tool": e.get("tool"), "status": r[1:r.index("]")], "output": r[:200]})
+            elif t == "end":
+                end = e
+    stats = (end or {}).get("stats") or {}
+    answer = (end or {}).get("answer") or {}
+    verification = answer.get("verification") or {}
+    return {"steps": stats.get("steps", 0), "tools": dict(tools), "failed": failed, "calls": calls,
+            "tokens": {k: stats[k] for k in ("prompt_tokens_processed", "prompt_tokens_cached",
+                                             "completion_tokens") if k in stats},
+            "outcome": verification.get("status") or ("no_answer" if end else "no_end_event"),
+            "ognivo": {"exit": (end or {}).get("exit"), "seed": (end or {}).get("seed"), "stats": stats,
+                       "verification": verification or None,
+                       "unsupported_claim": answer.get("unsupported_claim")}}
+
+
 def llm_wire(run):
     """What trajectory/llm.jsonl (the host-side tap) saw: failed requests and the prompt shape."""
     path = find(run, "llm.jsonl")
@@ -244,13 +284,23 @@ def summarize(run):
         steps = steps or claude["steps"]
         tools.update(claude["tools"])
         tok.update(claude["tokens"])
+    og = summarize_ognivo(run)
+    if og:
+        steps = steps or og["steps"]
+        tools.update(og["tools"])
+        tok.update(og["tokens"])
+        failed.extend(og["failed"])
+        calls.extend(og["calls"])
     repeats = max(collections.Counter(calls).values(), default=0)
     root = sessions[0]["info"] if sessions else {}
     wire = llm_wire(run)
-    row.update({"outcome": root.get("outcome") or (claude or {}).get("outcome"), "sessions": len(sessions),
+    row.update({"outcome": root.get("outcome") or (claude or {}).get("outcome") or (og or {}).get("outcome"),
+                "sessions": len(sessions),
                 "steps": steps, "tools": dict(tools), "failed_tools": failed[:20], "finish": dict(finishes),
                 "tokens": dict(tok), "compactions": compactions, "last_error": last_error,
                 "format_leaks": leaks[:5], "max_identical_calls": repeats, "llm": wire})
+    if og:
+        row["ognivo"] = og["ognivo"]
     err = last_error.get("type", "") if isinstance(last_error, dict) else ""
     row["flags"] = [f for f, on in [
         ("timeout", row["exit"] == 124),
@@ -354,7 +404,7 @@ def result(run):
                   "disk_limit": runenv.get("disk_limit") or None,
                   "oom_killed": {"true": True, "false": False}.get(runenv.get("oom_killed", "")),
                   "wall_s": meta.get("wall_s"), "session_id": meta.get("session_id") or None,
-                  "version": meta.get("opencode") or meta.get("claude"),
+                  "version": meta.get("opencode") or meta.get("claude") or meta.get("ognivo"),
                   "infra_error": infra},
         "verify": {"exit": verify_rc, "timeout_s": num(suite, "verify_timeout"),
                    "wall_s": num(runenv, "verify_wall_s", float)},

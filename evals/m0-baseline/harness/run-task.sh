@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run ONE M0 baseline task: the agent (OpenCode v2.2.1 headless, or Claude Code --bare) in a
+# Run ONE M0 baseline task: the agent (OpenCode v2.2.1 headless, Claude Code --bare or ognivo) in a
 # fresh rootless Podman container that sees only the workspace and the host's llama-server.
 #
 #   run-task.sh TASK_ID MODEL WORKSPACE PROMPT_FILE RUN_DIR
@@ -10,8 +10,10 @@
 #                and agent stderr, opencode-data/, verify.log)
 #
 # Env knobs (defaults):
-#   HARNESS=opencode        or claude (Claude Code --bare; image target claude)
-#   IMAGE=localhost/m0-opencode:2.2.1-full   (HARNESS=claude: localhost/m0-opencode:2.2.1-claude)
+#   HARNESS=opencode        or claude (Claude Code --bare; image target claude), or ognivo
+#                           (`ognivo run --approve auto`; image target ognivo)
+#   IMAGE=localhost/m0-opencode:2.2.1-full   (HARNESS=claude: ...-claude, HARNESS=ognivo: ...-ognivo)
+#   M0_OG_APPROVE=auto      HARNESS=ognivo only: deny makes ognivo refuse what would ask
 #   ENGINE=podman           docker works for smoke tests only (no --timeout, no pasta; README)
 #   LLAMA_PORT=8090         the host llama-server, bound to 127.0.0.1 (8080 is the owner's Open WebUI)
 #   AGENT_TIMEOUT=1200      seconds for the agent inside the container
@@ -53,7 +55,8 @@ HARNESS=${HARNESS:-opencode}
 case $HARNESS in
     opencode) IMAGE=${IMAGE:-localhost/m0-opencode:2.2.1-full} ;;
     claude) IMAGE=${IMAGE:-localhost/m0-opencode:2.2.1-claude} ;;
-    *) echo "run-task: HARNESS must be opencode or claude" >&2; exit 2 ;;
+    ognivo) IMAGE=${IMAGE:-localhost/m0-opencode:2.2.1-ognivo} ;;
+    *) echo "run-task: HARNESS must be opencode, claude or ognivo" >&2; exit 2 ;;
 esac
 ENGINE=${ENGINE:-podman}
 LLAMA_PORT=${LLAMA_PORT:-8090}
@@ -75,6 +78,10 @@ entry=() tail=()
 if [[ $HARNESS == claude ]]; then
     entry=(--entrypoint /usr/bin/tini -e M0_CC_MODEL="$alias" -e M0_CTX="$ctx")
     tail=(-- /usr/local/bin/m0-entry-claude)
+elif [[ $HARNESS == ognivo ]]; then
+    # the profile sets context, output budget and sampling; the alias is the profile id
+    entry=(--entrypoint /usr/bin/tini -e M0_OG_PROFILE="$alias" -e M0_OG_APPROVE="${M0_OG_APPROVE:-auto}")
+    tail=(-- /usr/local/bin/m0-entry-ognivo)
 fi
 limits=(--cpus "${CPUS:-8}" --memory "${MEMORY:-16g}" --memory-swap "${MEMORY:-16g}" --pids-limit "${PIDS:-4096}")
 extra=()
@@ -247,7 +254,7 @@ fi
 oom=$("$ENGINE" inspect --format '{{.State.OOMKilled}}' "$NAME" 2> /dev/null) || oom=unknown
 echo "oom_killed=$oom" >> "$LOGS/run.env"
 "$ENGINE" rm -f "$NAME" > /dev/null 2>&1 || true
-for f in opencode.stderr export.stderr claude.stderr opencode-data; do
+for f in opencode.stderr export.stderr claude.stderr opencode-data ognivo.stderr ognivo-data; do
     if [[ -e $TRAJ/$f ]]; then mv "$TRAJ/$f" "$LOGS/"; fi
 done
 # The entrypoint writes /out/infra_error only on its exit-3 path (llama-server unreachable,
