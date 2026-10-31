@@ -5,7 +5,9 @@
 //!   ended normally with `finish_reason=tool_calls` and complete arguments.
 //! - A cut-off or malformed generation runs nothing and is not added to the history; the
 //!   model gets a user-role note instead. An assistant turn without calls in the middle of
-//!   a tool loop would make gpt-oss's template drop all earlier analysis (M0, cpuset).
+//!   a tool loop would make gpt-oss's template drop all earlier analysis (M0, cpuset). An
+//!   empty answer is such a generation too: the model stopped inside its reasoning (M1
+//!   stamp A', gpt-oss, twice).
 //! - Every call is checked against its declared schema, computed without side effects,
 //!   decided by the approval policy ([`crate::approval`]), and only then executed.
 //! - Before an answer is accepted, the loop compares it with the facts of the turn
@@ -23,8 +25,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use ognivo_models::{
-    ChatMessage, DriverError, DriverEvent, Family, ModelDriver, Outcome, StepRequest, ToolCall,
-    ToolChoice, ToolDecl,
+    Channel, ChatMessage, DriverError, DriverEvent, Family, ModelDriver, Outcome, StepRequest,
+    ToolCall, ToolChoice, ToolDecl,
 };
 use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
@@ -140,6 +142,8 @@ pub struct Stats {
     pub truncated: u32,
     /// Generations the repetition guard stopped.
     pub repeating: u32,
+    /// Generations that ended with neither a call nor any answer text.
+    pub empty_answers: u32,
     /// Format errors the driver retried.
     pub restarts: u32,
     /// Calls whose arguments did not match the declared schema.
@@ -388,6 +392,13 @@ impl Agent {
             self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
             let reasoning = (!f.reasoning.is_empty()).then_some(f.reasoning);
             match f.outcome {
+                Outcome::Answer if f.content.trim().is_empty() => {
+                    self.stats.empty_answers += 1;
+                    unusable += 1;
+                    let note = "[ognivo] Your last output ended with neither a tool call nor an answer: it stopped inside your reasoning, so nothing was run. Make the call you were planning directly, or give the final answer.".to_owned();
+                    on(AgentEvent::Notice { text: note.clone() });
+                    self.messages.push(ChatMessage::User(note));
+                }
                 Outcome::Answer => {
                     let verification = self.ledger.status(&self.opts.root);
                     let unverified = matches!(verification, Verification::Unverified { .. });
@@ -482,8 +493,17 @@ impl Agent {
                 } => {
                     self.stats.repeating += 1;
                     unusable += 1;
+                    let advice = match channel {
+                        Channel::Reasoning => {
+                            "Stop deliberating: act on what you decided with a tool call, or give the final answer."
+                        }
+                        Channel::Arguments { .. } => {
+                            "Make the call again without repeating that text; write a long file in smaller edits."
+                        }
+                        Channel::Text => "Continue without repeating that text.",
+                    };
                     let note = format!(
-                        "[ognivo] Your last output was stopped because {channel} kept repeating {sample:?}; nothing was run and it was discarded. Continue from the last tool result without repeating that text; write a long file in smaller edits."
+                        "[ognivo] Your last output was stopped because {channel} kept repeating {sample:?}; nothing was run and it was discarded. {advice}"
                     );
                     on(AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
@@ -1353,6 +1373,57 @@ mod tests {
                 about(Duration::from_secs(119))
             ),
             ("2 min".into(), "119 s".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_answer_is_sent_back() {
+        // M1 stamp A', gpt-oss: finish_reason stop inside the reasoning, no text at all
+        let mut stopped = answer("");
+        stopped.reasoning = "the edit should be {\"path\": ...".into();
+        let steps = vec![stopped.into(), answer("  \n").into(), answer("done").into()];
+        let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);
+        let (end, _) = turn(&mut r).await;
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "done"),
+            "{end:?}"
+        );
+        assert_eq!(r.agent.stats.empty_answers, 2);
+        let n = notes(&r.agent);
+        assert_eq!(n.len(), 2);
+        assert!(n[0].contains("neither a tool call nor an answer"), "{n:?}");
+        // the empty generations are not in the history
+        let assistant = r
+            .agent
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
+            .count();
+        assert_eq!(assistant, 1);
+    }
+
+    #[tokio::test]
+    async fn a_reasoning_loop_is_told_to_act() {
+        let looped = Finished {
+            outcome: Outcome::Repeating {
+                partial: Vec::new(),
+                channel: Channel::Reasoning,
+                sample: "Wait, I'll try to use `diff |= x`".into(),
+            },
+            content: String::new(),
+            reasoning: String::new(),
+            finish: None,
+            usage: Default::default(),
+            seed: 0,
+        };
+        let steps = vec![Step::Done(Box::new(looped)), answer("ok").into()];
+        let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);
+        turn(&mut r).await;
+        let n = notes(&r.agent);
+        assert!(
+            n[0].contains("because the reasoning kept repeating")
+                && n[0].ends_with("Stop deliberating: act on what you decided with a tool call, or give the final answer."),
+            "{n:?}"
         );
     }
 }
