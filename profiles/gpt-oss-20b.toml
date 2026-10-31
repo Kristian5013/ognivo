@@ -32,6 +32,7 @@ history = "drop-after-final"    # OpenAI rule: keep CoT inside a tool loop, drop
 [context]
 working_max = 98304
 compact_at = 0.70
+max_tokens = 16384              # cuts 1 of 304 M0 steps (17,825 tokens) plus the 32,768-token runaway; M0 step records, runs/20261030T055501Z
 
 [template]
 # Vetted copy for the Generic path; the Native path renders prompts itself and ignores it.

@@ -6,6 +6,11 @@
 //! (ToolProjector, §5.1) and are unrelated to these ids.
 
 pub mod command;
+pub mod edit;
+pub mod exec;
+pub mod files;
+pub mod projection;
+pub mod search;
 
 pub use command::{ExecContext, classify_command};
 

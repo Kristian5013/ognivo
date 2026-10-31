@@ -1,5 +1,7 @@
-//! The `ognivo` binary. Only `doctor` works in M0; the rest follow the milestones in
-//! docs/architecture.md §13.
+//! The `ognivo` binary: `doctor` and the headless `run` work; `chat` follows in M1
+//! (docs/architecture.md §13).
+
+mod run;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -26,8 +28,9 @@ struct Cli {
 enum Command {
     /// Check running llama-server / ik_llama.cpp servers
     Doctor {
-        /// Server base URL; repeat the flag to check several servers
-        #[arg(long = "url", default_value = "http://127.0.0.1:8080")]
+        /// Server base URL; repeat the flag to check several servers. There is no default:
+        /// llama-server, ik_llama.cpp and other local services all use different ports.
+        #[arg(long = "url", required = true)]
         urls: Vec<String>,
         /// Bearer token if the server was started with --api-key
         #[arg(long, env = "OGNIVO_API_KEY", hide_env_values = true)]
@@ -39,8 +42,8 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run one task without the GUI (M1)
-    Run { task: String },
+    /// Run one task without a user: the prompt comes on stdin
+    Run(run::RunArgs),
     /// Line-mode chat in the terminal (M1)
     Chat,
 }
@@ -91,7 +94,8 @@ async fn main() -> anyhow::Result<ExitCode> {
                 ExitCode::SUCCESS
             })
         }
-        Command::Run { .. } | Command::Chat => {
+        Command::Run(args) => run::run(args).await,
+        Command::Chat => {
             eprintln!("not implemented yet: arrives in M1 (docs/architecture.md §13)");
             Ok(ExitCode::from(2))
         }

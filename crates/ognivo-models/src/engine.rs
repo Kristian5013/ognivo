@@ -331,7 +331,8 @@ fn token_events(v: &Value) -> Result<Vec<TokenEvent>, EngineError> {
         let n = |x: &Value| x.as_u64().and_then(|n| u32::try_from(n).ok());
         let usage = Usage {
             prompt_n: n(&t["prompt_n"]),
-            cache_n: n(&t["cache_n"]).or_else(|| n(&v["tokens_cached"])),
+            // no fallback to `tokens_cached`: on ik_llama.cpp it is n_past, not the cache hit
+            cache_n: n(&t["cache_n"]),
             predicted_n: n(&t["predicted_n"]).or_else(|| n(&v["tokens_predicted"])),
             prompt_ms: t["prompt_ms"].as_f64(),
             predicted_ms: t["predicted_ms"].as_f64(),

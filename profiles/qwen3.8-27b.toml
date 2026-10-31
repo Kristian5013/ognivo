@@ -40,6 +40,7 @@ history = "preserve"            # official default: every past reasoning block s
 [context]
 working_max = 98304             # instant EOS beyond ~130K (#27756); decode 46 -> 34 tok/s from 0 to 96K
 compact_at = 0.90               # compaction near 90K; the recurrent state cannot be rewound, so append-only
+max_tokens = 20480              # cuts 1 of 283 M0 steps (16384 would cut 3, each 433-547 s of decode); M0 step records
 
 [template]
 dir = "profiles/templates/Qwen3.8-27B"

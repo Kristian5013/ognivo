@@ -55,6 +55,17 @@ pub fn decide(effect: Effect, ws: WorkspaceState) -> Decision {
     }
 }
 
+/// Reads and searches: silent inside the project, a question anywhere else, since other
+/// projects, dotfiles and secrets live outside it. `path` must be resolved the way the
+/// tool opens it (symlinks included); `root` must be canonical.
+pub fn decide_read(path: &Path, root: &Path) -> Decision {
+    if path.starts_with(root) {
+        Decision::Allow
+    } else {
+        Decision::Ask
+    }
+}
+
 /// One file an edit changes. The path must be canonical (symlinks resolved, as the edit
 /// tools open it); `before` is `None` when the file is created, `after` when deleted.
 #[derive(Debug, Clone, Copy)]
@@ -261,5 +272,22 @@ mod tests {
         assert_eq!(check(None, Some(base)), Decision::Ask);
         assert_eq!(check(Some(base), Some("[tool\nbroken")), Decision::Ask);
         assert_eq!(check(Some(base), None), Decision::Ask);
+    }
+
+    #[test]
+    fn reads_outside_the_project_ask() {
+        let root = Path::new("/home/u/proj");
+        assert_eq!(
+            decide_read(Path::new("/home/u/proj/src/a.rs"), root),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide_read(Path::new("/home/u/.ssh/id_ed25519"), root),
+            Decision::Ask
+        );
+        assert_eq!(
+            decide_read(Path::new("/home/u/project2/a.rs"), root),
+            Decision::Ask
+        );
     }
 }

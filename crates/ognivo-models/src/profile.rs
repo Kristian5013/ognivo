@@ -143,6 +143,8 @@ pub struct ContextBudget {
     pub working_max: u32,
     /// Fraction of `working_max` at which compaction starts.
     pub compact_at: f32,
+    /// `max_tokens` of a main step: fixed, never the window remainder.
+    pub max_tokens: u32,
 }
 
 /// The vetted chat template for the Generic path (docs/research/2026-10-29/templates.md).

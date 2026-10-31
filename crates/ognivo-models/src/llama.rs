@@ -3,24 +3,35 @@
 //! ognivo never launches servers (owner's decision 4); it attaches to whatever runs at a
 //! URL and learns what that server can do (see [`crate::doctor`]).
 
+use std::fmt;
 use std::time::Duration;
 
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt};
 use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::engine::EngineError;
+use crate::sse::{self, SseEvent};
 
 /// Quick metadata calls (/health, /props, /slots, /models).
 const META_TIMEOUT: Duration = Duration::from_secs(15);
 /// /tokenize and /detokenize; long prompts take a moment, nothing takes minutes.
 const TOKENIZE_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlamaServer {
     base: String,
     http: reqwest::Client,
     api_key: Option<String>,
+}
+
+impl fmt::Debug for LlamaServer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LlamaServer")
+            .field("base", &self.base)
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 /// The parts of `/props` ognivo relies on. Every field is optional: servers differ.
@@ -104,7 +115,11 @@ impl LlamaServer {
         api_key: Option<String>,
         idle: Option<Duration>,
     ) -> Result<Self, EngineError> {
-        let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(5));
+        // No system proxy: servers are local or on the LAN, and HTTP(S)_PROXY would
+        // otherwise route even loopback traffic through it.
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .no_proxy();
         if let Some(idle) = idle {
             builder = builder.read_timeout(idle);
         }
@@ -213,13 +228,65 @@ impl LlamaServer {
 
     /// POST `/completion` with `stream: true`; yields the JSON payload of every SSE event.
     /// `total` bounds the whole request (headers arrive only once a slot takes the task);
-    /// without it only the idle limit between chunks applies.
+    /// without it only the idle limit between chunks applies. `/completion` sends no
+    /// `[DONE]`: whether the generation finished is read from its final payload
+    /// ([`crate::engine`]).
     pub async fn completion_stream(
         &self,
         body: &Value,
         total: Option<Duration>,
     ) -> Result<BoxStream<'static, Result<Value, EngineError>>, EngineError> {
-        let mut rb = self.request(Method::POST, "/completion").json(body);
+        let events = self.stream_post("/completion", body, total).await?;
+        Ok(events
+            .filter_map(|e| async move {
+                match e {
+                    Ok(SseEvent::Data(v)) => Some(Ok(v)),
+                    Ok(SseEvent::Done) => None,
+                    Err(e) => Some(Err(e)),
+                }
+            })
+            .boxed())
+    }
+
+    /// POST `/v1/chat/completions` with `stream: true`; yields the JSON payload of every SSE
+    /// chunk (the Generic path, docs/architecture.md §5.2). The server sends `[DONE]` only
+    /// when the generation ends normally, so a stream that ends without it fails here: a
+    /// tool call from a cut-off stream must never look complete.
+    pub async fn chat_stream(
+        &self,
+        body: &Value,
+        total: Option<Duration>,
+    ) -> Result<BoxStream<'static, Result<Value, EngineError>>, EngineError> {
+        let events = self
+            .stream_post("/v1/chat/completions", body, total)
+            .await?;
+        Ok(
+            stream::unfold((events, false), |(mut events, finished)| async move {
+                if finished {
+                    return None;
+                }
+                match events.next().await {
+                    Some(Ok(SseEvent::Data(v))) => Some((Ok(v), (events, false))),
+                    Some(Ok(SseEvent::Done)) => None,
+                    Some(Err(e)) => Some((Err(e), (events, true))),
+                    None => {
+                        let err = EngineError::Protocol("stream ended without [DONE]".into());
+                        Some((Err(err), (events, true)))
+                    }
+                }
+            })
+            .boxed(),
+        )
+    }
+
+    /// POST a streaming endpoint. A status other than 200 is an error carrying the body.
+    async fn stream_post(
+        &self,
+        path: &str,
+        body: &Value,
+        total: Option<Duration>,
+    ) -> Result<BoxStream<'static, Result<SseEvent, EngineError>>, EngineError> {
+        let mut rb = self.request(Method::POST, path).json(body);
         if let Some(t) = total {
             rb = rb.timeout(t);
         }
@@ -229,62 +296,8 @@ impl LlamaServer {
             let body = resp.text().await.unwrap_or_default();
             return Err(EngineError::Status { status, body });
         }
-        let bytes = resp.bytes_stream().map(|r| r.map(|b| b.to_vec())).boxed();
-        let events = futures::stream::unfold(
-            (bytes, Vec::new(), false),
-            |(mut bytes, mut buf, done)| async move {
-                if done {
-                    return None;
-                }
-                loop {
-                    match next_sse_payload(&mut buf) {
-                        Some(SsePayload::Done) => return None,
-                        Some(SsePayload::Data(data)) => {
-                            let item = serde_json::from_slice::<Value>(&data).map_err(|e| {
-                                EngineError::Protocol(format!("bad SSE payload: {e}"))
-                            });
-                            return Some((item, (bytes, buf, false)));
-                        }
-                        None => match bytes.next().await {
-                            Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
-                            Some(Err(e)) => return Some((Err(http_err(e)), (bytes, buf, true))),
-                            None if buf.trim_ascii().is_empty() => return None,
-                            None => {
-                                let err =
-                                    EngineError::Protocol("stream ended inside an SSE line".into());
-                                return Some((Err(err), (bytes, buf, true)));
-                            }
-                        },
-                    }
-                }
-            },
-        );
-        Ok(events.boxed())
+        Ok(sse::events(resp))
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum SsePayload {
-    Data(Vec<u8>),
-    Done,
-}
-
-/// Takes the next complete `data:` line out of `buf`, skipping other SSE lines.
-fn next_sse_payload(buf: &mut Vec<u8>) -> Option<SsePayload> {
-    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
-        let line: Vec<u8> = buf.drain(..=pos).collect();
-        let Some(data) = line.trim_ascii().strip_prefix(b"data:") else {
-            continue;
-        };
-        let data = data.trim_ascii();
-        if data == b"[DONE]" {
-            return Some(SsePayload::Done);
-        }
-        if !data.is_empty() {
-            return Some(SsePayload::Data(data.to_vec()));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -292,19 +305,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sse_lines() {
-        let mut buf = b"event: x\ndata: {\"a\":1}\n\ndata: {\"b\"".to_vec();
-        assert_eq!(
-            next_sse_payload(&mut buf),
-            Some(SsePayload::Data(b"{\"a\":1}".to_vec()))
-        );
-        assert_eq!(next_sse_payload(&mut buf), None); // incomplete line stays buffered
-        buf.extend_from_slice(b":2}\r\ndata: [DONE]\n");
-        assert_eq!(
-            next_sse_payload(&mut buf),
-            Some(SsePayload::Data(b"{\"b\":2}".to_vec()))
-        );
-        assert_eq!(next_sse_payload(&mut buf), Some(SsePayload::Done));
+    fn debug_hides_the_key() {
+        let s = LlamaServer::new("http://127.0.0.1:8090/", Some("secret".into())).unwrap();
+        let d = format!("{s:?}");
+        assert!(!d.contains("secret") && d.contains("redacted"), "{d}");
+        assert_eq!(s.base_url(), "http://127.0.0.1:8090");
     }
 
     #[test]

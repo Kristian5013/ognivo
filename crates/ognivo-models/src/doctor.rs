@@ -308,6 +308,16 @@ fn note_class(
     }
 }
 
+/// The profile for the model a server runs, as `doctor` finds it; `None` when no profile
+/// matches. The bool says whether the GGUF file name confirmed the choice.
+pub async fn identify<'p>(
+    server: &LlamaServer,
+    profiles: &'p [ModelProfile],
+) -> Result<Option<(&'p ModelProfile, bool)>, EngineError> {
+    let props = server.props().await?;
+    detect_profile(server, &props, profiles).await
+}
+
 /// Picks the profile whose probe text is a single token with the expected id. Within a
 /// family the longest name hint found in the GGUF file name wins; the bool says whether a
 /// hint matched at all.

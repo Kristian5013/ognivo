@@ -9,7 +9,19 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+globset.workspace = true
+ignore.workspace = true
+ognivo-models.workspace = true
+regex.workspace = true
+rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "fs", "io-util", "time", "macros", "rt"] }
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true
