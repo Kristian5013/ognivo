@@ -8,6 +8,10 @@
 //!   a tool loop would make gpt-oss's template drop all earlier analysis (M0, cpuset).
 //! - Every call is checked against its declared schema, computed without side effects,
 //!   decided by the approval policy ([`crate::approval`]), and only then executed.
+//! - Before an answer is accepted, the loop compares it with the facts of the turn
+//!   ([`crate::verify`]): a change after the last passing build or test sends the model
+//!   back once to run one (when it can), an answer claiming checks that never happened is
+//!   sent back once to be corrected, and the user always gets the verification status.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -19,12 +23,13 @@ use ognivo_models::{
     ToolChoice, ToolDecl,
 };
 use ognivo_tools::exec::{self, ShellOptions};
-use ognivo_tools::files::{self, EditPlan, FileError, LineStyle};
+use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
 use ognivo_tools::projection::{self, Call};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
 use serde::Serialize;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::verify::{self, Ledger, Run, Verification};
 
 /// How many generations in a row may end without usable calls before the turn stops.
 const MAX_UNUSABLE_IN_A_ROW: u32 = 3;
@@ -49,6 +54,8 @@ pub enum Verdict {
 
 pub trait Approver: Send {
     fn approve<'a>(&'a mut self, req: &'a ApprovalRequest) -> BoxFuture<'a, Verdict>;
+    /// Whether a question can get a yes at all; a run without a user cannot.
+    fn can_ask(&self) -> bool;
 }
 
 /// Headless default: nobody can answer, so every question is a refusal.
@@ -63,6 +70,10 @@ impl Approver for NoUser {
         );
         Box::pin(async move { Verdict::Refuse(text) })
     }
+
+    fn can_ask(&self) -> bool {
+        false
+    }
 }
 
 /// Approves everything. Only for runs inside a disposable eval container: the caller must
@@ -73,6 +84,10 @@ pub struct AllowAll;
 impl Approver for AllowAll {
     fn approve<'a>(&'a mut self, _: &'a ApprovalRequest) -> BoxFuture<'a, Verdict> {
         Box::pin(async { Verdict::Allow })
+    }
+
+    fn can_ask(&self) -> bool {
+        true
     }
 }
 
@@ -124,14 +139,26 @@ pub struct Stats {
     pub edits_already_applied: u32,
     pub edits_failed: u32,
     pub refused: u32,
-    pub prompt_tokens: u64,
-    pub cached_tokens: u64,
+    /// Answers sent back before acceptance: to run a build or test, or to drop a claim.
+    pub answers_sent_back: u32,
+    /// Prompt tokens the server processed, and those it took from the KV cache.
+    pub prompt_tokens_processed: u64,
+    pub prompt_tokens_cached: u64,
     pub completion_tokens: u64,
+}
+
+/// The accepted final answer and what the turn's facts say about it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Answer {
+    pub text: String,
+    pub verification: Verification,
+    /// The text still claims a build or test that did not happen after the last change.
+    pub unsupported_claim: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEnd {
-    Answer(String),
+    Answer(Answer),
     /// The step limit was reached before an answer.
     StepLimit,
     /// Several generations in a row ended without usable calls.
@@ -164,6 +191,8 @@ pub struct Agent {
     /// Files this session has read or written: only those may be overwritten whole.
     seen: HashSet<PathBuf>,
     workspace: WorkspaceState,
+    /// What this turn changed, ran and was refused.
+    ledger: Ledger,
     pub stats: Stats,
 }
 
@@ -185,7 +214,8 @@ pub fn system_prompt(root: &Path) -> String {
         "You are ognivo, a coding agent. You work in the project at {} through tools: read and search files, edit them, run shell commands.\n\
          - Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n\
          - Change only what the task needs.\n\
-         - Before you say the task is done, build or test the changed code and check that it passes. In the final answer, say what you changed and which command showed that it works; if you could not check something, say so.\n\
+         - After changing code, run the project's build or tests with the shell tool.\n\
+         - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
          - Commands run without a terminal; do not start interactive programs.",
         root.display()
     )
@@ -208,6 +238,7 @@ impl Agent {
             cwd,
             seen: HashSet::new(),
             workspace: opts.workspace,
+            ledger: Ledger::default(),
             stats: Stats::default(),
             opts,
         }
@@ -226,6 +257,8 @@ impl Agent {
         self.messages.push(ChatMessage::User(user.to_owned()));
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
+        self.ledger = Ledger::default();
+        let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
         for _ in 0..self.opts.max_steps {
             self.stats.steps += 1;
@@ -255,18 +288,55 @@ impl Agent {
                     "the driver ended a step without a result".into(),
                 ));
             };
-            self.stats.prompt_tokens += u64::from(f.usage.prompt_n.unwrap_or(0));
-            self.stats.cached_tokens += u64::from(f.usage.cache_n.unwrap_or(0));
+            self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
+            self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
             self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
             let reasoning = (!f.reasoning.is_empty()).then_some(f.reasoning);
             match f.outcome {
                 Outcome::Answer => {
+                    let verification = self.ledger.status(&self.opts.root);
+                    let unverified = matches!(verification, Verification::Unverified { .. });
+                    let claims = match verification {
+                        Verification::NoChanges => verify::claims_changes(&f.content),
+                        Verification::Unverified { .. } => verify::claims_a_passing_run(&f.content),
+                        Verification::Passed { .. } => false,
+                    };
+                    // The draft is not kept: an assistant turn without calls before more
+                    // tool steps would make gpt-oss's template drop all earlier analysis.
+                    let back = if unverified && !sent_to_verify && self.can_run_project_code() {
+                        sent_to_verify = true;
+                        Some(format!(
+                            "[ognivo] Not finished yet: {}. Run the project's build or tests now with the shell tool, then give the final answer.",
+                            verify::summary(&verification).unwrap_or_default()
+                        ))
+                    } else if claims && !sent_to_correct {
+                        sent_to_correct = true;
+                        Some(match &verification {
+                            Verification::NoChanges => "[ognivo] Your answer says you changed something, but no file was changed in this turn. Make the change, or answer without claiming it.".to_owned(),
+                            _ => format!(
+                                "[ognivo] Your answer says a build or test ran or passed, but the facts are: {}. Rewrite the final answer without that claim, and say what is not verified.",
+                                verify::summary(&verification).unwrap_or_default()
+                            ),
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some(note) = back {
+                        self.stats.answers_sent_back += 1;
+                        on(AgentEvent::Notice { text: note.clone() });
+                        self.messages.push(ChatMessage::User(note));
+                        continue;
+                    }
                     self.messages.push(ChatMessage::Assistant {
                         content: f.content.clone(),
                         reasoning,
                         tool_calls: Vec::new(),
                     });
-                    return Ok(TurnEnd::Answer(f.content));
+                    return Ok(TurnEnd::Answer(Answer {
+                        text: f.content,
+                        verification,
+                        unsupported_claim: claims,
+                    }));
                 }
                 Outcome::Calls(calls) => {
                     unusable = 0;
@@ -376,7 +446,7 @@ impl Agent {
                 {
                     return refusal;
                 }
-                match files::read(&p, offset, limit, style) {
+                match files::read(&Target::new(p.clone(), &root), offset, limit, style) {
                     Ok(text) => {
                         self.seen.insert(p);
                         text
@@ -402,7 +472,7 @@ impl Agent {
                 {
                     return refusal;
                 }
-                search::grep(&base, &pattern, glob.as_deref())
+                search::grep(&base, &root, &pattern, glob.as_deref())
                     .unwrap_or_else(|e| format!("[error] {e}"))
             }
             Call::Glob { pattern, path } => {
@@ -419,7 +489,7 @@ impl Agent {
                 {
                     return refusal;
                 }
-                search::glob(&base, &pattern).unwrap_or_else(|e| format!("[error] {e}"))
+                search::glob(&base, &root, &pattern).unwrap_or_else(|e| format!("[error] {e}"))
             }
             Call::Edit {
                 path,
@@ -428,7 +498,13 @@ impl Agent {
                 replace_all,
             } => {
                 let p = files::resolve(&self.cwd, &path);
-                match files::plan_edit(&p, &old, &new, replace_all, style) {
+                match files::plan_edit(
+                    &Target::new(p.clone(), &root),
+                    &old,
+                    &new,
+                    replace_all,
+                    style,
+                ) {
                     Ok(EditPlan::AlreadyApplied(text)) => {
                         self.stats.edits_already_applied += 1;
                         text
@@ -466,7 +542,11 @@ impl Agent {
             }
             Call::Write { path, content } => {
                 let p = files::resolve(&self.cwd, &path);
-                match files::plan_write(&p, &content, self.seen.contains(&p)) {
+                match files::plan_write(
+                    &Target::new(p.clone(), &root),
+                    &content,
+                    self.seen.contains(&p),
+                ) {
                     Ok(change) => {
                         let decision = approval::decide_edit(
                             &[FileEdit {
@@ -506,6 +586,7 @@ impl Agent {
                     Effect::Network => "it may use the network",
                     _ => "it may change things the edit journal cannot undo",
                 };
+                let checks = verify::is_build_or_test(&command);
                 if let Some(refusal) = self
                     .permit(
                         tool,
@@ -516,6 +597,9 @@ impl Agent {
                     )
                     .await
                 {
+                    if checks {
+                        self.ledger.refused(&command);
+                    }
                     return refusal;
                 }
                 let opts = ShellOptions {
@@ -528,6 +612,15 @@ impl Agent {
                 };
                 match exec::run(&command, &opts).await {
                     Ok(r) => {
+                        if checks {
+                            self.ledger.ran(Run {
+                                command: command.clone(),
+                                exit_code: r.exit_code,
+                                timed_out: r.timed_out,
+                            });
+                        } else if effect == Effect::SideEffects {
+                            self.ledger.side_effect(&command);
+                        }
                         if effect == Effect::SideEffects {
                             self.workspace = WorkspaceState::DIRTY;
                         }
@@ -545,11 +638,19 @@ impl Agent {
             Ok(text) => {
                 self.stats.edits_applied += u32::from(text.starts_with("[edit:"));
                 self.workspace = WorkspaceState::DIRTY;
+                self.ledger.changed(path.clone());
                 self.seen.insert(path);
                 text
             }
             Err(e) => error_text(&e),
         }
+    }
+
+    /// Whether a build or test could run now: silently, or after a question someone can
+    /// answer.
+    fn can_run_project_code(&self) -> bool {
+        approval::decide(Effect::ExecutesProjectCode, self.workspace) == Decision::Allow
+            || self.approver.can_ask()
     }
 
     /// `None` when the action may go ahead; otherwise the refusal the model reads.
@@ -654,6 +755,14 @@ mod tests {
     }
 
     fn agent(steps: Vec<ChatCompletion>, workspace: WorkspaceState) -> Run {
+        agent_with(steps, workspace, Box::new(NoUser))
+    }
+
+    fn agent_with(
+        steps: Vec<ChatCompletion>,
+        workspace: WorkspaceState,
+        approver: Box<dyn Approver>,
+    ) -> Run {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -672,7 +781,7 @@ mod tests {
             workspace,
         };
         Run {
-            agent: Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts),
+            agent: Agent::new(Box::new(driver), Family::Harmony, approver, opts),
             seen,
             root,
             _dir: dir,
@@ -687,6 +796,23 @@ mod tests {
             .await
             .unwrap();
         (end, events)
+    }
+
+    fn answered(end: TurnEnd) -> Answer {
+        match end {
+            TurnEnd::Answer(a) => a,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn notes(a: &Agent) -> Vec<String> {
+        a.messages()
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::User(t) if t.starts_with("[ognivo]") => Some(t.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn tool_results(a: &Agent) -> Vec<String> {
@@ -719,7 +845,10 @@ mod tests {
             WorkspaceState::CLEAN,
         );
         let (end, _) = turn(&mut r).await;
-        assert_eq!(end, TurnEnd::Answer("done".into()));
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "done"),
+            "{end:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
             "fn a() -> u32 {\n    2\n}\n"
@@ -755,7 +884,10 @@ mod tests {
             WorkspaceState::CLEAN,
         );
         let (end, events) = turn(&mut r).await;
-        assert_eq!(end, TurnEnd::Answer("gave up".into()));
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "gave up"),
+            "{end:?}"
+        );
         assert!(!r.root.join("new.rs").exists());
         assert_eq!(r.agent.stats.truncated, 1);
         assert!(
@@ -841,5 +973,103 @@ mod tests {
             (r.agent.stats.bad_arguments, r.agent.stats.malformed),
             (1, 3)
         );
+    }
+
+    /// The M1 live run: the test run is refused, the answer still says it passed.
+    #[tokio::test]
+    async fn a_claimed_check_that_never_ran_is_sent_back() {
+        let edit =
+            serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"});
+        let mut r = agent(
+            vec![
+                calls(&[("edit", edit)], FinishReason::ToolCalls),
+                calls(
+                    &[("shell", serde_json::json!({"command": "cargo test -p x"}))],
+                    FinishReason::ToolCalls,
+                ),
+                answer("I have run the test with cargo test -p x.\ntest tests::a ... ok"),
+                answer(
+                    "I changed lib.rs; the test run was refused, so the change is not verified.",
+                ),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        let a = answered(turn(&mut r).await.0);
+        assert!(a.text.starts_with("I changed lib.rs"), "{}", a.text);
+        assert!(!a.unsupported_claim);
+        assert_eq!(
+            a.verification,
+            Verification::Unverified {
+                changed: vec!["lib.rs".into()],
+                side_effects: vec![],
+                last_run: None,
+                refused: vec!["cargo test -p x".into()],
+            }
+        );
+        let n = notes(&r.agent);
+        assert_eq!(n.len(), 1);
+        assert!(
+            n[0].contains("Rewrite the final answer without that claim")
+                && n[0].contains("refused: `cargo test -p x`"),
+            "{}",
+            n[0]
+        );
+        // the discarded draft is not in the history
+        assert!(!r.agent.messages().iter().any(
+            |m| matches!(m, ChatMessage::Assistant { content, .. } if content.contains("... ok"))
+        ));
+        assert_eq!(r.agent.stats.answers_sent_back, 1);
+    }
+
+    /// When a build can run, an answer right after a change is sent back to run one.
+    #[tokio::test]
+    async fn an_unverified_answer_is_sent_back_to_build_when_it_can() {
+        let edit =
+            serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"});
+        let mut r = agent_with(
+            vec![
+                calls(&[("edit", edit)], FinishReason::ToolCalls),
+                answer("done"),
+                calls(
+                    &[(
+                        "shell",
+                        serde_json::json!({"command": "cargo build --help"}),
+                    )],
+                    FinishReason::ToolCalls,
+                ),
+                answer("done; cargo build --help exited 0"),
+            ],
+            WorkspaceState::CLEAN,
+            Box::new(AllowAll),
+        );
+        let a = answered(turn(&mut r).await.0);
+        assert_eq!(
+            a.verification,
+            Verification::Passed {
+                command: "cargo build --help".into()
+            }
+        );
+        assert!(
+            notes(&r.agent)[0]
+                .starts_with("[ognivo] Not finished yet: NOT verified: lib.rs changed")
+        );
+        assert_eq!(r.agent.stats.answers_sent_back, 1);
+    }
+
+    #[tokio::test]
+    async fn claimed_changes_without_any_are_sent_back() {
+        let mut r = agent(
+            vec![
+                answer("I added the missing test."),
+                answer("No change was needed: the test exists."),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        let a = answered(turn(&mut r).await.0);
+        assert_eq!(
+            (a.verification, a.unsupported_claim),
+            (Verification::NoChanges, false)
+        );
+        assert!(notes(&r.agent)[0].contains("no file was changed"));
     }
 }

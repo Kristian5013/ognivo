@@ -53,10 +53,30 @@ pub enum FileError {
     },
 }
 
-fn io(path: &Path) -> impl FnOnce(std::io::Error) -> FileError + '_ {
+fn io(shown: &Path) -> impl FnOnce(std::io::Error) -> FileError + '_ {
     move |source| FileError::Io {
-        path: path.to_owned(),
+        path: shown.to_owned(),
         source,
+    }
+}
+
+/// A file as the tools see it: where it is, and how results name it. Inside the project
+/// the name is relative to the root, which keeps results short and is the form the model
+/// writes paths in; outside it is absolute. Only names change, never file content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    pub path: PathBuf,
+    pub shown: PathBuf,
+}
+
+impl Target {
+    pub fn new(path: PathBuf, root: &Path) -> Self {
+        let shown = match path.strip_prefix(root) {
+            Ok(rel) if rel.as_os_str().is_empty() => PathBuf::from("."),
+            Ok(rel) => rel.to_owned(),
+            Err(_) => path.clone(),
+        };
+        Self { path, shown }
     }
 }
 
@@ -112,14 +132,14 @@ pub fn resolve(cwd: &Path, raw: &str) -> PathBuf {
 /// Reads one page of a text file with line numbers. The header comes first, so the model
 /// learns the file's size before its content (M0: one 40K-token fixture doubled a context).
 pub fn read(
-    path: &Path,
+    t: &Target,
     offset: Option<usize>,
     limit: Option<usize>,
     style: LineStyle,
 ) -> Result<String, FileError> {
-    let bytes = read_bytes(path)?;
+    let bytes = read_bytes(t)?;
     if bytes[..bytes.len().min(8192)].contains(&0) {
-        return Err(FileError::Binary(path.to_owned()));
+        return Err(FileError::Binary(t.shown.clone()));
     }
     let utf8 = std::str::from_utf8(&bytes).is_ok();
     let text = String::from_utf8_lossy(&bytes);
@@ -128,7 +148,7 @@ pub fn read(
     let first = offset.unwrap_or(1).max(1);
     if total > 0 && first > total {
         return Err(FileError::OffsetPastEnd {
-            path: path.to_owned(),
+            path: t.shown.clone(),
             offset: first,
             lines: total,
         });
@@ -151,7 +171,7 @@ pub fn read(
     }
     let mut header = format!(
         "[read: {} — {} of {total} lines, {}, ~{} tokens]",
-        path.display(),
+        t.shown.display(),
         if total == 0 {
             "0".to_owned()
         } else {
@@ -177,13 +197,14 @@ pub struct Change {
     /// The current content; `None` when the file is created.
     pub before: Option<String>,
     pub after: String,
+    shown: PathBuf,
     /// What the model reads once the change is written.
     report: String,
 }
 
 impl Change {
     pub fn commit(self) -> Result<String, FileError> {
-        atomic_write(&self.path, self.after.as_bytes())?;
+        atomic_write(&self.path, &self.shown, self.after.as_bytes())?;
         Ok(self.report)
     }
 }
@@ -199,18 +220,18 @@ pub enum EditPlan {
 /// Plans writing a whole file (a temporary file in the same directory, then rename,
 /// keeping the permissions of the file it replaces). `was_read` says whether this session
 /// read the existing file: overwriting a file the model has not seen is refused.
-pub fn plan_write(path: &Path, content: &str, was_read: bool) -> Result<Change, FileError> {
+pub fn plan_write(t: &Target, content: &str, was_read: bool) -> Result<Change, FileError> {
     if content.trim_start().starts_with("*** Begin Patch") {
         return Err(FileError::PatchText);
     }
-    let before = match fs::metadata(path) {
-        Ok(m) if m.is_dir() => return Err(FileError::IsDirectory(path.to_owned())),
-        Ok(_) => Some(String::from_utf8_lossy(&read_bytes(path)?).into_owned()),
+    let before = match fs::metadata(&t.path) {
+        Ok(m) if m.is_dir() => return Err(FileError::IsDirectory(t.shown.clone())),
+        Ok(_) => Some(String::from_utf8_lossy(&read_bytes(t)?).into_owned()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(io(path)(e)),
+        Err(e) => return Err(io(&t.shown)(e)),
     };
     if before.is_some() && !was_read {
-        return Err(FileError::UnreadOverwrite(path.to_owned()));
+        return Err(FileError::UnreadOverwrite(t.shown.clone()));
     }
     let report = format!(
         "[write: {} {} — {} lines, {}]",
@@ -219,14 +240,15 @@ pub fn plan_write(path: &Path, content: &str, was_read: bool) -> Result<Change, 
         } else {
             "created"
         },
-        path.display(),
+        t.shown.display(),
         content.lines().count(),
         human_bytes(content.len()),
     );
     Ok(Change {
-        path: path.to_owned(),
+        path: t.path.clone(),
         before,
         after: content.to_owned(),
+        shown: t.shown.clone(),
         report,
     })
 }
@@ -234,18 +256,18 @@ pub fn plan_write(path: &Path, content: &str, was_read: bool) -> Result<Change, 
 /// Plans one find-and-replace edit; once committed, the report shows the changed lines
 /// with fresh numbers.
 pub fn plan_edit(
-    path: &Path,
+    t: &Target,
     old: &str,
     new: &str,
     replace_all: bool,
     style: LineStyle,
 ) -> Result<EditPlan, FileError> {
-    let bytes = read_bytes(path)?;
-    let text = String::from_utf8(bytes).map_err(|_| FileError::NotUtf8(path.to_owned()))?;
+    let bytes = read_bytes(t)?;
+    let text = String::from_utf8(bytes).map_err(|_| FileError::NotUtf8(t.shown.clone()))?;
     match edit::apply(&text, old, new, replace_all) {
         Ok(EditOutcome::AlreadyApplied) => Ok(EditPlan::AlreadyApplied(format!(
             "[edit: already applied] {}: old_string is absent and new_string is present; nothing changed",
-            path.display()
+            t.shown.display()
         ))),
         Ok(EditOutcome::Applied {
             text: changed,
@@ -268,14 +290,15 @@ pub fn plan_edit(
             };
             let report = format!(
                 "[edit: applied {kind}{count}] {} — lines {}-{} now:\n{snippet}",
-                path.display(),
+                t.shown.display(),
                 from + 1,
                 to
             );
             Ok(EditPlan::Change(Change {
-                path: path.to_owned(),
+                path: t.path.clone(),
                 before: Some(text),
                 after: changed,
+                shown: t.shown.clone(),
                 report,
             }))
         }
@@ -296,7 +319,7 @@ pub fn plan_edit(
                 _ => None,
             };
             Err(FileError::Edit {
-                path: path.to_owned(),
+                path: t.shown.clone(),
                 source,
                 nearest,
             })
@@ -304,28 +327,28 @@ pub fn plan_edit(
     }
 }
 
-fn read_bytes(path: &Path) -> Result<Vec<u8>, FileError> {
-    match fs::metadata(path) {
-        Ok(m) if m.is_dir() => Err(FileError::IsDirectory(path.to_owned())),
-        Ok(_) => fs::read(path).map_err(io(path)),
+fn read_bytes(t: &Target) -> Result<Vec<u8>, FileError> {
+    match fs::metadata(&t.path) {
+        Ok(m) if m.is_dir() => Err(FileError::IsDirectory(t.shown.clone())),
+        Ok(_) => fs::read(&t.path).map_err(io(&t.shown)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(FileError::NotFound(path.to_owned()))
+            Err(FileError::NotFound(t.shown.clone()))
         }
-        Err(e) => Err(io(path)(e)),
+        Err(e) => Err(io(&t.shown)(e)),
     }
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
+fn atomic_write(path: &Path, shown: &Path, bytes: &[u8]) -> Result<(), FileError> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    fs::create_dir_all(dir).map_err(io(dir))?;
+    fs::create_dir_all(dir).map_err(io(shown))?;
     let perms = fs::metadata(path).ok().map(|m| m.permissions());
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io(dir))?;
-    tmp.write_all(bytes).map_err(io(path))?;
-    tmp.as_file().sync_all().map_err(io(path))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io(shown))?;
+    tmp.write_all(bytes).map_err(io(shown))?;
+    tmp.as_file().sync_all().map_err(io(shown))?;
     if let Some(p) = perms {
-        fs::set_permissions(tmp.path(), p).map_err(io(path))?;
+        fs::set_permissions(tmp.path(), p).map_err(io(shown))?;
     }
-    tmp.persist(path).map_err(|e| io(path)(e.error))?;
+    tmp.persist(path).map_err(|e| io(shown)(e.error))?;
     Ok(())
 }
 
@@ -349,6 +372,11 @@ fn estimate_tokens(bytes: usize) -> usize {
 mod tests {
     use super::*;
 
+    /// A target named relative to its directory, as inside a project root.
+    fn t(p: &Path) -> Target {
+        Target::new(p.to_owned(), p.parent().unwrap())
+    }
+
     fn file(dir: &Path, name: &str, text: &str) -> PathBuf {
         let p = dir.join(name);
         fs::write(&p, text).unwrap();
@@ -360,7 +388,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let text: String = (1..=5).map(|i| format!("line {i}\n")).collect();
         let p = file(d.path(), "a.txt", &text);
-        let out = read(&p, Some(2), Some(2), LineStyle::Bar).unwrap();
+        let out = read(&t(&p), Some(2), Some(2), LineStyle::Bar).unwrap();
         let mut lines = out.lines();
         assert!(
             lines.next().unwrap().contains("lines 2-3 of 5 lines"),
@@ -369,20 +397,25 @@ mod tests {
         assert_eq!(lines.next(), Some("[more: continue with offset=4]"));
         assert_eq!(lines.next(), Some("2│line 2"));
         assert_eq!(lines.next(), Some("3│line 3"));
-        let tab = read(&p, None, Some(1), LineStyle::Tab).unwrap();
+        let tab = read(&t(&p), None, Some(1), LineStyle::Tab).unwrap();
         assert!(tab.lines().nth(2) == Some("     1\tline 1"), "{tab}");
         assert!(matches!(
-            read(&p, Some(9), None, LineStyle::Bar),
+            read(&t(&p), Some(9), None, LineStyle::Bar),
             Err(FileError::OffsetPastEnd { .. })
         ));
         let bin = d.path().join("b.bin");
         fs::write(&bin, b"\x7fELF\0\0").unwrap();
         assert!(matches!(
-            read(&bin, None, None, LineStyle::Bar),
+            read(&t(&bin), None, None, LineStyle::Bar),
             Err(FileError::Binary(_))
         ));
         assert!(matches!(
-            read(d.path(), None, None, LineStyle::Bar),
+            read(
+                &Target::new(d.path().to_owned(), d.path()),
+                None,
+                None,
+                LineStyle::Bar
+            ),
             Err(FileError::IsDirectory(_))
         ));
     }
@@ -392,7 +425,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let text = "x".repeat(1000) + "\n";
         let p = file(d.path(), "big.txt", &text.repeat(200));
-        let out = read(&p, None, None, LineStyle::Bar).unwrap();
+        let out = read(&t(&p), None, None, LineStyle::Bar).unwrap();
         assert!(out.len() < READ_MAX_BYTES + 512, "{}", out.len());
         assert!(out.contains("[more: continue with offset="));
     }
@@ -401,20 +434,20 @@ mod tests {
     fn write_is_atomic_and_guarded() {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("sub/new.rs");
-        let created = plan_write(&p, "fn a() {}\n", false).unwrap();
+        let created = plan_write(&t(&p), "fn a() {}\n", false).unwrap();
         assert_eq!(created.before, None);
         assert!(!p.exists(), "planning writes nothing");
         assert!(created.commit().unwrap().contains("created"));
         assert!(matches!(
-            plan_write(&p, "x", false),
+            plan_write(&t(&p), "x", false),
             Err(FileError::UnreadOverwrite(_))
         ));
-        let over = plan_write(&p, "x\n", true).unwrap();
+        let over = plan_write(&t(&p), "x\n", true).unwrap();
         assert_eq!(over.before.as_deref(), Some("fn a() {}\n"));
         assert!(over.commit().unwrap().contains("overwrote"));
         assert_eq!(fs::read_to_string(&p).unwrap(), "x\n");
         assert!(matches!(
-            plan_write(&p, "*** Begin Patch\n", true),
+            plan_write(&t(&p), "*** Begin Patch\n", true),
             Err(FileError::PatchText)
         ));
     }
@@ -423,7 +456,8 @@ mod tests {
     fn edit_shows_the_changed_lines_or_the_nearest_fragment() {
         let d = tempfile::tempdir().unwrap();
         let p = file(d.path(), "m.rs", "a\nb\nc\nd\ne\nf\ng\n");
-        let EditPlan::Change(c) = plan_edit(&p, "d", "D", false, LineStyle::Bar).unwrap() else {
+        let EditPlan::Change(c) = plan_edit(&t(&p), "d", "D", false, LineStyle::Bar).unwrap()
+        else {
             panic!()
         };
         assert_eq!(
@@ -439,10 +473,10 @@ mod tests {
         );
         assert_eq!(fs::read_to_string(&p).unwrap(), "a\nb\nc\nD\ne\nf\ng\n");
         assert!(matches!(
-            plan_edit(&p, "x", "D", false, LineStyle::Bar),
+            plan_edit(&t(&p), "x", "D", false, LineStyle::Bar),
             Ok(EditPlan::AlreadyApplied(_))
         ));
-        match plan_edit(&p, "c\nx", "y", false, LineStyle::Bar) {
+        match plan_edit(&t(&p), "c\nx", "y", false, LineStyle::Bar) {
             Err(FileError::Edit {
                 nearest: Some(n), ..
             }) => assert!(n.starts_with("3│c"), "{n}"),
@@ -467,6 +501,20 @@ mod tests {
         assert_eq!(
             resolve(&root, "link/nothing-here"),
             PathBuf::from("/usr/nothing-here")
+        );
+    }
+
+    #[test]
+    fn targets_are_named_from_the_root() {
+        let root = Path::new("/home/u/proj");
+        assert_eq!(
+            Target::new(root.join("src/a.rs"), root).shown,
+            PathBuf::from("src/a.rs")
+        );
+        assert_eq!(Target::new(root.to_owned(), root).shown, PathBuf::from("."));
+        assert_eq!(
+            Target::new("/etc/hosts".into(), root).shown,
+            PathBuf::from("/etc/hosts")
         );
     }
 }

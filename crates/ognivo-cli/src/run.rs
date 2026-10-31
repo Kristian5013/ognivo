@@ -1,5 +1,6 @@
 //! `ognivo run`: one task, no user (docs/architecture.md §10). The prompt comes on stdin,
-//! as the M0 harness passes it; the final answer goes to stdout.
+//! as the M0 harness passes it; the final answer goes to stdout, followed by ognivo's own
+//! verification status (what the turn's tool calls show, not what the answer claims).
 //!
 //! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
 //! 3 the server failed.
@@ -11,6 +12,7 @@ use std::process::ExitCode;
 use clap::{Args, ValueEnum};
 use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, AllowAll, Approver, NoUser, TurnEnd};
 use ognivo_core::approval::WorkspaceState;
+use ognivo_core::verify;
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{ChatDriver, doctor, profile};
 
@@ -128,7 +130,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     let end = agent.turn(&prompt, &mut on).await;
     let stats = serde_json::to_value(&agent.stats)?;
     let (code, answer) = match end {
-        Ok(TurnEnd::Answer(text)) => (0, Some(text)),
+        Ok(TurnEnd::Answer(a)) => (0, Some(a)),
         Ok(TurnEnd::StepLimit) => {
             eprintln!("ognivo run: step limit ({}) reached", a.max_steps);
             (1, None)
@@ -146,8 +148,14 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         let end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "seed": seed, "stats": stats});
         println!("{end}");
     } else {
-        if answer.is_some() {
+        if let Some(a) = &answer {
             println!();
+            if let Some(line) = verify::summary(&a.verification) {
+                println!("\n[ognivo] {line}");
+            }
+            if a.unsupported_claim {
+                println!("[ognivo] the answer above claims a check that did not happen");
+            }
         }
         eprintln!("ognivo run: seed {seed}; {stats}");
     }

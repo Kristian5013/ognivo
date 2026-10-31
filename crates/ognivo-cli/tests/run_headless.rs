@@ -144,7 +144,10 @@ async fn reads_edits_and_answers() {
         std::fs::read_to_string(root.join("main.rs")).unwrap(),
         "fn main() {\n    println!(\"hello\");\n}\n"
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("Changed the greeting."));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Changed the greeting."), "{stdout}");
+    // nothing was built or tested after the edit, and ognivo says so under the answer
+    assert!(stdout.contains("[ognivo] NOT verified: main.rs changed after the last passing build or test; no build or test ran after it"), "{stdout}");
     assert!(
         stderr.contains("→ read") && stderr.contains("← [edit: applied exact]"),
         "{stderr}"

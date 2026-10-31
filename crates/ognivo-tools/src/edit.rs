@@ -55,10 +55,13 @@ pub enum EditError {
     NoChange,
     #[error(
         "old_string occurs {count} times (lines {}); add surrounding lines to make it unique or set replace_all",
-        lines.iter().map(|l| (l + 1).to_string()).collect::<Vec<_>>().join(", ")
+        line_list(lines)
     )]
     Ambiguous { count: usize, lines: Vec<usize> },
-    #[error("old_string matches {count} places when {kind} (lines {}); add surrounding lines to make it unique", lines.iter().map(|l| (l + 1).to_string()).collect::<Vec<_>>().join(", "))]
+    #[error(
+        "old_string matches {count} places when {kind} (lines {}); add surrounding lines to make it unique",
+        line_list(lines)
+    )]
     AmbiguousTolerant {
         kind: MatchKind,
         count: usize,
@@ -69,6 +72,21 @@ pub enum EditError {
         /// 0-based start and the lines of the most similar fragment, if any line matched.
         nearest: Option<(usize, Vec<String>)>,
     },
+}
+
+/// 1-based line numbers for a message, at most ten of them (M1 live run: an anchor of `}`
+/// listed 131 lines).
+fn line_list(lines: &[usize]) -> String {
+    const SHOWN: usize = 10;
+    let mut s: Vec<String> = lines
+        .iter()
+        .take(SHOWN)
+        .map(|l| (l + 1).to_string())
+        .collect();
+    if lines.len() > SHOWN {
+        s.push(format!("and {} more", lines.len() - SHOWN));
+    }
+    s.join(", ")
 }
 
 /// Applies one edit to `text`. `new` uses `\n` line ends; they follow the file's own
@@ -405,5 +423,17 @@ mod tests {
             "a\r\nx\r\ny\r\nc\r\n"
         );
         assert_eq!(applied(apply(src, "b  \nc", "z", false)).0, "a\r\nz\r\n");
+    }
+
+    #[test]
+    fn long_ambiguity_lists_are_cut() {
+        let src = "}\n".repeat(131);
+        let msg = apply(&src, "}", "x", false).unwrap_err().to_string();
+        assert!(
+            msg.starts_with(
+                "old_string occurs 131 times (lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, and 121 more)"
+            ),
+            "{msg}"
+        );
     }
 }

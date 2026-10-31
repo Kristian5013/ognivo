@@ -9,6 +9,8 @@ use globset::{Glob, GlobMatcher};
 use ignore::WalkBuilder;
 use regex::Regex;
 
+use crate::files::Target;
+
 pub const GREP_MAX_MATCHES: usize = 200;
 pub const GLOB_MAX_FILES: usize = 200;
 /// Matched lines are cut to this many characters.
@@ -26,10 +28,16 @@ pub enum SearchError {
     BadGlob { pattern: String, message: String },
 }
 
-/// Searches `base` (a directory or one file) for `pattern`, a Rust regex. An invalid regex
-/// is searched as literal text and the result says so. `glob` filters files by their path
-/// relative to `base`.
-pub fn grep(base: &Path, pattern: &str, glob: Option<&str>) -> Result<String, SearchError> {
+/// Searches `base` (a directory or one file) for `pattern`, a Rust regex, one line at a
+/// time. An invalid regex is searched as literal text and the result says so. `glob`
+/// filters the files of a directory by their path relative to it. Paths in the result are
+/// named relative to `root` (see [`Target`]).
+pub fn grep(
+    base: &Path,
+    root: &Path,
+    pattern: &str,
+    glob: Option<&str>,
+) -> Result<String, SearchError> {
     check_base(base)?;
     let (re, note) = match Regex::new(pattern) {
         Ok(re) => (re, None),
@@ -50,7 +58,12 @@ pub fn grep(base: &Path, pattern: &str, glob: Option<&str>) -> Result<String, Se
             )
         }
     };
-    let filter = glob.map(matcher).transpose()?;
+    // a single file is searched whatever the glob says: the model named it
+    let filter = if base.is_file() {
+        None
+    } else {
+        glob.map(matcher).transpose()?
+    };
     let mut rows = Vec::new();
     let mut files = 0usize;
     let mut capped = false;
@@ -83,7 +96,7 @@ pub fn grep(base: &Path, pattern: &str, glob: Option<&str>) -> Result<String, Se
                 if shown.len() < line.len() {
                     shown.push_str(" …");
                 }
-                rows.push(format!("{}:{}:{shown}", shown_path(base, &path), i + 1));
+                rows.push(format!("{}:{}:{shown}", named(&path, root), i + 1));
                 hit = true;
             }
         }
@@ -92,9 +105,14 @@ pub fn grep(base: &Path, pattern: &str, glob: Option<&str>) -> Result<String, Se
     let mut out = format!(
         "[grep: {} matches in {files} files for /{pattern}/ under {}{}]",
         rows.len(),
-        base.display(),
+        named(base, root),
         glob.map(|g| format!(", files {g}")).unwrap_or_default()
     );
+    if pattern.contains('\n') || pattern.contains("\\n") {
+        out.push_str(
+            "\n[grep matches one line at a time; a pattern with a line break never matches]",
+        );
+    }
     if capped {
         out.push_str(&format!(
             "\n[first {GREP_MAX_MATCHES} matches shown; narrow the pattern, path or glob]"
@@ -111,8 +129,9 @@ pub fn grep(base: &Path, pattern: &str, glob: Option<&str>) -> Result<String, Se
     Ok(out)
 }
 
-/// Lists files under `base` whose path relative to `base` matches `pattern`, newest first.
-pub fn glob(base: &Path, pattern: &str) -> Result<String, SearchError> {
+/// Lists files under `base` whose path relative to `base` matches `pattern`, newest first,
+/// named relative to `root`.
+pub fn glob(base: &Path, root: &Path, pattern: &str) -> Result<String, SearchError> {
     check_base(base)?;
     let m = matcher(pattern)?;
     let mut found: Vec<(SystemTime, String)> = walk(base)
@@ -122,14 +141,14 @@ pub fn glob(base: &Path, pattern: &str) -> Result<String, SearchError> {
                 .metadata()
                 .and_then(|m| m.modified())
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            (t, shown_path(base, &p))
+            (t, named(&p, root))
         })
         .collect();
     found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let total = found.len();
     let mut out = format!(
         "[glob: {total} files match {pattern} under {}]",
-        base.display()
+        named(base, root)
     );
     if total > GLOB_MAX_FILES {
         out.push_str(&format!(
@@ -173,16 +192,11 @@ fn walk(base: &Path) -> impl Iterator<Item = std::path::PathBuf> {
         .map(ignore::DirEntry::into_path)
 }
 
-/// Paths relative to `base` when searching a directory, the file name for a single file.
-fn shown_path(base: &Path, path: &Path) -> String {
-    if base.is_file() {
-        path.display().to_string()
-    } else {
-        path.strip_prefix(base)
-            .unwrap_or(path)
-            .display()
-            .to_string()
-    }
+fn named(path: &Path, root: &Path) -> String {
+    Target::new(path.to_owned(), root)
+        .shown
+        .display()
+        .to_string()
 }
 
 #[cfg(test)]
@@ -206,7 +220,7 @@ mod tests {
     #[test]
     fn grep_respects_gitignore_and_globs() {
         let d = tree();
-        let out = grep(d.path(), "alpha", Some("*.rs")).unwrap();
+        let out = grep(d.path(), d.path(), "alpha", Some("*.rs")).unwrap();
         assert!(out.starts_with("[grep: 2 matches in 2 files"), "{out}");
         assert!(out.contains("src/a.rs:1:fn alpha() {}"));
         assert!(out.contains("src/deep/b.rs:1:// alpha(x)"));
@@ -217,7 +231,7 @@ mod tests {
     #[test]
     fn invalid_regex_falls_back_to_literal() {
         let d = tree();
-        let out = grep(d.path(), "alpha(x", None).unwrap();
+        let out = grep(d.path(), d.path(), "alpha(x", None).unwrap();
         assert!(out.contains("searched as literal text"), "{out}");
         assert!(out.contains("src/deep/b.rs:1:// alpha(x)"), "{out}");
     }
@@ -225,11 +239,11 @@ mod tests {
     #[test]
     fn grep_and_glob_refuse_the_filesystem_root() {
         assert!(matches!(
-            grep(Path::new("/"), "x", None),
+            grep(Path::new("/"), Path::new("/"), "x", None),
             Err(SearchError::FilesystemRoot)
         ));
         assert!(matches!(
-            glob(Path::new("/"), "*"),
+            glob(Path::new("/"), Path::new("/"), "*"),
             Err(SearchError::FilesystemRoot)
         ));
     }
@@ -237,12 +251,29 @@ mod tests {
     #[test]
     fn glob_lists_matching_files() {
         let d = tree();
-        let out = glob(d.path(), "**/*.rs").unwrap();
+        let out = glob(d.path(), d.path(), "**/*.rs").unwrap();
         assert!(out.starts_with("[glob: 2 files match **/*.rs"), "{out}");
         assert!(out.contains("src/a.rs") && out.contains("src/deep/b.rs"));
         assert!(matches!(
-            glob(d.path(), "a["),
+            glob(d.path(), d.path(), "a["),
             Err(SearchError::BadGlob { .. })
         ));
+    }
+
+    /// M1 live run: a file path plus a glob found nothing; rows were relative to the base.
+    #[test]
+    fn a_file_base_ignores_the_glob_and_rows_name_paths_from_the_root() {
+        let d = tree();
+        let file = d.path().join("src/deep/b.rs");
+        let out = grep(&file, d.path(), "alpha", Some("**/*.rs")).unwrap();
+        assert!(
+            out.starts_with("[grep: 1 matches in 1 files for /alpha/ under src/deep/b.rs"),
+            "{out}"
+        );
+        assert!(out.ends_with("\nsrc/deep/b.rs:1:// alpha(x)"), "{out}");
+        let sub = grep(&d.path().join("src"), d.path(), "beta", None).unwrap();
+        assert!(sub.ends_with("\nsrc/a.rs:2:fn beta() {}"), "{sub}");
+        let multi = grep(d.path(), d.path(), "}\n}", None).unwrap();
+        assert!(multi.contains("one line at a time"), "{multi}");
     }
 }

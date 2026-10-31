@@ -143,8 +143,7 @@ const EDIT_DOC: &str = "Replace one exact, unique occurrence of a text in a file
 const WRITE_DOC: &str =
     "Create a file, or replace a whole file you have read, with the given content.";
 const SHELL_DOC: &str = "Run a bash command in the project and return its exit code and output. The working directory persists between calls.";
-const GREP_DOC: &str =
-    "Search file contents with a regular expression; returns path:line:text for each match.";
+const GREP_DOC: &str = "Search file contents line by line with a regular expression (Rust syntax: escape [ ] ( ) { } . * + ? | \\ to match them literally); returns path:line:text for each match.";
 const GLOB_DOC: &str =
     "List files whose path matches a glob pattern such as **/*.rs, newest first.";
 
