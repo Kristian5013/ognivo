@@ -13,6 +13,11 @@ structural = [
     "<|turn>", "<turn|>", "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
     "<|tool_response>", "<tool_response|>", '<|"|>', "<|think|>", "<|channel>", "<channel|>",
 ]
+# Without the thinking tags (<|think|>, <|channel>, <channel|>), which tasks may quote.
+framing = [
+    "<|turn>", "<turn|>", "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
+    "<|tool_response>", "<tool_response|>", '<|"|>',
+]
 eog = [1, 106, 50] # <eos>, <turn|>, <|tool_response>
 specials = [
     "<pad>", "<eos>", "<bos>", "<unk>", "<mask>",

@@ -254,3 +254,79 @@ async fn sigterm_ends_the_run_with_an_end_event() {
         (Some("end"), Some("SIGTERM"), Some(143))
     );
 }
+
+/// At the time limit the run stops itself: exit 124 as with `timeout`, the end event says
+/// why and what was verified, and the model had been told the limit.
+#[tokio::test]
+async fn the_time_limit_ends_the_run_with_exit_124() {
+    // a server that reads the request and never answers
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let request = Arc::new(Mutex::new(String::new()));
+    let seen = request.clone();
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut part = [0u8; 65536];
+        loop {
+            let n = sock.read(&mut part).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            seen.lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&part[..n]));
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let bin = env!("CARGO_BIN_EXE_ognivo");
+    let started = std::time::Instant::now();
+    let out = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(bin)
+            .args([
+                "run",
+                "--url",
+                &url,
+                "--profile",
+                "gemma-4-26b-a4b",
+                "--jsonl",
+            ])
+            .args(["--seed", "1", "--time-limit", "2", "--data-dir"])
+            .arg(&data)
+            .arg("--cwd")
+            .arg(dir.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(b"hello").unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(124),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    let last = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .to_owned();
+    let end: Value = serde_json::from_str(&last).unwrap();
+    assert_eq!(
+        (end["stopped"].as_str(), end["exit"].as_i64()),
+        (Some("time_limit"), Some(124))
+    );
+    assert_eq!(end["verification"], json!({"status": "no_changes"}));
+    assert!(
+        request.lock().unwrap().contains(
+            "hello\\n\\n[ognivo] Time limit: 2 s. ognivo stops the turn when it runs out."
+        ),
+        "the model was not told the limit"
+    );
+}

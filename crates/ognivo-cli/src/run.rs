@@ -3,13 +3,15 @@
 //! verification status (what the turn's tool calls show, not what the answer claims).
 //!
 //! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
-//! 3 the server failed; 128 + N stopped by signal N (TERM from `timeout`, INT from ^C): the
-//! turn is dropped, which kills the process group of a running command, and the end event
-//! is still written.
+//! 3 the server failed; 124 the time limit ran out (as with `timeout`); 128 + N stopped by
+//! signal N (TERM from `timeout`, INT from ^C): the turn is dropped, which kills the process
+//! group of a running command, and the end event is still written. Without an answer the
+//! end event carries the verification status of what was done.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, AllowAll, Approver, NoUser, TurnEnd};
@@ -48,6 +50,10 @@ pub struct RunArgs {
     /// Server slot to pin, so the session keeps its KV cache
     #[arg(long)]
     slot: Option<u32>,
+    /// Wall-clock limit in seconds: the model is told it, commands never run past it, and
+    /// the run ends itself with exit code 124 when it runs out
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
+    time_limit: Option<u64>,
     /// Events as JSON lines on stdout instead of text
     #[arg(long)]
     jsonl: bool,
@@ -126,6 +132,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         max_steps: a.max_steps,
         max_tokens,
         seed,
+        time_limit: a.time_limit.map(Duration::from_secs),
     };
     let mut agent = Agent::new(Box::new(driver), family, approver, opts);
     let jsonl = a.jsonl;
@@ -142,34 +149,46 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         }
     };
     let stats = serde_json::to_value(&agent.stats)?;
+    let verification = serde_json::to_value(agent.verification())?;
     let end = match end {
         Ok(end) => end,
         Err((name, code)) => {
             eprintln!("ognivo run: stopped by {name}");
             if jsonl {
-                let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "seed": seed, "stats": stats});
+                let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "verification": verification, "seed": seed, "stats": stats});
                 println!("{end}");
             }
             return Ok(ExitCode::from(code));
         }
     };
-    let (code, answer) = match end {
-        Ok(TurnEnd::Answer(a)) => (0, Some(a)),
+    let (code, answer, stopped) = match end {
+        Ok(TurnEnd::Answer(a)) => (0, Some(a), None),
         Ok(TurnEnd::StepLimit) => {
             eprintln!("ognivo run: step limit ({}) reached", a.max_steps);
-            (1, None)
+            (1, None, Some("step_limit"))
         }
         Ok(TurnEnd::Stuck(why)) => {
             eprintln!("ognivo run: stopped: {why}");
-            (1, None)
+            (1, None, Some("stuck"))
+        }
+        Ok(TurnEnd::TimeLimit) => {
+            eprintln!(
+                "ognivo run: time limit ({} s) reached",
+                a.time_limit.unwrap_or_default()
+            );
+            (124, None, Some("time_limit"))
         }
         Err(e) => {
             eprintln!("ognivo run: {e}");
-            (3, None)
+            (3, None, Some("server_error"))
         }
     };
     if jsonl {
-        let end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "seed": seed, "stats": stats});
+        let mut end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "seed": seed, "stats": stats});
+        if let Some(why) = stopped {
+            end["stopped"] = why.into();
+            end["verification"] = verification;
+        }
         println!("{end}");
     } else {
         if let Some(a) = &answer {

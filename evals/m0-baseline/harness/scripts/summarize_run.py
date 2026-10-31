@@ -168,12 +168,14 @@ def summarize_ognivo(run):
     stats = (end or {}).get("stats") or {}
     answer = (end or {}).get("answer") or {}
     verification = answer.get("verification") or {}
+    # without an answer the end event says why the run stopped and what was verified
     return {"steps": stats.get("steps", 0), "tools": dict(tools), "failed": failed, "calls": calls,
             "tokens": {k: stats[k] for k in ("prompt_tokens_processed", "prompt_tokens_cached",
                                              "completion_tokens") if k in stats},
             "outcome": verification.get("status") or ("no_answer" if end else "no_end_event"),
             "ognivo": {"exit": (end or {}).get("exit"), "seed": (end or {}).get("seed"), "stats": stats,
-                       "verification": verification or None,
+                       "stopped": (end or {}).get("stopped"),
+                       "verification": verification or (end or {}).get("verification"),
                        "unsupported_claim": answer.get("unsupported_claim")}}
 
 

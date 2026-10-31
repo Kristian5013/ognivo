@@ -2,6 +2,11 @@
 //! item 5). The loop sees [`ModelDriver`] only; [`ChatDriver`] is the Generic
 //! implementation over `/v1/chat/completions`, the Native one over `/completion` follows
 //! in M2.
+//!
+//! Both guards of the Generic path live here, so the loop and the tools only ever see plain
+//! text: the special-token [`guard`](crate::guard) breaks control-token strings in every
+//! request and restores them in every result, and the [`repeat`](crate::repeat) guard
+//! stops a stream that loops by dropping it, which makes llama-server cancel the task.
 
 use std::fmt;
 use std::sync::Arc;
@@ -12,11 +17,13 @@ use serde_json::{Value, json};
 use crate::Family;
 use crate::engine::{EngineError, SamplerSpec, Usage};
 use crate::generic::{
-    ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, Outcome, ToolChoice,
-    ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
+    Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, Outcome, ToolCall,
+    ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
 };
+use crate::guard::{Guard, unescape};
 use crate::llama::LlamaServer;
 use crate::profile::ModelProfile;
+use crate::repeat::{Loop, Repeats};
 
 /// Attempts per step: the first try and one retry after a format error (§5.2).
 const MAX_ATTEMPTS: u8 = 2;
@@ -52,7 +59,8 @@ pub enum DriverEvent {
         seed: u32,
         reason: String,
     },
-    /// The last event of every successful step.
+    /// The last event of every successful step, a step the repetition guard stopped
+    /// included.
     Finished(Box<Finished>),
 }
 
@@ -91,6 +99,7 @@ pub trait ModelDriver: Send + Sync + fmt::Debug {
 pub struct ChatDriver {
     server: LlamaServer,
     profile: Arc<ModelProfile>,
+    guard: Arc<Guard>,
     level: String,
     slot: Option<u32>,
 }
@@ -112,6 +121,7 @@ impl ChatDriver {
         }
         Ok(Self {
             server,
+            guard: Arc::new(Guard::new(&profile.tokens)),
             profile: Arc::new(profile),
             level,
             slot,
@@ -125,11 +135,19 @@ impl ChatDriver {
     /// The request body without its seed, which every attempt sets on its own.
     fn body(&self, req: StepRequest) -> Result<Value, DriverError> {
         let family = self.profile.family;
+        let messages = history_for(family, req.messages)?;
         let chat = ChatRequest {
-            messages: history_for(family, req.messages)?,
+            messages: messages
+                .into_iter()
+                .map(|m| guard_message(&self.guard, m))
+                .collect(),
             sampler: SamplerSpec::from(self.profile.sampling.main),
             template_kwargs: self.profile.chat_template_kwargs(Some(&self.level)),
-            tools: req.tools,
+            tools: req
+                .tools
+                .into_iter()
+                .map(|t| guard_tool(&self.guard, t))
+                .collect(),
             tool_choice: req.tool_choice,
             // gpt-oss's template renders only tool_calls[0]: a second call would vanish
             parallel_tool_calls: family != Family::Harmony,
@@ -144,7 +162,7 @@ impl ModelDriver for ChatDriver {
     fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
         let seed = req.seed;
         match self.body(req) {
-            Ok(body) => steps(self.server.clone(), body, seed),
+            Ok(body) => steps(self.server.clone(), self.guard.clone(), body, seed),
             Err(e) => stream::once(async { Err(e) }).boxed(),
         }
     }
@@ -198,6 +216,59 @@ fn history_for(
     Ok(out)
 }
 
+/// Every text of a message as the server must get it: the user's words and the model's own
+/// earlier output too, since the server re-tokenizes all of it with special parsing.
+fn guard_message(g: &Guard, m: ChatMessage) -> ChatMessage {
+    let esc = |t: String| g.escape(&t).into_owned();
+    match m {
+        ChatMessage::System(t) => ChatMessage::System(esc(t)),
+        ChatMessage::User(t) => ChatMessage::User(esc(t)),
+        ChatMessage::Assistant {
+            content,
+            reasoning,
+            tool_calls,
+        } => ChatMessage::Assistant {
+            content: esc(content),
+            reasoning: reasoning.map(esc),
+            tool_calls: tool_calls
+                .into_iter()
+                .map(|c| ToolCall {
+                    arguments: guard_arguments(g, &c.arguments),
+                    ..c
+                })
+                .collect(),
+        },
+        ChatMessage::Tool {
+            tool_call_id,
+            content,
+        } => ChatMessage::Tool {
+            tool_call_id,
+            content: esc(content),
+        },
+    }
+}
+
+/// JSON arguments are guarded string by string, so an escape sequence in the raw text
+/// cannot hide a control token; unchanged arguments keep their bytes.
+fn guard_arguments(g: &Guard, raw: &str) -> String {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(mut v) => {
+            if g.escape_json(&mut v) {
+                v.to_string()
+            } else {
+                raw.to_owned()
+            }
+        }
+        Err(_) => g.escape(raw).into_owned(),
+    }
+}
+
+fn guard_tool(g: &Guard, mut t: ToolDecl) -> ToolDecl {
+    t.description = g.escape(&t.description).into_owned();
+    g.escape_json(&mut t.parameters);
+    t
+}
+
 enum State {
     Connect {
         attempt: u8,
@@ -208,29 +279,75 @@ enum State {
         seed: u32,
         chunks: BoxStream<'static, Result<Value, EngineError>>,
         acc: ChatCompletion,
+        watch: Box<Watch>,
     },
     End,
 }
 
+/// The repetition guard over every stream of one attempt.
+#[derive(Debug, Default)]
+struct Watch {
+    reasoning: Repeats,
+    text: Repeats,
+    arguments: Vec<Repeats>,
+}
+
+impl Watch {
+    fn push(&mut self, ev: &ChatEvent) -> Option<(Channel, Loop)> {
+        match ev {
+            ChatEvent::Reasoning(r) => self.reasoning.push(r).map(|l| (Channel::Reasoning, l)),
+            ChatEvent::Text(t) => self.text.push(t).map(|l| (Channel::Text, l)),
+            ChatEvent::ToolCall {
+                index, arguments, ..
+            } => {
+                let i = *index as usize;
+                if self.arguments.len() <= i {
+                    self.arguments.resize_with(i + 1, Repeats::default);
+                }
+                self.arguments[i].push(arguments).map(|l| {
+                    let channel = Channel::Arguments {
+                        index: *index,
+                        name: None,
+                    };
+                    (channel, l)
+                })
+            }
+            ChatEvent::Finish(_) | ChatEvent::Usage(_) => None,
+        }
+    }
+}
+
 type Batch = Vec<Result<DriverEvent, DriverError>>;
+
+/// What every attempt of a step shares.
+struct Attempts {
+    server: LlamaServer,
+    /// The request without its seed.
+    body: Value,
+    guard: Arc<Guard>,
+}
 
 /// Runs the attempts of one step as a single stream of events.
 fn steps(
     server: LlamaServer,
+    guard: Arc<Guard>,
     body: Value,
     seed: u32,
 ) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
-    let ctx = Arc::new((server, body));
+    let ctx = Arc::new(Attempts {
+        server,
+        body,
+        guard,
+    });
     stream::unfold(
         (ctx, State::Connect { attempt: 1, seed }),
         |(ctx, state)| async move {
             let (batch, next) = match state {
                 State::End => return None,
                 State::Connect { attempt, seed } => {
-                    let (server, body) = &*ctx;
-                    let mut body = body.clone();
+                    let mut body = ctx.body.clone();
                     body["seed"] = json!(seed);
-                    match server.chat_stream(&body, None).await {
+                    match ctx.server.chat_stream(&body, None).await {
                         Ok(chunks) => (
                             Vec::new(),
                             State::Stream {
@@ -238,6 +355,7 @@ fn steps(
                                 seed,
                                 chunks,
                                 acc: ChatCompletion::default(),
+                                watch: Box::default(),
                             },
                         ),
                         Err(e) => failed(e, attempt, seed),
@@ -248,31 +366,47 @@ fn steps(
                     seed,
                     mut chunks,
                     mut acc,
+                    mut watch,
                 } => match chunks.next().await {
                     Some(Ok(v)) => match chat_events(&v) {
                         Ok(events) => {
-                            let shown = events.iter().filter_map(shown).map(Ok).collect();
+                            let mut batch: Batch =
+                                events.iter().filter_map(shown).map(Ok).collect();
+                            let mut looped = None;
                             for ev in events {
+                                if looped.is_none() {
+                                    looped = watch.push(&ev);
+                                }
                                 acc.apply(ev);
                             }
-                            (
-                                shown,
-                                State::Stream {
-                                    attempt,
-                                    seed,
-                                    chunks,
-                                    acc,
-                                },
-                            )
+                            match looped {
+                                // returning without `chunks` drops the connection, and
+                                // llama-server cancels the generation
+                                Some((channel, l)) => {
+                                    let done = stopped(acc, channel, &l, seed);
+                                    batch.push(Ok(DriverEvent::Finished(Box::new(done))));
+                                    (batch, State::End)
+                                }
+                                None => (
+                                    batch,
+                                    State::Stream {
+                                        attempt,
+                                        seed,
+                                        chunks,
+                                        acc,
+                                        watch,
+                                    },
+                                ),
+                            }
                         }
                         Err(e) => failed(e, attempt, seed),
                     },
                     Some(Err(e)) => failed(e, attempt, seed),
                     None => {
                         let done = Finished {
-                            outcome: acc.outcome(),
-                            content: acc.content,
-                            reasoning: acc.reasoning,
+                            outcome: acc.outcome(&ctx.guard),
+                            content: unescape(&acc.content).into_owned(),
+                            reasoning: unescape(&acc.reasoning).into_owned(),
                             finish: acc.finish,
                             usage: acc.usage,
                             seed,
@@ -286,6 +420,29 @@ fn steps(
     )
     .flat_map(stream::iter)
     .boxed()
+}
+
+/// The result of an attempt the repetition guard stopped: nothing in it may run.
+fn stopped(acc: ChatCompletion, mut channel: Channel, l: &Loop, seed: u32) -> Finished {
+    if let Channel::Arguments { index, name } = &mut channel {
+        *name = acc
+            .tool_calls
+            .get(*index as usize)
+            .map(|c| c.name.clone())
+            .filter(|n| !n.is_empty());
+    }
+    Finished {
+        outcome: Outcome::Repeating {
+            partial: acc.tool_calls,
+            channel,
+            sample: unescape(&l.sample).into_owned(),
+        },
+        content: unescape(&acc.content).into_owned(),
+        reasoning: unescape(&acc.reasoning).into_owned(),
+        finish: None,
+        usage: acc.usage,
+        seed,
+    }
 }
 
 /// An attempt failed: retry once on a format error, otherwise end the step with the error.
@@ -323,10 +480,13 @@ fn failed(e: EngineError, attempt: u8, seed: u32) -> (Batch, State) {
     (vec![Err(err)], State::End)
 }
 
+/// A fragment for display. A joiner pair split across two fragments shows as nothing; the
+/// [`Finished`] texts are exact.
 fn shown(ev: &ChatEvent) -> Option<DriverEvent> {
+    let plain = |t: &str| unescape(t).into_owned();
     match ev {
-        ChatEvent::Text(t) => Some(DriverEvent::Text(t.clone())),
-        ChatEvent::Reasoning(r) => Some(DriverEvent::Reasoning(r.clone())),
+        ChatEvent::Text(t) => Some(DriverEvent::Text(plain(t))),
+        ChatEvent::Reasoning(r) => Some(DriverEvent::Reasoning(plain(r))),
         ChatEvent::ToolCall {
             index,
             name,
@@ -335,7 +495,7 @@ fn shown(ev: &ChatEvent) -> Option<DriverEvent> {
         } => Some(DriverEvent::ToolCallDelta {
             index: *index,
             name: name.clone(),
-            arguments: arguments.clone(),
+            arguments: plain(arguments),
         }),
         ChatEvent::Finish(_) | ChatEvent::Usage(_) => None,
     }
@@ -636,6 +796,137 @@ mod tests {
         }];
         assert!(history_for(Family::Harmony, two.clone()).is_err());
         assert!(history_for(Family::Gemma4, two).is_ok());
+    }
+
+    /// Streams `chunks` one write at a time and reports the chunk at which the client was
+    /// gone (`None`: it read everything).
+    async fn streaming_server(chunks: Vec<Value>) -> (String, Arc<Mutex<Option<usize>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let gone = Arc::new(Mutex::new(None));
+        let seen = gone.clone();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 1 << 16];
+            let _ = sock.read(&mut buf).await.unwrap();
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n";
+            sock.write_all(head.as_bytes()).await.unwrap();
+            let mut frames: Vec<String> = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+            frames.push("data: [DONE]\n\n".into());
+            for (i, f) in frames.iter().enumerate() {
+                let frame = format!("{:x}\r\n{f}\r\n", f.len());
+                if sock.write_all(frame.as_bytes()).await.is_err() || sock.flush().await.is_err() {
+                    *seen.lock().unwrap() = Some(i);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            let _ = sock.write_all(b"0\r\n\r\n").await;
+        });
+        (url, gone)
+    }
+
+    #[tokio::test]
+    async fn a_looping_stream_is_dropped_and_nothing_runs() {
+        // M1 stamp A, Gemma, misc-ai-chat-multiturn: a write argument stuck on 56 bytes
+        let period = "tok\":256,\"i for i, tok in enumerate(SPECIALS) if False,\n";
+        let mut chunks = vec![chunk(
+            json!({"tool_calls": [{"index": 0, "id": "w", "type": "function", "function": {"name": "write", "arguments": "{\"file\":\"a.py\",\"text\":\""}}]}),
+            None,
+        )];
+        for _ in 0..600 {
+            for piece in [&period[..20], &period[20..]] {
+                chunks.push(chunk(
+                    json!({"tool_calls": [{"index": 0, "function": {"arguments": piece}}]}),
+                    None,
+                ));
+            }
+        }
+        chunks.push(chunk(json!({}), Some("length")));
+        let total = chunks.len();
+        let (url, gone) = streaming_server(chunks).await;
+        let events = run(&driver(&url, Family::Gemma4), request(1)).await;
+        let f = finished(&events);
+        let Outcome::Repeating {
+            partial,
+            channel,
+            sample,
+        } = &f.outcome
+        else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(partial.len(), 1);
+        assert_eq!(channel.to_string(), "the arguments of write");
+        assert!(period.repeat(2).contains(sample.as_str()), "{sample:?}");
+        assert_eq!(f.finish, None);
+        // the guard fired near 2 KB of loop, and the server saw the client go long before
+        // the end of the stream
+        for _ in 0..200 {
+            if gone.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let at = gone.lock().unwrap().expect("the client kept reading");
+        assert!(at < 200 && at < total, "dropped at chunk {at} of {total}");
+    }
+
+    #[tokio::test]
+    async fn control_token_text_is_broken_in_requests_and_restored_in_results() {
+        let p = profile::builtin()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.family == Family::Gemma4)
+            .unwrap();
+        // control-token texts are built from parts here (§5.3 repository rule)
+        let bos = ["<", "bos>"].concat();
+        let quote = ["<|", "\"|>"].concat();
+        let shown = Guard::new(&p.tokens).escape(&bos).into_owned();
+        let reply = vec![
+            chunk(json!({"content": format!("the list holds {shown}")}), None),
+            chunk(
+                json!({"tool_calls": [{"index": 0, "id": "e", "type": "function", "function": {"name": "edit", "arguments": json!({"file": "a.py", "find": shown, "replace": "\"x\""}).to_string()}}]}),
+                None,
+            ),
+            chunk(json!({}), Some("tool_calls")),
+        ];
+        let (url, bodies) = fake_server(vec![sse("200 OK", &reply, true)]).await;
+        let d =
+            ChatDriver::new(LlamaServer::new(&url, None).unwrap(), p.clone(), None, None).unwrap();
+        let mut req = request(1);
+        req.messages = vec![
+            ChatMessage::User(format!("Render {bos} first.")),
+            ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: Some(format!("the file starts with {bos}")),
+                tool_calls: vec![ToolCall {
+                    id: "r".into(),
+                    name: "read".into(),
+                    arguments: json!({"file": "a.py"}).to_string(),
+                }],
+            },
+            ChatMessage::Tool {
+                tool_call_id: "r".into(),
+                content: format!("1│SPECIALS = [\"{bos}\"]  # {quote}"),
+            },
+        ];
+        let events = run(&d, req).await;
+        let sent = bodies.lock().unwrap()[0].to_string();
+        for g in p.tokens.guarded() {
+            let g = serde_json::to_string(g).unwrap();
+            assert!(!sent.contains(&g[1..g.len() - 1]), "{g} reached the server");
+        }
+        assert!(
+            sent.contains("1│SPECIALS = [\\\"<\u{2060}bos>\\\"]"),
+            "{sent}"
+        );
+        let f = finished(&events);
+        assert_eq!(f.content, format!("the list holds {bos}"));
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        let args: Value = serde_json::from_str(&calls.calls()[0].arguments).unwrap();
+        assert_eq!(args["find"], json!(bos));
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! - [`generic`]: the Generic path over `/v1/chat/completions` (M1): request building and
 //!   streamed-chunk folding, with the maintainers' correctness rules baked in;
 //! - [`driver`]: [`ModelDriver`], the agent loop's only view of a model, and
-//!   [`ChatDriver`], its Generic implementation;
+//!   [`ChatDriver`], its Generic implementation, with the special-token [`guard`] and the
+//!   [`repeat`] guard on its streams;
 //! - [`llama`]: the HTTP client for llama-server and ik_llama.cpp ([`sse`] parses its
 //!   streams);
 //! - [`doctor`]: server checks behind `ognivo doctor`;
@@ -22,8 +23,10 @@ pub mod driver;
 pub mod engine;
 pub mod family;
 pub mod generic;
+pub mod guard;
 pub mod llama;
 pub mod profile;
+pub mod repeat;
 pub mod sse;
 pub mod template;
 
@@ -32,7 +35,8 @@ pub use driver::{ChatDriver, DriverError, DriverEvent, Finished, ModelDriver, St
 pub use engine::{CompletionRequest, EngineError, RawEngine, TokenEngine, TokenEvent, TokenId};
 pub use family::Family;
 pub use generic::{
-    ChatCompletion, ChatEvent, ChatMessage, ChatRequest, ExecutableCalls, FinishReason, Outcome,
-    ToolCall, ToolChoice, ToolDecl, chat_body, chat_events,
+    Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, ExecutableCalls, FinishReason,
+    Outcome, ToolCall, ToolChoice, ToolDecl, chat_body, chat_events,
 };
+pub use guard::Guard;
 pub use profile::ModelProfile;

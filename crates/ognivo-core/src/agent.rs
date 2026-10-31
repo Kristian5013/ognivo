@@ -12,9 +12,13 @@
 //!   ([`crate::verify`]): a change after the last passing build or test sends the model
 //!   back once to run one (when it can), an answer claiming checks that never happened is
 //!   sent back once to be corrected, and the user always gets the verification status.
+//! - A turn may have a time limit (M0 requirement 4). The model is told the limit, the
+//!   elapsed half and 80%; a command never runs past it, and at the limit the loop stops
+//!   the generation or the command and ends the turn itself.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -27,6 +31,7 @@ use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
 use ognivo_tools::projection::{self, Call};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
 use serde::Serialize;
+use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
 use crate::verify::{self, Ledger, Run, Verification};
@@ -35,6 +40,8 @@ use crate::verify::{self, Ledger, Run, Verification};
 const MAX_UNUSABLE_IN_A_ROW: u32 = 3;
 /// Calls executed from one generation; the rest get an error result.
 const MAX_CALLS_PER_STEP: usize = 8;
+/// Time a command leaves before the turn's limit, for the answer and the exit.
+const TIME_RESERVE: Duration = Duration::from_secs(5);
 
 /// An action that needs the user's yes (§8).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +138,8 @@ pub struct Stats {
     pub malformed: u32,
     /// Generations cut by `max_tokens`.
     pub truncated: u32,
+    /// Generations the repetition guard stopped.
+    pub repeating: u32,
     /// Format errors the driver retried.
     pub restarts: u32,
     /// Calls whose arguments did not match the declared schema.
@@ -163,6 +172,8 @@ pub enum TurnEnd {
     StepLimit,
     /// Several generations in a row ended without usable calls.
     Stuck(String),
+    /// The turn's time limit ran out before an answer.
+    TimeLimit,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +189,54 @@ pub struct AgentOptions {
     /// Review state at the start: clean only when nothing unreviewed is known to exist
     /// (for now: a clean git tree; the edit journal takes over with the store).
     pub workspace: WorkspaceState,
+    /// Wall-clock limit of each turn.
+    pub time_limit: Option<Duration>,
+}
+
+/// The time limit of the running turn.
+#[derive(Debug, Clone, Copy)]
+struct Clock {
+    start: Instant,
+    limit: Duration,
+    /// Shares of the limit already announced to the model.
+    told: u8,
+}
+
+impl Clock {
+    fn deadline(&self) -> Instant {
+        self.start + self.limit
+    }
+
+    fn left(&self) -> Duration {
+        self.deadline().saturating_duration_since(Instant::now())
+    }
+
+    /// The note for a share of the limit passed since the last one: half, then 80%.
+    fn note(&mut self) -> Option<String> {
+        let used = self.start.elapsed().as_secs_f64() / self.limit.as_secs_f64();
+        let left = about(self.left());
+        if used >= 0.8 && self.told < 2 {
+            self.told = 2;
+            Some(format!(
+                "[ognivo] 80% of the time limit is used, about {left} left. Finish now: complete the change, check it once, then give the final answer; start no long commands or experiments."
+            ))
+        } else if used >= 0.5 && self.told < 1 {
+            self.told = 1;
+            Some(format!(
+                "[ognivo] Half of the time limit is used, about {left} left."
+            ))
+        } else {
+            None
+        }
+    }
+}
+
+/// `3 min` or `40 s`.
+fn about(d: Duration) -> String {
+    match d.as_secs() {
+        s if s >= 120 => format!("{} min", s / 60),
+        s => format!("{s} s"),
+    }
 }
 
 pub struct Agent {
@@ -190,6 +249,7 @@ pub struct Agent {
     cwd: PathBuf,
     /// Files this session has read or written: only those may be overwritten whole.
     seen: HashSet<PathBuf>,
+    clock: Option<Clock>,
     workspace: WorkspaceState,
     /// What this turn changed, ran and was refused.
     ledger: Ledger,
@@ -237,6 +297,7 @@ impl Agent {
             approver,
             cwd,
             seen: HashSet::new(),
+            clock: None,
             workspace: opts.workspace,
             ledger: Ledger::default(),
             stats: Stats::default(),
@@ -248,19 +309,44 @@ impl Agent {
         &self.messages
     }
 
+    /// What the current or last turn's tool calls show, answer or not.
+    pub fn verification(&self) -> Verification {
+        self.ledger.status(&self.opts.root)
+    }
+
     /// Runs one user turn to its end.
     pub async fn turn(
         &mut self,
         user: &str,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Result<TurnEnd, DriverError> {
-        self.messages.push(ChatMessage::User(user.to_owned()));
+        self.clock = self.opts.time_limit.map(|limit| Clock {
+            start: Instant::now(),
+            limit,
+            told: 0,
+        });
+        let user = match self.opts.time_limit {
+            Some(limit) => format!(
+                "{user}\n\n[ognivo] Time limit: {}. ognivo stops the turn when it runs out.",
+                about(limit)
+            ),
+            None => user.to_owned(),
+        };
+        self.messages.push(ChatMessage::User(user));
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
         self.ledger = Ledger::default();
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
         for _ in 0..self.opts.max_steps {
+            if let Some(note) = self.clock.as_mut().and_then(Clock::note) {
+                on(AgentEvent::Notice { text: note.clone() });
+                self.append_to_last(&note);
+            }
+            let deadline = self.clock.map(|c| c.deadline());
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(TurnEnd::TimeLimit);
+            }
             self.stats.steps += 1;
             let req = StepRequest {
                 messages: self.messages.clone(),
@@ -271,7 +357,16 @@ impl Agent {
             };
             let mut events = self.driver.step(req);
             let mut finished = None;
-            while let Some(ev) = events.next().await {
+            loop {
+                let next = match deadline {
+                    // dropping the stream at the limit cancels the generation
+                    Some(d) => match tokio::time::timeout_at(d, events.next()).await {
+                        Ok(next) => next,
+                        Err(_) => return Ok(TurnEnd::TimeLimit),
+                    },
+                    None => events.next().await,
+                };
+                let Some(ev) = next else { break };
                 match ev? {
                     DriverEvent::Reasoning(text) => on(AgentEvent::Reasoning { text }),
                     DriverEvent::Text(text) => on(AgentEvent::Text { text }),
@@ -378,6 +473,17 @@ impl Agent {
                     unusable += 1;
                     let note = format!(
                         "[ognivo] Your last tool call could not be used ({reason}), so nothing was run. Call the tool again with a JSON object of arguments."
+                    );
+                    on(AgentEvent::Notice { text: note.clone() });
+                    self.messages.push(ChatMessage::User(note));
+                }
+                Outcome::Repeating {
+                    channel, sample, ..
+                } => {
+                    self.stats.repeating += 1;
+                    unusable += 1;
+                    let note = format!(
+                        "[ognivo] Your last output was stopped because {channel} kept repeating {sample:?}; nothing was run and it was discarded. Continue from the last tool result without repeating that text; write a long file in smaller edits."
                     );
                     on(AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
@@ -587,6 +693,10 @@ impl Agent {
                     _ => "it may change things the edit journal cannot undo",
                 };
                 let checks = verify::is_build_or_test(&command);
+                // a command never runs into the turn's time limit, nor asks when it could not run
+                if let Err(e) = self.room() {
+                    return e;
+                }
                 if let Some(refusal) = self
                     .permit(
                         tool,
@@ -602,16 +712,28 @@ impl Agent {
                     }
                     return refusal;
                 }
+                let asked = timeout
+                    .unwrap_or(exec::DEFAULT_TIMEOUT)
+                    .min(exec::MAX_TIMEOUT);
+                // the question may have taken time
+                let cut = match self.room() {
+                    Ok(room) => room.filter(|r| *r < asked),
+                    Err(e) => return e,
+                };
                 let opts = ShellOptions {
                     cwd: self.cwd.clone(),
-                    timeout: timeout
-                        .unwrap_or(exec::DEFAULT_TIMEOUT)
-                        .min(exec::MAX_TIMEOUT),
+                    timeout: cut.unwrap_or(asked),
                     output_budget: exec::DEFAULT_OUTPUT_BUDGET,
                     log_dir: self.opts.data_dir.join("logs"),
                 };
                 match exec::run(&command, &opts).await {
-                    Ok(r) => {
+                    Ok(mut r) => {
+                        if let (Some(cut), true) = (cut, r.timed_out) {
+                            r.text.push_str(&format!(
+                                "\n[ognivo] its timeout was cut to {} s by the time limit of the turn",
+                                cut.as_secs()
+                            ));
+                        }
                         if checks {
                             self.ledger.ran(Run {
                                 command: command.clone(),
@@ -630,6 +752,29 @@ impl Agent {
                     Err(e) => format!("[error] {e}"),
                 }
             }
+        }
+    }
+
+    /// Time a command may take before the turn's limit (`None`: no limit), or the result
+    /// for a command that cannot start any more.
+    fn room(&self) -> Result<Option<Duration>, String> {
+        match self.clock.map(|c| c.left().saturating_sub(TIME_RESERVE)) {
+            Some(r) if r < Duration::from_secs(1) => {
+                Err("[error] not run: the time limit of the turn is reached".to_owned())
+            }
+            room => Ok(room),
+        }
+    }
+
+    /// Adds a note to the newest message, a tool result or ognivo's own note, so that no
+    /// extra message enters the history.
+    fn append_to_last(&mut self, note: &str) {
+        match self.messages.last_mut() {
+            Some(ChatMessage::Tool { content, .. } | ChatMessage::User(content)) => {
+                content.push_str("\n\n");
+                content.push_str(note);
+            }
+            _ => self.messages.push(ChatMessage::User(note.to_owned())),
         }
     }
 
@@ -697,29 +842,43 @@ fn error_text(e: &FileError) -> String {
 mod tests {
     use super::*;
     use futures::stream::{self, BoxStream};
-    use ognivo_models::{ChatCompletion, FinishReason, Finished};
+    use ognivo_models::{Channel, ChatCompletion, FinishReason, Finished, Guard};
     use std::sync::{Arc, Mutex};
+
+    /// One prepared step: a result, or a generation that never ends.
+    #[derive(Debug)]
+    enum Step {
+        Done(Box<Finished>),
+        Hang,
+    }
+
+    impl From<ChatCompletion> for Step {
+        fn from(c: ChatCompletion) -> Self {
+            Step::Done(Box::new(Finished {
+                outcome: c.outcome(&Guard::default()),
+                content: c.content,
+                reasoning: c.reasoning,
+                finish: c.finish,
+                usage: c.usage,
+                seed: 0,
+            }))
+        }
+    }
 
     /// Plays back prepared generations and records what each step was sent.
     #[derive(Debug)]
     struct Script {
-        steps: Mutex<Vec<ChatCompletion>>,
+        steps: Mutex<Vec<Step>>,
         seen: Arc<Mutex<Vec<StepRequest>>>,
     }
 
     impl ModelDriver for Script {
         fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
             self.seen.lock().unwrap().push(req);
-            let c = self.steps.lock().unwrap().remove(0);
-            let f = Finished {
-                outcome: c.outcome(),
-                content: c.content,
-                reasoning: c.reasoning,
-                finish: c.finish,
-                usage: c.usage,
-                seed: 0,
-            };
-            stream::iter(vec![Ok(DriverEvent::Finished(Box::new(f)))]).boxed()
+            match self.steps.lock().unwrap().remove(0) {
+                Step::Done(f) => stream::iter(vec![Ok(DriverEvent::Finished(f))]).boxed(),
+                Step::Hang => stream::pending().boxed(),
+            }
         }
     }
 
@@ -763,6 +922,16 @@ mod tests {
         workspace: WorkspaceState,
         approver: Box<dyn Approver>,
     ) -> Run {
+        let steps = steps.into_iter().map(Step::from).collect();
+        script(steps, workspace, approver, None)
+    }
+
+    fn script(
+        steps: Vec<Step>,
+        workspace: WorkspaceState,
+        approver: Box<dyn Approver>,
+        time_limit: Option<Duration>,
+    ) -> Run {
         let dir = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
@@ -779,6 +948,7 @@ mod tests {
             max_tokens: 16384,
             seed: 1,
             workspace,
+            time_limit,
         };
         Run {
             agent: Agent::new(Box::new(driver), Family::Harmony, approver, opts),
@@ -1071,5 +1241,118 @@ mod tests {
             (Verification::NoChanges, false)
         );
         assert!(notes(&r.agent)[0].contains("no file was changed"));
+    }
+
+    #[tokio::test]
+    async fn a_repeating_generation_runs_nothing() {
+        let looped = Finished {
+            outcome: Outcome::Repeating {
+                partial: vec![ToolCall {
+                    id: "w".into(),
+                    name: "write".into(),
+                    arguments: "{\"path\":\"new.rs\",\"content\":\"abab".into(),
+                }],
+                channel: Channel::Arguments {
+                    index: 0,
+                    name: Some("write".into()),
+                },
+                sample: "ab".into(),
+            },
+            content: String::new(),
+            reasoning: String::new(),
+            finish: None,
+            usage: Default::default(),
+            seed: 0,
+        };
+        let steps = vec![Step::Done(Box::new(looped)), answer("stopped").into()];
+        let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);
+        let (end, _) = turn(&mut r).await;
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "stopped"),
+            "{end:?}"
+        );
+        assert!(!r.root.join("new.rs").exists());
+        assert_eq!(r.agent.stats.repeating, 1);
+        let n = notes(&r.agent);
+        assert!(
+            n[0].contains("because the arguments of write kept repeating \"ab\""),
+            "{n:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_time_limit_ends_a_turn_mid_generation() {
+        let limit = Duration::from_secs(1);
+        let mut r = script(
+            vec![Step::Hang],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            Some(limit),
+        );
+        let t = std::time::Instant::now();
+        let (end, _) = turn(&mut r).await;
+        assert_eq!(end, TurnEnd::TimeLimit);
+        assert!(t.elapsed() < limit * 3, "{:?}", t.elapsed());
+        let ChatMessage::User(task) = &r.agent.messages()[1] else {
+            panic!()
+        };
+        assert!(
+            task.ends_with("\n\n[ognivo] Time limit: 1 s. ognivo stops the turn when it runs out."),
+            "{task}"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_command_starts_without_room_before_the_limit() {
+        let steps = vec![
+            calls(
+                &[("shell", serde_json::json!({"command": "echo hi"}))],
+                FinishReason::ToolCalls,
+            )
+            .into(),
+            answer("done").into(),
+        ];
+        // less time than the reserve a command must leave
+        let limit = TIME_RESERVE - Duration::from_secs(1);
+        let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), Some(limit));
+        let (end, _) = turn(&mut r).await;
+        assert!(matches!(end, TurnEnd::Answer(_)), "{end:?}");
+        assert_eq!(
+            tool_results(&r.agent),
+            ["[error] not run: the time limit of the turn is reached"]
+        );
+    }
+
+    #[test]
+    fn the_clock_tells_half_and_eighty_percent_once() {
+        let now = Instant::now();
+        let limit = Duration::from_secs(100);
+        let mut c = Clock {
+            start: now - Duration::from_secs(10),
+            limit,
+            told: 0,
+        };
+        assert_eq!(c.note(), None);
+        c.start = now - Duration::from_secs(55);
+        assert!(
+            c.note()
+                .unwrap()
+                .starts_with("[ognivo] Half of the time limit is used, about 4")
+        );
+        assert_eq!(c.note(), None);
+        c.start = now - Duration::from_secs(85);
+        assert!(
+            c.note()
+                .unwrap()
+                .starts_with("[ognivo] 80% of the time limit is used, about 1")
+        );
+        assert_eq!(c.note(), None);
+        assert_eq!(
+            (
+                about(Duration::from_secs(150)),
+                about(Duration::from_secs(119))
+            ),
+            ("2 min".into(), "119 s".into())
+        );
     }
 }

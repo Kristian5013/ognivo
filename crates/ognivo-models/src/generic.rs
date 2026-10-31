@@ -18,8 +18,9 @@
 //!
 //! Tool calls may run only through [`Outcome::Calls`], which [`ChatCompletion::outcome`]
 //! grants once the generation ended with `finish_reason=tool_calls` and every call is
-//! complete; streamed [`ChatEvent::ToolCall`] fragments are a preview. A stream that ends
-//! without `[DONE]` never gets this far ([`crate::llama::LlamaServer::chat_stream`]).
+//! complete and free of the model's own control tokens ([`crate::guard`]); streamed
+//! [`ChatEvent::ToolCall`] fragments are a preview. A stream that ends without `[DONE]`
+//! never gets this far ([`crate::llama::LlamaServer::chat_stream`]).
 //!
 //! The server's own parser can reject the model output: before the first byte as HTTP 500,
 //! after it as an in-band `{"error": ...}` chunk (M0: HTTP 200, then the error, no
@@ -30,6 +31,7 @@ use std::collections::HashSet;
 use serde_json::{Map, Value, json};
 
 use crate::engine::{EngineError, SamplerSpec, Usage};
+use crate::guard::{self, Guard};
 
 /// One message of the conversation, in OpenAI chat shape.
 #[derive(Debug, Clone, PartialEq)]
@@ -358,11 +360,12 @@ impl ChatCompletion {
     }
 
     /// What the finished generation allows. Call it only after the stream ended normally.
-    pub fn outcome(&self) -> Outcome {
+    /// Executable calls carry the arguments with the guard's joiners removed.
+    pub fn outcome(&self, guard: &Guard) -> Outcome {
         let calls = &self.tool_calls;
         match &self.finish {
-            Some(FinishReason::ToolCalls) => match check_calls(calls) {
-                Ok(()) => Outcome::Calls(ExecutableCalls(calls.clone())),
+            Some(FinishReason::ToolCalls) => match check_calls(calls, guard) {
+                Ok(calls) => Outcome::Calls(ExecutableCalls(calls)),
                 Err(reason) => Outcome::Malformed {
                     calls: calls.clone(),
                     reason,
@@ -397,6 +400,15 @@ pub enum Outcome {
     Answer,
     /// Cut by the token limit: nothing from this generation may run.
     Truncated { partial: Vec<ToolCall> },
+    /// Stopped by the driver because a stream fell into a loop ([`crate::repeat`]):
+    /// nothing from this generation may run.
+    Repeating {
+        partial: Vec<ToolCall>,
+        /// Where the loop was.
+        channel: Channel,
+        /// One period of it.
+        sample: String,
+    },
     /// The generation ended, but its calls cannot run as they are.
     Malformed {
         calls: Vec<ToolCall>,
@@ -404,9 +416,33 @@ pub enum Outcome {
     },
 }
 
+/// A stream of one generation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Channel {
+    Reasoning,
+    Text,
+    /// The arguments of the call at `index`; `name` once its header arrived.
+    Arguments {
+        index: u32,
+        name: Option<String>,
+    },
+}
+
+impl std::fmt::Display for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Channel::Reasoning => f.write_str("the reasoning"),
+            Channel::Text => f.write_str("the text"),
+            Channel::Arguments { name: Some(n), .. } => write!(f, "the arguments of {n}"),
+            Channel::Arguments { index, .. } => write!(f, "the arguments of call {index}"),
+        }
+    }
+}
+
 /// Calls that passed [`ChatCompletion::outcome`]: the generation ended with
 /// `finish_reason=tool_calls`, and every call has an id, a name and arguments that parse
-/// as a JSON object, with no id repeated. Nothing outside this crate can build one.
+/// as a JSON object free of the model's own control tokens, with no id repeated. Nothing
+/// outside this crate can build one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutableCalls(Vec<ToolCall>);
 
@@ -417,11 +453,13 @@ impl ExecutableCalls {
     }
 }
 
-fn check_calls(calls: &[ToolCall]) -> Result<(), String> {
+/// The calls as the tools must see them, or why they cannot run.
+fn check_calls(calls: &[ToolCall], guard: &Guard) -> Result<Vec<ToolCall>, String> {
     if calls.is_empty() {
         return Err("finish_reason tool_calls without calls".into());
     }
     let mut ids = HashSet::new();
+    let mut out = Vec::with_capacity(calls.len());
     for (i, c) in calls.iter().enumerate() {
         if c.id.is_empty() || c.name.is_empty() {
             return Err(format!("call {i} has no id or name"));
@@ -429,13 +467,29 @@ fn check_calls(calls: &[ToolCall]) -> Result<(), String> {
         if !ids.insert(c.id.as_str()) {
             return Err(format!("call id {} repeats", c.id));
         }
-        match serde_json::from_str::<Value>(&c.arguments) {
-            Ok(Value::Object(_)) => {}
+        let mut args = match serde_json::from_str::<Value>(&c.arguments) {
+            Ok(v @ Value::Object(_)) => v,
             Ok(_) => return Err(format!("{}: arguments are not a JSON object", c.name)),
             Err(e) => return Err(format!("{}: arguments are not JSON: {e}", c.name)),
+        };
+        if let Some(token) = guard.framing_in_json(&args) {
+            return Err(format!(
+                "{}: the arguments contain {token}, a control token of your own format, so the call ran past its end. \
+                 To write such text on purpose, put U+2060 after its first character (\\u2060 in JSON); ognivo removes it",
+                c.name
+            ));
         }
+        let arguments = if guard::unescape_json(&mut args) {
+            args.to_string()
+        } else {
+            c.arguments.clone()
+        };
+        out.push(ToolCall {
+            arguments,
+            ..c.clone()
+        });
     }
-    Ok(())
+    Ok(out)
 }
 
 /// The server's parser rejected the model output (llama.cpp common/chat.cpp: "The model
@@ -593,8 +647,8 @@ mod tests {
         assert_eq!(c.usage.prompt_n, Some(100));
         assert_eq!(c.usage.predicted_n, Some(12));
         assert_eq!(c.usage.cache_n, Some(80));
-        let Outcome::Calls(calls) = c.outcome() else {
-            panic!("{:?}", c.outcome())
+        let Outcome::Calls(calls) = c.outcome(&Guard::default()) else {
+            panic!("{:?}", c.outcome(&Guard::default()))
         };
         assert_eq!(calls.calls(), c.tool_calls.as_slice());
     }
@@ -629,7 +683,7 @@ mod tests {
         }
         assert_eq!(c.content, "Hello");
         assert_eq!(c.finish, Some(FinishReason::Stop));
-        assert_eq!(c.outcome(), Outcome::Answer);
+        assert_eq!(c.outcome(&Guard::default()), Outcome::Answer);
     }
 
     #[test]
@@ -646,7 +700,9 @@ mod tests {
         }
         assert_eq!(c.finish, Some(FinishReason::Length));
         // a length-truncated call must never be executed
-        assert!(matches!(c.outcome(), Outcome::Truncated { partial } if partial.len() == 1));
+        assert!(
+            matches!(c.outcome(&Guard::default()), Outcome::Truncated { partial } if partial.len() == 1)
+        );
     }
 
     fn finished(calls: Vec<ToolCall>, finish: FinishReason) -> ChatCompletion {
@@ -679,18 +735,69 @@ mod tests {
             ),
         ];
         for (calls, why) in bad {
-            match finished(calls, FinishReason::ToolCalls).outcome() {
+            match finished(calls, FinishReason::ToolCalls).outcome(&Guard::default()) {
                 Outcome::Malformed { reason, .. } => assert!(reason.contains(why), "{reason}"),
                 other => panic!("{why}: {other:?}"),
             }
         }
         let stop_with_calls = finished(vec![call("a", "Read", "{}")], FinishReason::Stop);
         assert!(matches!(
-            stop_with_calls.outcome(),
+            stop_with_calls.outcome(&Guard::default()),
             Outcome::Malformed { .. }
         ));
         let no_finish = ChatCompletion::default();
-        assert!(matches!(no_finish.outcome(), Outcome::Malformed { .. }));
+        assert!(matches!(
+            no_finish.outcome(&Guard::default()),
+            Outcome::Malformed { .. }
+        ));
+    }
+
+    #[test]
+    fn the_guard_rejects_leaked_format_and_unbreaks_copied_text() {
+        let profiles = crate::profile::builtin().unwrap();
+        let gemma = profiles.iter().find(|p| p.id == "gemma-4-26b-a4b").unwrap();
+        let guard = Guard::new(&gemma.tokens);
+        // control-token texts are built from parts here (§5.3 repository rule)
+        let (bos, eos, end_thought) = (
+            ["<", "bos>"].concat(),
+            ["<", "eos>"].concat(),
+            ["<", "channel|>"].concat(),
+        );
+        // M1 stamp A, cforge-weighted-stripe-move: the end of the thought channel and a new
+        // call header inside the content of a write
+        let call_header = ["<|", "tool_call>"].concat();
+        let leak = format!("I will rewrite it.\n{end_thought}{call_header}call:write{{file:");
+        let args = json!({"file": "src/stripe.rs", "text": leak}).to_string();
+        match finished(vec![call("a", "write", &args)], FinishReason::ToolCalls).outcome(&guard) {
+            Outcome::Malformed { reason, .. } => assert!(
+                reason.starts_with(&format!("write: the arguments contain {call_header}")),
+                "{reason}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // a copy of guarded file text, joiner and all, runs with the file's own text
+        let shown = |t: &str| guard.escape(t).into_owned();
+        let copied = json!({"file": "a.py", "find": shown(&bos), "replace": shown(&eos)});
+        let Outcome::Calls(calls) = finished(
+            vec![call("b", "edit", &copied.to_string())],
+            FinishReason::ToolCalls,
+        )
+        .outcome(&guard) else {
+            panic!()
+        };
+        let restored: Value = serde_json::from_str(&calls.calls()[0].arguments).unwrap();
+        assert_eq!(
+            restored,
+            json!({"file": "a.py", "find": bos, "replace": eos})
+        );
+        // untouched arguments keep their exact bytes
+        let raw = "{\"file\": \"a.py\",  \"limit\": 5}";
+        let Outcome::Calls(calls) =
+            finished(vec![call("c", "read", raw)], FinishReason::ToolCalls).outcome(&guard)
+        else {
+            panic!()
+        };
+        assert_eq!(calls.calls()[0].arguments, raw);
     }
 
     #[test]

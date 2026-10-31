@@ -16,12 +16,12 @@ ognivo-models.workspace = true
 ognivo-protocol.workspace = true
 ognivo-store.workspace = true
 ognivo-tools.workspace = true
+tokio.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

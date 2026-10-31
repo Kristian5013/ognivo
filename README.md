@@ -8,14 +8,15 @@ Reference models: gpt-oss-20b (Harmony), Gemma 4 26B A4B (native tool-call DSL),
 Qwen3.8-27B (XML tool calls).
 
 **Status:** M1 in progress. `ognivo run` (one task, no user) works on the Generic path
-(`/v1/chat/completions`); the line-mode `chat` comes next.
+(`/v1/chat/completions`), with the special-token guard, the repetition guard and an optional
+`--time-limit`; the line-mode `chat` comes next.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `run`) |
-| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver |
+| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards |
 | `crates/ognivo-core` | agent loop and approvals |
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell) and their per-model shapes |
 | `crates/ognivo-protocol` | core ⇄ client event types |

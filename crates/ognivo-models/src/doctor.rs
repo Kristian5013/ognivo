@@ -45,6 +45,9 @@ pub struct SpecialTokenCheck {
     /// The server's tokenizer turns this text into the control token even with
     /// `parse_special=false`: content containing it must be split before tokenizing.
     pub recognised_without_parse_special: bool,
+    /// The text as the Generic path's guard sends it still yields the control token with
+    /// `parse_special=true` (§5.3); `None` when the server did not tokenize it.
+    pub survives_guard: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -374,6 +377,7 @@ async fn check_special_tokens(
     profile: &ModelProfile,
     report: &mut DoctorReport,
 ) {
+    let guard = crate::guard::Guard::new(&profile.tokens);
     for text in profile.tokens.guarded() {
         let special = server.tokenize(text, true).await.ok();
         let plain = server.tokenize(text, false).await.ok();
@@ -381,11 +385,35 @@ async fn check_special_tokens(
             .as_deref()
             .and_then(|s| if let [one] = s { Some(*one) } else { None });
         let recognised = id.is_some() && plain.as_deref() == special.as_deref();
+        let survives_guard = match id {
+            Some(id) => server
+                .tokenize(&guard.escape(text), true)
+                .await
+                .ok()
+                .map(|ids| ids.contains(&id)),
+            None => None,
+        };
         report.special_tokens.push(SpecialTokenCheck {
             text: text.to_owned(),
             id,
             recognised_without_parse_special: recognised,
+            survives_guard,
         });
+    }
+    let survivors: Vec<&str> = report
+        .special_tokens
+        .iter()
+        .filter(|c| c.survives_guard == Some(true))
+        .map(|c| c.text.as_str())
+        .collect();
+    if !survivors.is_empty() {
+        report.note(
+            Level::Error,
+            format!(
+                "the special-token guard does not break {}: file text can still forge control tokens",
+                survivors.join(" ")
+            ),
+        );
     }
     let recognised: Vec<&str> = report
         .special_tokens

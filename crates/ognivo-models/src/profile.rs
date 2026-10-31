@@ -72,6 +72,10 @@ pub struct ProbeToken {
 pub struct TokenTable {
     /// Structural token strings; their ids must never occur inside content spans.
     pub structural: Vec<String>,
+    /// The structural strings that frame messages and calls, without the reasoning tags:
+    /// unbroken inside tool arguments they mean the model wrote past the end of its call
+    /// (§5.3). The reasoning tags stay out because tasks quote them (M0, chat-multiturn).
+    pub framing: Vec<String>,
     /// Every other named control token (bos/eos, media, FIM...). Not used for structure,
     /// but just as injectable: the content guard covers `structural` and `specials`.
     #[serde(default)]
@@ -251,6 +255,14 @@ mod tests {
                 "{}: probe must be structural",
                 p.id
             );
+            assert!(!p.tokens.framing.is_empty(), "{}: no framing", p.id);
+            for f in &p.tokens.framing {
+                assert!(
+                    p.tokens.structural.contains(f),
+                    "{}: {f} is not structural",
+                    p.id
+                );
+            }
             assert!(
                 p.context.compact_at > 0.0 && p.context.compact_at < 1.0,
                 "{}",

@@ -12,9 +12,17 @@ name_hints = ["gpt-oss-20b"]
 [tokens]
 # Must never appear as ids inside content spans (special-token injection guard).
 structural = ["<|start|>", "<|end|>", "<|message|>", "<|channel|>", "<|constrain|>", "<|call|>", "<|return|>"]
+# All of them frame messages; unbroken inside tool arguments they are a leaked format (§5.3).
+framing = ["<|start|>", "<|end|>", "<|message|>", "<|channel|>", "<|constrain|>", "<|call|>", "<|return|>"]
 eog = [200002, 200012] # <|return|>, <|call|>
-# Other named specials; <|reserved_N|> are covered by the "<|" prefix rule of the content guard.
-specials = ["<|startoftext|>", "<|endoftext|>", "<|endofprompt|>"]
+# Every other CONTROL token of the GGUF vocab (gpt-oss-20b-F16.gguf, 2026-10-31), the reserved
+# ones included: the guard breaks exactly these strings.
+specials = [
+    "<|startoftext|>", "<|endoftext|>", "<|endofprompt|>",
+    "<|reserved_200000|>", "<|reserved_200001|>", "<|reserved_200004|>", "<|reserved_200009|>",
+    "<|reserved_200010|>", "<|reserved_200011|>", "<|reserved_200013|>", "<|reserved_200014|>",
+    "<|reserved_200015|>", "<|reserved_200016|>", "<|reserved_200017|>",
+]
 # Harmony prompts start without BOS.
 
 [sampling.main]

@@ -14,6 +14,10 @@ structural = [
     "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>",
     "<think>", "</think>", "<tool_response>", "</tool_response>",
 ]
+# Without <think> and </think>, which tasks quote (M0, misc-ai-chat-multiturn).
+framing = [
+    "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>", "<tool_response>", "</tool_response>",
+]
 eog = [248046, 248044] # <|im_end|>, <|endoftext|>
 specials = [
     "<|endoftext|>", "<|object_ref_start|>", "<|object_ref_end|>", "<|box_start|>", "<|box_end|>",

@@ -14,6 +14,8 @@
 #                           (`ognivo run --approve auto`; image target ognivo)
 #   IMAGE=localhost/m0-opencode:2.2.1-full   (HARNESS=claude: ...-claude, HARNESS=ognivo: ...-ognivo)
 #   M0_OG_APPROVE=auto      HARNESS=ognivo only: deny makes ognivo refuse what would ask
+#   M0_OG_TIME_LIMIT        HARNESS=ognivo only: ognivo's own time limit, s (0: none; default:
+#                           the agent timeout minus 10, see container/m0-entry-ognivo.sh)
 #   ENGINE=podman           docker works for smoke tests only (no --timeout, no pasta; README)
 #   LLAMA_PORT=8090         the host llama-server, bound to 127.0.0.1 (8080 is the owner's Open WebUI)
 #   AGENT_TIMEOUT=1200      seconds for the agent inside the container
@@ -81,6 +83,7 @@ if [[ $HARNESS == claude ]]; then
 elif [[ $HARNESS == ognivo ]]; then
     # the profile sets context, output budget and sampling; the alias is the profile id
     entry=(--entrypoint /usr/bin/tini -e M0_OG_PROFILE="$alias" -e M0_OG_APPROVE="${M0_OG_APPROVE:-auto}")
+    [[ -n ${M0_OG_TIME_LIMIT:-} ]] && entry+=(-e M0_OG_TIME_LIMIT="$M0_OG_TIME_LIMIT")
     tail=(-- /usr/local/bin/m0-entry-ognivo)
 fi
 limits=(--cpus "${CPUS:-8}" --memory "${MEMORY:-16g}" --memory-swap "${MEMORY:-16g}" --pids-limit "${PIDS:-4096}")
