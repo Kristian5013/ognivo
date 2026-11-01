@@ -9,47 +9,25 @@
 //! end event carries the verification status of what was done.
 
 use std::io::{Read as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, AllowAll, Approver, NoUser, TurnEnd};
-use ognivo_core::approval::WorkspaceState;
 use ognivo_core::verify;
-use ognivo_models::llama::LlamaServer;
-use ognivo_models::{ChatDriver, doctor, profile};
 use tokio::signal::unix::{SignalKind, signal};
+
+use crate::session::{Failure, SessionArgs};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Server base URL, e.g. http://127.0.0.1:8090
-    #[arg(long)]
-    url: String,
-    /// Bearer token if the server was started with --api-key
-    #[arg(long, env = "OGNIVO_API_KEY", hide_env_values = true)]
-    api_key: Option<String>,
-    /// Profile id (gpt-oss-20b, gemma-4-26b-a4b, qwen3.8-27b); detected from the server when omitted
-    #[arg(long)]
-    profile: Option<String>,
-    /// Project root; the current directory by default
-    #[arg(long)]
-    cwd: Option<PathBuf>,
+    #[command(flatten)]
+    session: SessionArgs,
     /// Actions that would ask: deny them and tell the model why, or approve them all
     /// (only inside a container: an eval sandbox, never the host)
     #[arg(long, value_enum, default_value_t = Approve::Deny)]
     approve: Approve,
-    #[arg(long, default_value_t = 200)]
-    max_steps: u32,
-    /// Seed of the first step (random when omitted; printed at the end)
-    #[arg(long)]
-    seed: Option<u32>,
-    /// Reasoning level from the profile (e.g. low/medium/high for gpt-oss)
-    #[arg(long)]
-    level: Option<String>,
-    /// Server slot to pin, so the session keeps its KV cache
-    #[arg(long)]
-    slot: Option<u32>,
     /// Wall-clock limit in seconds: the model is told it, commands never run past it, and
     /// the run ends itself with exit code 124 when it runs out
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
@@ -57,9 +35,6 @@ pub struct RunArgs {
     /// Events as JSON lines on stdout instead of text
     #[arg(long)]
     jsonl: bool,
-    /// Where logs go; ~/.ognivo/data by default
-    #[arg(long)]
-    data_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -68,73 +43,42 @@ enum Approve {
     Auto,
 }
 
-fn usage(msg: impl std::fmt::Display) -> anyhow::Result<ExitCode> {
-    eprintln!("ognivo run: {msg}");
-    Ok(ExitCode::from(2))
+fn fail(f: Failure) -> anyhow::Result<ExitCode> {
+    eprintln!("ognivo run: {}", f.message);
+    Ok(ExitCode::from(f.code))
 }
 
 pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
-    let dir = match &a.cwd {
-        Some(d) => d.clone(),
-        None => std::env::current_dir()?,
-    };
-    let Ok(root) = std::fs::canonicalize(&dir) else {
-        return usage(format!("{}: no such directory", dir.display()));
+    let root = match a.session.root() {
+        Ok(root) => root,
+        Err(f) => return fail(f),
     };
     let approver: Box<dyn Approver> = match a.approve {
         Approve::Deny => Box::new(NoUser),
         Approve::Auto if in_container() => Box::new(AllowAll),
-        Approve::Auto => return usage("--approve auto works only inside a container"),
+        Approve::Auto => {
+            return fail(Failure::usage(
+                "--approve auto works only inside a container",
+            ));
+        }
     };
     let mut prompt = String::new();
     std::io::stdin().read_to_string(&mut prompt)?;
     if prompt.trim().is_empty() {
-        return usage("the prompt comes on stdin, and stdin was empty");
+        return fail(Failure::usage(
+            "the prompt comes on stdin, and stdin was empty",
+        ));
     }
-    let data_dir = match a.data_dir {
-        Some(d) => d,
-        None => match std::env::var_os("HOME") {
-            Some(home) => PathBuf::from(home).join(".ognivo/data"),
-            None => return usage("HOME is not set; pass --data-dir"),
-        },
+    let s = match a.session.connect(root).await {
+        Ok(s) => s,
+        Err(f) => return fail(f),
     };
-
-    let server = LlamaServer::new(&a.url, a.api_key)?;
-    let profiles = profile::builtin()?;
-    let chosen = match &a.profile {
-        Some(id) => profiles.iter().find(|p| &p.id == id),
-        None => match doctor::identify(&server, &profiles).await {
-            Ok(found) => found.map(|(p, _)| p),
-            Err(e) => {
-                eprintln!("ognivo run: {}: {e}", a.url);
-                return Ok(ExitCode::from(3));
-            }
-        },
-    };
-    let Some(profile) = chosen.cloned() else {
-        return usage("no profile matches this server; pass --profile (see ognivo doctor)");
-    };
-    let family = profile.family;
-    let max_tokens = profile.context.max_tokens;
-    let driver = match ChatDriver::new(server, profile, a.level.as_deref(), a.slot) {
-        Ok(d) => d,
-        Err(e) => return usage(e),
-    };
-    let seed = a.seed.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(1, |d| d.subsec_nanos())
-    });
+    let seed = s.opts.seed;
     let opts = AgentOptions {
-        workspace: start_state(&root),
-        root,
-        data_dir,
-        max_steps: a.max_steps,
-        max_tokens,
-        seed,
         time_limit: a.time_limit.map(Duration::from_secs),
+        ..s.opts
     };
-    let mut agent = Agent::new(Box::new(driver), family, approver, opts);
+    let mut agent = Agent::new(Box::new(s.driver), s.family, approver, opts);
     let jsonl = a.jsonl;
     let mut on = move |e: AgentEvent| show(&e, jsonl);
     let mut term = signal(SignalKind::terminate())?;
@@ -164,7 +108,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     let (code, answer, stopped) = match end {
         Ok(TurnEnd::Answer(a)) => (0, Some(a), None),
         Ok(TurnEnd::StepLimit) => {
-            eprintln!("ognivo run: step limit ({}) reached", a.max_steps);
+            eprintln!("ognivo run: step limit ({}) reached", a.session.max_steps);
             (1, None, Some("step_limit"))
         }
         Ok(TurnEnd::Stuck(why)) => {
@@ -238,25 +182,4 @@ fn show(e: &AgentEvent, jsonl: bool) {
 /// Podman and Docker mark their containers with these files.
 fn in_container() -> bool {
     Path::new("/run/.containerenv").exists() || Path::new("/.dockerenv").exists()
-}
-
-/// Clean only when git says nothing is changed or untracked; otherwise, or outside git,
-/// assume unreviewed changes exist (§8: never assume clean).
-fn start_state(root: &Path) -> WorkspaceState {
-    let out = std::process::Command::new("git")
-        .args([
-            "-c",
-            "core.fsmonitor=false",
-            "--no-pager",
-            "status",
-            "--porcelain",
-        ])
-        .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(o) if o.status.success() && o.stdout.is_empty() => WorkspaceState::CLEAN,
-        _ => WorkspaceState::DIRTY,
-    }
 }

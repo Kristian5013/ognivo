@@ -269,6 +269,10 @@ pub struct Agent {
     repeats: Repeats,
     /// Set by a call that ends the turn: why.
     stuck: Option<String>,
+    /// The id of the call being executed.
+    running: Option<String>,
+    /// Tokens the server held after the last step.
+    context: u64,
     pub stats: Stats,
 }
 
@@ -318,6 +322,8 @@ impl Agent {
             ledger: Ledger::default(),
             repeats: Repeats::default(),
             stuck: None,
+            running: None,
+            context: 0,
             stats: Stats::default(),
             opts,
         }
@@ -330,6 +336,64 @@ impl Agent {
     /// What the current or last turn's tool calls show, answer or not.
     pub fn verification(&self) -> Verification {
         self.ledger.status(&self.opts.root)
+    }
+
+    /// Tokens of the conversation the server held after the last step: its prompt and
+    /// what it generated.
+    pub fn context_tokens(&self) -> u64 {
+        self.context
+    }
+
+    /// Whether the project has changes nobody has reviewed yet (§8).
+    pub fn unreviewed_changes(&self) -> bool {
+        self.workspace.unreviewed_changes
+    }
+
+    /// Ends a turn that was dropped before its end (the user stopped it, or the server
+    /// failed): every call of the last generation gets a result, so the history stays
+    /// well-formed, and the model reads `why` with the next message.
+    pub fn abandon_turn(&mut self, why: &str) {
+        if let Some(at) = self
+            .messages
+            .iter()
+            .rposition(|m| matches!(m, ChatMessage::Assistant { .. }))
+            && let ChatMessage::Assistant { tool_calls, .. } = &self.messages[at]
+        {
+            let answered: HashSet<&str> = self.messages[at + 1..]
+                .iter()
+                .filter_map(|m| match m {
+                    ChatMessage::Tool { tool_call_id, .. } => Some(tool_call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let missing: Vec<String> = tool_calls
+                .iter()
+                .filter(|c| !answered.contains(c.id.as_str()))
+                .map(|c| c.id.clone())
+                .collect();
+            for id in missing {
+                let content = if self.running.as_deref() == Some(id.as_str()) {
+                    "[error] stopped before it finished; it may have done part of its work"
+                } else {
+                    "[error] not run: the turn was stopped"
+                };
+                self.messages.push(ChatMessage::Tool {
+                    tool_call_id: id,
+                    content: content.to_owned(),
+                });
+            }
+        }
+        self.append_to_last(&format!("[ognivo] {why}"));
+        self.running = None;
+        self.stuck = None;
+    }
+
+    /// Starts a new conversation. What the session changed stays unreviewed (§8), and the
+    /// counters go on.
+    pub fn clear(&mut self) {
+        self.messages.truncate(1);
+        self.seen.clear();
+        self.context = 0;
     }
 
     /// Runs one user turn to its end.
@@ -405,6 +469,11 @@ impl Agent {
             self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
             self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
             self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
+            if let Some(prompt) = f.usage.prompt_n {
+                self.context = u64::from(prompt)
+                    + u64::from(f.usage.cache_n.unwrap_or(0))
+                    + u64::from(f.usage.predicted_n.unwrap_or(0));
+            }
             let reasoning = (!f.reasoning.is_empty()).then_some(f.reasoning);
             match f.outcome {
                 Outcome::Answer if f.content.trim().is_empty() => {
@@ -544,6 +613,7 @@ impl Agent {
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> String {
         self.stats.calls += 1;
+        self.running = Some(call.id.clone());
         on(AgentEvent::ToolStarted {
             tool: call.name.clone(),
             arguments: call.arguments.clone(),
@@ -588,6 +658,7 @@ impl Agent {
                 text
             }
         };
+        self.running = None;
         on(AgentEvent::ToolFinished {
             tool: call.name.clone(),
             result: result.clone(),
@@ -1577,6 +1648,84 @@ mod tests {
         // the same result as before the edit, which could have changed it
         assert_eq!(results[3], results[0]);
         assert_eq!(r.agent.stats.repeated, 1);
+    }
+
+    #[tokio::test]
+    async fn a_turn_dropped_in_a_command_leaves_a_well_formed_history() {
+        let steps = vec![calls(
+            &[
+                ("shell", serde_json::json!({"command": "sleep 5"})),
+                ("read", serde_json::json!({"path": "lib.rs"})),
+            ],
+            FinishReason::ToolCalls,
+        )];
+        let mut r = agent_with(steps, WorkspaceState::CLEAN, Box::new(AllowAll));
+        let mut on = |_: AgentEvent| {};
+        let turn = r.agent.turn("fix it", &mut on);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), turn)
+                .await
+                .is_err()
+        );
+        r.agent.abandon_turn("The user stopped this turn.");
+        assert_eq!(
+            tool_results(&r.agent),
+            [
+                "[error] stopped before it finished; it may have done part of its work",
+                "[error] not run: the turn was stopped\n\n[ognivo] The user stopped this turn."
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_dropped_in_a_generation_leaves_a_note_for_the_model() {
+        let mut r = script(
+            vec![Step::Hang],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
+        );
+        let mut on = |_: AgentEvent| {};
+        let turn = r.agent.turn("fix it", &mut on);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), turn)
+                .await
+                .is_err()
+        );
+        r.agent.abandon_turn("The user stopped this turn.");
+        assert_eq!(
+            r.agent.messages().last(),
+            Some(&ChatMessage::User(
+                "fix it\n\n[ognivo] The user stopped this turn.".into()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_starts_over_and_keeps_the_changes_unreviewed() {
+        let mut done = answer("done");
+        done.usage.prompt_n = Some(10);
+        done.usage.cache_n = Some(90);
+        done.usage.predicted_n = Some(20);
+        let steps = vec![
+            calls(
+                &[(
+                    "edit",
+                    serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"}),
+                )],
+                FinishReason::ToolCalls,
+            ),
+            done,
+        ];
+        let mut r = agent(steps, WorkspaceState::CLEAN);
+        assert!(!r.agent.unreviewed_changes());
+        turn(&mut r).await;
+        assert_eq!(r.agent.context_tokens(), 120);
+        assert!(r.agent.unreviewed_changes());
+        r.agent.clear();
+        assert_eq!(r.agent.messages().len(), 1);
+        assert_eq!(r.agent.context_tokens(), 0);
+        assert!(r.agent.unreviewed_changes());
     }
 
     #[tokio::test]

@@ -1,88 +1,16 @@
 //! `ognivo run` end to end against a fake llama-server that answers with recorded-shape
 //! SSE streams: read, then edit, then the final answer. No GPU, no network.
 
+mod common;
+
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
+use common::{answer_stream, call_stream, fake_server};
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-
-fn chunk(delta: Value, finish: Option<&str>) -> Value {
-    json!({"choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
-}
-
-fn call_stream(id: &str, name: &str, args: &str) -> String {
-    let events = [
-        chunk(json!({"role": "assistant", "content": null}), None),
-        chunk(json!({"reasoning_content": "next step"}), None),
-        chunk(
-            json!({"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": "{"}}]}),
-            None,
-        ),
-        chunk(
-            json!({"tool_calls": [{"index": 0, "function": {"arguments": &args[1..]}}]}),
-            None,
-        ),
-        chunk(json!({}), Some("tool_calls")),
-        json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 20}, "timings": {"cache_n": 90, "prompt_n": 10, "predicted_n": 20}}),
-    ];
-    sse(&events)
-}
-
-fn answer_stream(text: &str) -> String {
-    sse(&[
-        chunk(json!({"role": "assistant", "content": null}), None),
-        chunk(json!({"content": text}), None),
-        chunk(json!({}), Some("stop")),
-    ])
-}
-
-fn sse(events: &[Value]) -> String {
-    let body: String = events.iter().map(|e| format!("data: {e}\n\n")).collect();
-    format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{body}data: [DONE]\n\n"
-    )
-}
-
-async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let bodies = Arc::new(Mutex::new(Vec::new()));
-    let seen = bodies.clone();
-    tokio::spawn(async move {
-        for resp in responses {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let body = loop {
-                let mut part = [0u8; 8192];
-                let n = sock.read(&mut part).await.unwrap();
-                buf.extend_from_slice(&part[..n]);
-                let text = String::from_utf8_lossy(&buf).to_string();
-                if let Some(end) = text.find("\r\n\r\n") {
-                    let len: usize = text[..end]
-                        .lines()
-                        .find_map(|l| {
-                            l.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(|v| v.trim().parse().unwrap())
-                        })
-                        .unwrap_or(0);
-                    if buf.len() >= end + 4 + len {
-                        break buf[end + 4..end + 4 + len].to_vec();
-                    }
-                }
-            };
-            seen.lock()
-                .unwrap()
-                .push(serde_json::from_slice(&body).unwrap());
-            sock.write_all(resp.as_bytes()).await.unwrap();
-            sock.shutdown().await.unwrap();
-        }
-    });
-    (url, bodies)
-}
 
 #[tokio::test]
 async fn reads_edits_and_answers() {

@@ -17,11 +17,13 @@ ognivo-core.workspace = true
 ognivo-models.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+futures.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+rustyline.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["signal"] }
+tokio = { workspace = true, features = ["signal", "sync"] }
 
 [dev-dependencies]
-rustix.workspace = true
 tempfile.workspace = true
 
 [lints]

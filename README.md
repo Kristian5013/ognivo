@@ -7,15 +7,16 @@ are tuned per model family instead of being squeezed through a generic chat API.
 Reference models: gpt-oss-20b (Harmony), Gemma 4 26B A4B (native tool-call DSL),
 Qwen3.8-27B (XML tool calls).
 
-**Status:** M1 in progress. `ognivo run` (one task, no user) works on the Generic path
-(`/v1/chat/completions`), with the special-token guard, the repetition guard, a detector of
-repeated calls and an optional `--time-limit`; the line-mode `chat` comes next.
+**Status:** M1 in progress. The line-mode `ognivo chat` and `ognivo run` (one task, no
+user) work on the Generic path (`/v1/chat/completions`), with the special-token guard, the
+repetition guard and a detector of repeated calls; `run` has an optional `--time-limit`.
+Sessions are not stored yet, and there is no compaction: `/clear` starts over.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `run`) |
+| `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`) |
 | `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards |
 | `crates/ognivo-core` | agent loop and approvals |
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell) and their per-model shapes |
@@ -30,13 +31,16 @@ repeated calls and an optional `--time-limit`; the line-mode `chat` comes next.
 
 ```sh
 cargo run -p ognivo-cli -- doctor --url http://127.0.0.1:8090 --probe
+cargo run -p ognivo-cli -- chat --url http://127.0.0.1:8090
 echo "Which file implements the edit tool?" | cargo run -p ognivo-cli -- run --url http://127.0.0.1:8090
 ```
 
 `doctor` connects to a running llama-server (or ik_llama.cpp), detects the model family,
-classifies the server and checks the properties the agent depends on. `run` takes the
-prompt on stdin and works in the current directory; actions that would need approval are
-refused and explained to the model.
+classifies the server and checks the properties the agent depends on. `chat` works in the
+current directory: the answer streams, an action that needs approval asks `y`, `n` (or `n`
+and what to do instead) or `a` (that exact action again without asking, for the rest of the
+session), and ^C stops a turn; `/help` lists the rest. `run` takes the prompt on stdin;
+actions that would need approval are refused and explained to the model.
 
 ## License
 

@@ -1,7 +1,9 @@
-//! The `ognivo` binary: `doctor` and the headless `run` work; `chat` follows in M1
-//! (docs/architecture.md §13).
+//! The `ognivo` binary: `doctor`, the headless `run` and the line-mode `chat`
+//! (docs/architecture.md §10).
 
+mod chat;
 mod run;
+mod session;
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -44,8 +46,8 @@ enum Command {
     },
     /// Run one task without a user: the prompt comes on stdin
     Run(run::RunArgs),
-    /// Line-mode chat in the terminal (M1)
-    Chat,
+    /// Chat in the terminal, line by line
+    Chat(chat::ChatArgs),
 }
 
 #[tokio::main]
@@ -95,10 +97,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             })
         }
         Command::Run(args) => run::run(args).await,
-        Command::Chat => {
-            eprintln!("not implemented yet: arrives in M1 (docs/architecture.md §13)");
-            Ok(ExitCode::from(2))
-        }
+        Command::Chat(args) => chat::chat(args).await,
     }
 }
 
