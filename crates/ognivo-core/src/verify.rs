@@ -172,12 +172,20 @@ pub fn claims_changes(answer: &str) -> bool {
     RE.is_match(answer)
 }
 
-/// One line for the user under the answer; `None` when nothing changed.
+/// Items a summary lists; the rest are counted.
+const LISTED: usize = 6;
+/// Characters of a command a summary shows.
+const COMMAND_CHARS: usize = 80;
+
+/// One line for the user under the answer, also part of ognivo's notes to the model;
+/// `None` when nothing changed. Commands are shortened: in M1 the side effects of a turn
+/// included a heredoc that made the note 10 KB.
 pub fn summary(v: &Verification) -> Option<String> {
     match v {
         Verification::NoChanges => None,
         Verification::Passed { command } => Some(format!(
-            "verified: `{command}` passed after the last change"
+            "verified: {} passed after the last change",
+            quoted(command)
         )),
         Verification::Unverified {
             changed,
@@ -186,10 +194,10 @@ pub fn summary(v: &Verification) -> Option<String> {
             refused,
         } => {
             let mut what: Vec<String> = changed.clone();
-            what.extend(side_effects.iter().map(|c| format!("`{c}`")));
+            what.extend(side_effects.iter().map(|c| quoted(c)));
             let mut s = format!(
                 "NOT verified: {} changed after the last passing build or test",
-                what.join(", ")
+                list(&what)
             );
             if let Some(r) = last_run {
                 let how = if r.timed_out {
@@ -200,11 +208,11 @@ pub fn summary(v: &Verification) -> Option<String> {
                         None => "was killed".to_owned(),
                     }
                 };
-                s.push_str(&format!("; `{}` {how}", r.command));
+                s.push_str(&format!("; {} {how}", quoted(&r.command)));
             }
             if !refused.is_empty() {
-                let list: Vec<String> = refused.iter().map(|c| format!("`{c}`")).collect();
-                s.push_str(&format!("; refused: {}", list.join(", ")));
+                let refused: Vec<String> = refused.iter().map(|c| quoted(c)).collect();
+                s.push_str(&format!("; refused: {}", list(&refused)));
             }
             if last_run.is_none() && refused.is_empty() {
                 s.push_str("; no build or test ran after it");
@@ -212,6 +220,33 @@ pub fn summary(v: &Verification) -> Option<String> {
             Some(s)
         }
     }
+}
+
+/// `items` joined, those after the first [`LISTED`] counted.
+fn list(items: &[String]) -> String {
+    let mut s = items[..items.len().min(LISTED)].join(", ");
+    if items.len() > LISTED {
+        s.push_str(&format!(" and {} more", items.len() - LISTED));
+    }
+    s
+}
+
+/// A command in backquotes on one line: its first line, cut to [`COMMAND_CHARS`].
+fn quoted(command: &str) -> String {
+    let command = command.trim();
+    let line: String = command
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(COMMAND_CHARS)
+        .collect();
+    let cut = if line.len() < command.len() {
+        "…"
+    } else {
+        ""
+    };
+    format!("`{line}{cut}`")
 }
 
 #[cfg(test)]
@@ -266,6 +301,37 @@ mod tests {
             "{s}"
         );
         assert!(s.ends_with("refused: `cargo test`"), "{s}");
+    }
+
+    #[test]
+    fn a_summary_stays_one_short_line() {
+        // M1, Qwen on misc-ai-chat-multiturn: a heredoc among the side effects made the
+        // note to the model 10 KB long
+        let root = Path::new("/p");
+        let mut l = Ledger::default();
+        l.changed("/p/model/byte_tokenizer.py".into());
+        let heredoc = format!(
+            "cd /tmp && cat > test_bt.py <<'EOF'\n{}EOF\npython3 test_bt.py",
+            "assert encode(x) == y\n".repeat(400)
+        );
+        l.side_effect(&heredoc);
+        for i in 0..7 {
+            l.side_effect(&format!("touch f{i}"));
+        }
+        l.ran(run(&format!("pytest {}", "tests/a.py ".repeat(20)), 1));
+        let s = summary(&l.status(root)).unwrap();
+        assert!(!s.contains('\n') && s.len() < 400, "{} bytes: {s}", s.len());
+        assert!(
+            s.starts_with(
+                "NOT verified: model/byte_tokenizer.py, `cd /tmp && cat > test_bt.py <<'EOF'…`, `touch f0`"
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains("`touch f3` and 3 more changed after the last passing build or test; `pytest tests/a.py"),
+            "{s}"
+        );
+        assert!(s.ends_with("…` exited 1"), "{s}");
     }
 
     #[test]
