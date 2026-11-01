@@ -1,22 +1,21 @@
-//! `ognivo chat`: the line-mode REPL of docs/architecture.md §10. The model's words stream to
-//! the terminal, actions that need the user ask y/n/a, and ^C stops a turn without ending
-//! the session. The conversation lives as long as the process: there is no store yet and no
+//! `ognivo chat`: the line-mode REPL of docs/architecture.md §10. A turn streams to the
+//! terminal (`view.rs` shows it), actions that need the user ask y/n/a, and ^C stops a turn
+//! without ending the session. The conversation lives as long as the process: there is no store yet and no
 //! compaction, so `/clear` starts over when the context fills up.
 //!
 //! Exit codes: 0 `/exit` or ^D; 2 bad usage; 3 the server failed at the start; 143 SIGTERM.
 
 use std::collections::HashSet;
-use std::io::{IsTerminal as _, Write as _};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
-use ognivo_core::verify;
+use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 use rustyline::DefaultEditor;
@@ -25,6 +24,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::session::{Failure, SessionArgs};
+use crate::view::{Paint, Screen, Style, View, duration, printable};
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -57,7 +57,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         Err(f) => return fail(f),
     };
     let n_ctx = s.server.props().await.ok().and_then(|p| p.n_ctx);
-    let style = Style::detect();
+    let screen = Screen::new(Style::detect());
     let terminal = tcgetattr(std::io::stdin()).ok();
     let input = Input::spawn(s.opts.data_dir.join("chat_history"));
     let (stop, mut stopped) = mpsc::unbounded_channel();
@@ -65,42 +65,48 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         input: input.clone(),
         always: HashSet::new(),
         stop,
-        style,
+        screen: screen.clone(),
     };
     let max_steps = s.opts.max_steps;
-    println!(
-        "ognivo chat · {} · {}{}",
-        s.profile,
-        a.session.url,
-        n_ctx.map(|n| format!(" · n_ctx {n}")).unwrap_or_default()
+    screen.line(
+        &format!(
+            "ognivo chat · {} · {}{}",
+            s.profile,
+            a.session.url,
+            n_ctx.map(|n| format!(" · n_ctx {n}")).unwrap_or_default()
+        ),
+        Paint::Plain,
     );
     let mut agent = Agent::new(Box::new(s.driver), s.family, Box::new(approver), s.opts);
-    println!(
-        "project {}{}",
-        root.display(),
-        if agent.unreviewed_changes() {
-            " · has unreviewed changes"
-        } else {
-            ""
-        }
+    screen.line(
+        &format!(
+            "project {}{}",
+            root.display(),
+            if agent.unreviewed_changes() {
+                " · has unreviewed changes"
+            } else {
+                ""
+            }
+        ),
+        Paint::Plain,
     );
-    println!("{}", style.dim("/help · ^C stops a turn · ^D quits"));
+    screen.line("/help · ^C stops a turn · ^D quits", Paint::Dim);
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
     loop {
         let entry = tokio::select! {
-            entry = read_entry(&input, style) => entry,
+            entry = read_entry(&input, &screen) => entry,
             _ = term.recv() => return Ok(terminated(terminal.as_ref())),
         };
         let text = match entry {
             Entry::Message(text) => text,
             Entry::Help => {
-                println!("{HELP}");
+                screen.line(HELP, Paint::Plain);
                 continue;
             }
             Entry::Clear => {
                 agent.clear();
-                println!("{}", style.dim("· new conversation"));
+                screen.line("· new conversation", Paint::Dim);
                 continue;
             }
             Entry::Exit => return Ok(ExitCode::SUCCESS),
@@ -113,7 +119,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             agent.stats.completion_tokens,
             Instant::now(),
         );
-        let mut view = View::new(style, a.show_reasoning);
+        let mut view = View::new(screen.clone(), root.clone(), a.show_reasoning);
         let outcome = {
             let mut on = |e: AgentEvent| view.show(e);
             let turn = agent.turn(&text, &mut on);
@@ -130,34 +136,37 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Outcome::Terminated => return Ok(terminated(terminal.as_ref())),
             Outcome::Stopped => {
                 agent.abandon_turn("The user stopped this turn.");
-                println!("{}", style.dim("· stopped"));
+                screen.line("· stopped", Paint::Dim);
                 true
             }
             Outcome::Ended(Ok(TurnEnd::Answer(answer))) => {
-                if let Some(line) = verify::summary(&answer.verification) {
-                    println!("{}", style.dim(&format!("[ognivo] {line}")));
-                }
+                verification(&screen, &answer.verification);
                 if answer.unsupported_claim {
-                    println!("[ognivo] the answer above claims a check that did not happen");
+                    screen.line(
+                        "[ognivo] the answer above claims a check that did not happen",
+                        Paint::Yellow,
+                    );
                 }
                 false
             }
             Outcome::Ended(Ok(end)) => {
-                println!("[ognivo] stopped: {}", why(&end, max_steps));
+                screen.line(
+                    &format!("[ognivo] stopped: {}", why(&end, max_steps)),
+                    Paint::Yellow,
+                );
                 true
             }
             Outcome::Ended(Err(e)) => {
                 agent.abandon_turn(&format!("This turn ended on a server error: {e}"));
-                println!("[ognivo] server error: {e}");
+                screen.line(&format!("[ognivo] server error: {e}"), Paint::Red);
                 true
             }
         };
-        if unanswered && let Some(line) = verify::summary(&agent.verification()) {
-            println!("{}", style.dim(&format!("[ognivo] {line}")));
+        if unanswered {
+            verification(&screen, &agent.verification());
         }
-        println!(
-            "{}",
-            style.dim(&format!(
+        screen.line(
+            &format!(
                 "({} steps · {} · {} generated · context {}{})",
                 agent.stats.steps - steps,
                 duration(started.elapsed()),
@@ -166,7 +175,8 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 n_ctx
                     .map(|n| format!(" of {}", kilo(n.into())))
                     .unwrap_or_default()
-            ))
+            ),
+            Paint::Dim,
         );
     }
 }
@@ -178,6 +188,18 @@ enum Outcome {
     /// By ^C, here or at a question.
     Stopped,
     Terminated,
+}
+
+/// The line under a turn that says whether its changes were checked: green when a build
+/// or test passed after the last change.
+fn verification(screen: &Screen, v: &Verification) {
+    if let Some(line) = verify::summary(v) {
+        let paint = match v {
+            Verification::Passed { .. } => Paint::Green,
+            _ => Paint::Yellow,
+        };
+        screen.line(&format!("[ognivo] {line}"), paint);
+    }
 }
 
 fn why(end: &TurnEnd, max_steps: u32) -> String {
@@ -208,7 +230,7 @@ enum Entry {
 }
 
 /// One entry: a message of one or more lines, or a command.
-async fn read_entry(input: &Input, style: Style) -> Entry {
+async fn read_entry(input: &Input, screen: &Screen) -> Entry {
     let mut composer = Composer::default();
     let mut interrupted = false;
     loop {
@@ -231,7 +253,7 @@ async fn read_entry(input: &Input, style: Style) -> Entry {
             Read::Interrupted if interrupted => return Entry::Exit,
             Read::Interrupted => {
                 interrupted = true;
-                println!("{}", style.dim("(^C again or ^D quits)"));
+                screen.line("(^C again or ^D quits)", Paint::Dim);
             }
             Read::Eof => return Entry::Exit,
         }
@@ -296,7 +318,7 @@ struct Ask {
     always: HashSet<(String, String)>,
     /// ^C at a question stops the turn.
     stop: mpsc::UnboundedSender<()>,
-    style: Style,
+    screen: Screen,
 }
 
 impl Approver for Ask {
@@ -305,11 +327,12 @@ impl Approver for Ask {
             let key = (req.tool.clone(), req.action.clone());
             if self.always.contains(&key) {
                 let note = format!("· allowed for this session: {}", printable(&req.action));
-                println!("{}", self.style.dim(&note));
+                self.screen.line(&note, Paint::Dim);
                 return Verdict::Allow;
             }
-            println!("? {} {}", req.tool, printable(&req.action));
-            println!("  {}", req.reason);
+            let question = format!("? {} {}", req.tool, printable(&req.action));
+            self.screen.line(&question, Paint::Bold);
+            self.screen.line(&format!("  {}", req.reason), Paint::Plain);
             loop {
                 match self.input.read("  allow? [y]es [n]o [a]lways > ").await {
                     Read::Line(line) => match answer(&line) {
@@ -321,7 +344,9 @@ impl Approver for Ask {
                         Some(Answer::No(why)) => {
                             return Verdict::Refuse(declined(&req.action, why));
                         }
-                        None => println!("  y, n, a, or n and what to do instead"),
+                        None => self
+                            .screen
+                            .line("  y, n, a, or n and what to do instead", Paint::Plain),
                     },
                     Read::Interrupted | Read::Eof => {
                         let _ = self.stop.send(());
@@ -368,174 +393,12 @@ fn declined(action: &str, why: Option<&str>) -> String {
     }
 }
 
-/// Shows a turn's events as they come: the model's words as they stream, a line for each
-/// stretch of thinking, a line per call and per result.
-#[derive(Debug)]
-struct View {
-    style: Style,
-    show_reasoning: bool,
-    /// The cursor is not at the start of a line.
-    mid_line: bool,
-    /// When the current stretch of reasoning began.
-    thinking: Option<Instant>,
-}
-
-impl View {
-    fn new(style: Style, show_reasoning: bool) -> Self {
-        Self {
-            style,
-            show_reasoning,
-            mid_line: false,
-            thinking: None,
-        }
-    }
-
-    fn show(&mut self, e: AgentEvent) {
-        if let AgentEvent::Reasoning { text } = &e {
-            if self.thinking.is_none() {
-                self.thinking = Some(Instant::now());
-                self.line_start();
-                self.write("· thinking", true);
-                if self.show_reasoning {
-                    self.line_start();
-                }
-            }
-            if self.show_reasoning {
-                self.write(&printable(text), true);
-            }
-            return;
-        }
-        self.end_thinking();
-        match e {
-            AgentEvent::Text { text } => self.write(&printable(&text), false),
-            AgentEvent::ToolStarted { tool, arguments } => {
-                self.line(&format!("→ {tool} {}", short(&arguments, 160)), false)
-            }
-            AgentEvent::ToolFinished { result, .. } => {
-                let first = result.lines().next().unwrap_or_default();
-                self.line(&format!("← {}", short(first, 200)), true)
-            }
-            AgentEvent::Refused { tool, reason } => {
-                self.line(&format!("✗ {tool}: {}", printable(&reason)), false)
-            }
-            AgentEvent::Notice { text } => self.line(&format!("· {}", printable(&text)), true),
-            AgentEvent::Restarted { reason } => {
-                self.line(&format!("· restarted: {}", printable(&reason)), true)
-            }
-            AgentEvent::Reasoning { .. } => {}
-        }
-    }
-
-    /// Closes a stretch of thinking with how long it took.
-    fn end_thinking(&mut self) {
-        if let Some(t) = self.thinking.take() {
-            let took = duration(t.elapsed());
-            if self.show_reasoning {
-                self.line(&format!("· thought for {took}"), true);
-            } else {
-                self.write(&format!(" {took}"), true);
-                self.line_start();
-            }
-        }
-    }
-
-    fn finish(&mut self) {
-        self.end_thinking();
-        self.line_start();
-    }
-
-    fn write(&mut self, text: &str, dim: bool) {
-        if text.is_empty() {
-            return;
-        }
-        if dim {
-            print!("{}", self.style.dim(text));
-        } else {
-            print!("{text}");
-        }
-        let _ = std::io::stdout().flush();
-        self.mid_line = !text.ends_with('\n');
-    }
-
-    fn line_start(&mut self) {
-        if self.mid_line {
-            println!();
-            self.mid_line = false;
-        }
-    }
-
-    fn line(&mut self, text: &str, dim: bool) {
-        self.line_start();
-        self.write(text, dim);
-        self.line_start();
-    }
-}
-
-/// Text that came from the model or a tool, with control characters shown instead of
-/// obeyed: an escape sequence in a file must not reach the terminal (§10).
-fn printable(text: &str) -> String {
-    text.chars()
-        .map(|c| match c {
-            '\n' | '\t' => c,
-            '\u{0}'..='\u{1f}' => char::from_u32(0x2400 + c as u32).unwrap_or('\u{fffd}'),
-            '\u{7f}' => '\u{2421}',
-            '\u{80}'..='\u{9f}' => '\u{fffd}',
-            _ => c,
-        })
-        .collect()
-}
-
-/// [`printable`], on one line, at most `max` characters.
-fn short(text: &str, max: usize) -> String {
-    let line: String = printable(text)
-        .chars()
-        .map(|c| if c == '\n' { ' ' } else { c })
-        .take(max)
-        .collect();
-    if line.chars().count() < text.chars().count() {
-        format!("{line}…")
-    } else {
-        line
-    }
-}
-
 /// `2.1K` above a thousand.
 fn kilo(n: u64) -> String {
     if n >= 1000 {
         format!("{:.1}K", n as f64 / 1000.0)
     } else {
         n.to_string()
-    }
-}
-
-/// `41 s` or `3 min 5 s`.
-fn duration(d: Duration) -> String {
-    match d.as_secs() {
-        s if s < 60 => format!("{s} s"),
-        s => format!("{} min {} s", s / 60, s % 60),
-    }
-}
-
-/// Dim meta lines on a terminal, unless NO_COLOR is set.
-#[derive(Debug, Clone, Copy)]
-struct Style {
-    color: bool,
-}
-
-impl Style {
-    fn detect() -> Self {
-        Self {
-            color: std::io::stdout().is_terminal()
-                && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
-        }
-    }
-
-    fn dim(self, text: &str) -> String {
-        if self.color {
-            format!("\x1b[2m{text}\x1b[0m")
-        } else {
-            text.to_owned()
-        }
     }
 }
 
@@ -670,19 +533,8 @@ mod tests {
     }
 
     #[test]
-    fn control_characters_are_shown_not_obeyed() {
-        // an OSC 52 clipboard write and a bell, as a file could carry them
-        let text = "a\x1b]52;c;ZXZpbA==\x07b\n\tc\u{9b}d\u{7f}";
-        assert_eq!(printable(text), "a␛]52;c;ZXZpbA==␇b\n\tc\u{fffd}d␡");
-        assert_eq!(short("line one\nline two", 12), "line one lin…");
-        assert_eq!(short("ok", 12), "ok");
-    }
-
-    #[test]
-    fn sizes_and_durations() {
+    fn sizes() {
         assert_eq!(kilo(999), "999");
         assert_eq!(kilo(98_304), "98.3K");
-        assert_eq!(duration(Duration::from_secs(41)), "41 s");
-        assert_eq!(duration(Duration::from_secs(185)), "3 min 5 s");
     }
 }

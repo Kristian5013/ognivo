@@ -4,6 +4,7 @@
 mod chat;
 mod run;
 mod session;
+mod view;
 
 use std::process::ExitCode;
 use std::time::Duration;

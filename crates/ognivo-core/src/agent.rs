@@ -30,6 +30,7 @@ use ognivo_models::{
     Channel, ChatMessage, DriverError, DriverEvent, Family, ModelDriver, Outcome, StepRequest,
     ToolCall, ToolChoice, ToolDecl,
 };
+use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
 use ognivo_tools::projection::{self, Call};
@@ -120,6 +121,16 @@ pub enum AgentEvent {
     ToolStarted {
         tool: String,
         arguments: String,
+        /// The call as ognivo runs it; `None` when the arguments do not parse.
+        #[serde(skip)]
+        call: Option<Call>,
+    },
+    /// A file the call wrote, as a line diff against what was there.
+    FileChanged {
+        /// Relative to the project root inside it, absolute outside.
+        path: String,
+        created: bool,
+        hunks: Vec<Hunk>,
     },
     ToolFinished {
         tool: String,
@@ -614,11 +625,12 @@ impl Agent {
     ) -> String {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
+        let parsed = projection::parse(self.family, &call.name, &call.arguments);
         on(AgentEvent::ToolStarted {
             tool: call.name.clone(),
             arguments: call.arguments.clone(),
+            call: parsed.as_ref().ok().cloned(),
         });
-        let parsed = projection::parse(self.family, &call.name, &call.arguments);
         let key = match &parsed {
             Ok(c) => Fingerprint::of(&self.cwd, c),
             Err(_) => Fingerprint::Unparsed {
@@ -780,7 +792,7 @@ impl Agent {
                         {
                             return refusal;
                         }
-                        self.commit(change, p)
+                        self.commit(change, p, on)
                     }
                     Err(e) => {
                         if matches!(e, FileError::Edit { .. }) {
@@ -818,7 +830,7 @@ impl Agent {
                         {
                             return refusal;
                         }
-                        self.commit(change, p)
+                        self.commit(change, p, on)
                     }
                     Err(e) => error_text(&e),
                 }
@@ -925,7 +937,17 @@ impl Agent {
         }
     }
 
-    fn commit(&mut self, change: files::Change, path: PathBuf) -> String {
+    fn commit(
+        &mut self,
+        change: files::Change,
+        path: PathBuf,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> String {
+        let changed = AgentEvent::FileChanged {
+            path: change.shown.display().to_string(),
+            created: change.before.is_none(),
+            hunks: change.hunks(),
+        };
         match change.commit() {
             Ok(text) => {
                 self.stats.edits_applied += u32::from(text.starts_with("[edit:"));
@@ -933,6 +955,7 @@ impl Agent {
                 self.repeats.changed();
                 self.ledger.changed(path.clone());
                 self.seen.insert(path);
+                on(changed);
                 text
             }
             Err(e) => error_text(&e),
@@ -1162,10 +1185,32 @@ mod tests {
             ],
             WorkspaceState::CLEAN,
         );
-        let (end, _) = turn(&mut r).await;
+        let (end, events) = turn(&mut r).await;
         assert!(
             matches!(&end, TurnEnd::Answer(a) if a.text == "done"),
             "{end:?}"
+        );
+        // the UI gets the parsed call and, for a change, the diff
+        assert!(matches!(
+            &events[0],
+            AgentEvent::ToolStarted { call: Some(Call::Read { path, .. }), .. } if path == "lib.rs"
+        ));
+        let changed: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::FileChanged { .. }))
+            .collect();
+        assert_eq!(
+            changed,
+            [&AgentEvent::FileChanged {
+                path: "lib.rs".into(),
+                created: false,
+                hunks: vec![Hunk {
+                    old_start: 2,
+                    new_start: 2,
+                    removed: vec!["    1".into()],
+                    added: vec!["    2".into()],
+                }],
+            }]
         );
         assert_eq!(
             std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),

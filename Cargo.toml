@@ -30,6 +30,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
+similar = "3.2.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 toml = "1.1.8"

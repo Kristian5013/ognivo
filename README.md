@@ -37,9 +37,10 @@ echo "Which file implements the edit tool?" | cargo run -p ognivo-cli -- run --u
 
 `doctor` connects to a running llama-server (or ik_llama.cpp), detects the model family,
 classifies the server and checks the properties the agent depends on. `chat` works in the
-current directory: the answer streams, an action that needs approval asks `y`, `n` (or `n`
-and what to do instead) or `a` (that exact action again without asking, for the rest of the
-session), and ^C stops a turn; `/help` lists the rest. `run` takes the prompt on stdin;
+current directory: the answer streams, each tool call shows as one line and each change as a
+short diff, an action that needs approval asks `y`, `n` (or `n` and what to do instead) or
+`a` (that exact action again without asking, for the rest of the session), and ^C stops a
+turn; `/help` lists the rest. `run` takes the prompt on stdin;
 actions that would need approval are refused and explained to the model.
 
 ## License

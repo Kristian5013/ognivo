@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Component, Path, PathBuf};
 
+use crate::diff::{self, Hunk};
 use crate::edit::{self, EditError, EditOutcome};
 
 /// Lines and bytes of file content one read returns at most.
@@ -197,12 +198,18 @@ pub struct Change {
     /// The current content; `None` when the file is created.
     pub before: Option<String>,
     pub after: String,
-    shown: PathBuf,
+    /// The name results use ([`Target::shown`]).
+    pub shown: PathBuf,
     /// What the model reads once the change is written.
     report: String,
 }
 
 impl Change {
+    /// What the change does to the file, line by line.
+    pub fn hunks(&self) -> Vec<Hunk> {
+        diff::hunks(self.before.as_deref().unwrap_or_default(), &self.after)
+    }
+
     pub fn commit(self) -> Result<String, FileError> {
         atomic_write(&self.path, &self.shown, self.after.as_bytes())?;
         Ok(self.report)

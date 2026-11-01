@@ -98,13 +98,15 @@ async fn asks_runs_and_remembers_always_for_the_session() {
         1,
         "{stdout}"
     );
-    for text in [
-        "→ shell",
-        "Touched.",
-        "· new conversation",
-        "Again.",
-        "Third.",
-    ] {
+    // the command's line; each run came after a question or a note, so its result has a
+    // line of its own
+    assert_eq!(
+        stdout.matches("→ $ touch made.txt\n").count(),
+        3,
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches("\n← exit 0, ").count(), 3, "{stdout}");
+    for text in ["Touched.", "· new conversation", "Again.", "Third."] {
         assert!(stdout.contains(text), "{text}: {stdout}");
     }
     assert!(
@@ -128,6 +130,55 @@ async fn asks_runs_and_remembers_always_for_the_session() {
     assert!(!text.contains("/exit"), "{text}");
     let mode = std::fs::metadata(&history).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn reads_show_as_one_line_edits_as_a_diff_failures_with_their_end() {
+    let (url, _) = fake_server(vec![
+        call_stream("c1", "read", r#"{"path":"notes.txt"}"#),
+        call_stream(
+            "c2",
+            "edit",
+            r#"{"path":"notes.txt","old_string":"two","new_string":"TWO"}"#,
+        ),
+        call_stream(
+            "c3",
+            "shell",
+            r#"{"command":"touch x; echo first; echo boom; exit 3"}"#,
+        ),
+        answer_stream("Edited."),
+        answer_stream("Edited."),
+    ])
+    .await;
+    let (dir, root) = project();
+    std::fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    let data = dir.path().join("data");
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "fix the notes\ny\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+    assert!(
+        stdout.contains("\n→ read notes.txt · lines 1-3 of 3 lines, 14 B, ~4 tokens\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\n→ edit notes.txt · +1 -1\n  2 - two\n  2 + TWO\n"),
+        "{stdout}"
+    );
+    // asked first, so the result has a line of its own, and the end of the output under it
+    assert!(
+        stdout.contains("\n← exit 3, ") && stdout.contains(" s\n    first\n    boom\n"),
+        "{stdout}"
+    );
 }
 
 #[tokio::test]

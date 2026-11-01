@@ -164,7 +164,9 @@ fn show(e: &AgentEvent, jsonl: bool) {
         }
         AgentEvent::Reasoning { .. } => {}
         AgentEvent::Restarted { reason } => eprintln!("\n· restarted: {reason}"),
-        AgentEvent::ToolStarted { tool, arguments } => {
+        AgentEvent::ToolStarted {
+            tool, arguments, ..
+        } => {
             let mut args: String = arguments.chars().take(160).collect();
             if args.len() < arguments.len() {
                 args.push('…');
@@ -173,6 +175,11 @@ fn show(e: &AgentEvent, jsonl: bool) {
         }
         AgentEvent::ToolFinished { result, .. } => {
             eprintln!("← {}", result.lines().next().unwrap_or_default());
+        }
+        AgentEvent::FileChanged { path, hunks, .. } => {
+            let removed: usize = hunks.iter().map(|h| h.removed.len()).sum();
+            let added: usize = hunks.iter().map(|h| h.added.len()).sum();
+            eprintln!("· {path}: +{added} -{removed}");
         }
         AgentEvent::Refused { tool, reason } => eprintln!("✗ {tool}: {reason}"),
         AgentEvent::Notice { text } => eprintln!("· {text}"),
