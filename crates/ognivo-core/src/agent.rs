@@ -10,6 +10,8 @@
 //!   stamp A', gpt-oss, twice).
 //! - Every call is checked against its declared schema, computed without side effects,
 //!   decided by the approval policy ([`crate::approval`]), and only then executed.
+//! - A call that only repeats the result of an identical call while nothing changed is
+//!   marked, then skipped, then ends the turn ([`crate::repeats`]).
 //! - Before an answer is accepted, the loop compares it with the facts of the turn
 //!   ([`crate::verify`]): a change after the last passing build or test sends the model
 //!   back once to run one (when it can), an answer claiming checks that never happened is
@@ -36,6 +38,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::repeats::{Check, Fingerprint, Repeats};
 use crate::verify::{self, Ledger, Run, Verification};
 
 /// How many generations in a row may end without usable calls before the turn stops.
@@ -152,6 +155,10 @@ pub struct Stats {
     pub edits_already_applied: u32,
     pub edits_failed: u32,
     pub refused: u32,
+    /// Calls that gave the same result as an identical call while nothing changed.
+    pub repeated: u32,
+    /// Repeated calls that were not run.
+    pub repeats_skipped: u32,
     /// Answers sent back before acceptance: to run a build or test, or to drop a claim.
     pub answers_sent_back: u32,
     /// Prompt tokens the server processed, and those it took from the KV cache.
@@ -174,7 +181,8 @@ pub enum TurnEnd {
     Answer(Answer),
     /// The step limit was reached before an answer.
     StepLimit,
-    /// Several generations in a row ended without usable calls.
+    /// Several generations in a row ended without usable calls, or a call kept repeating
+    /// itself with nothing new in between.
     Stuck(String),
     /// The turn's time limit ran out before an answer.
     TimeLimit,
@@ -257,6 +265,10 @@ pub struct Agent {
     workspace: WorkspaceState,
     /// What this turn changed, ran and was refused.
     ledger: Ledger,
+    /// This turn's calls and results, for the repeat detector.
+    repeats: Repeats,
+    /// Set by a call that ends the turn: why.
+    stuck: Option<String>,
     pub stats: Stats,
 }
 
@@ -304,6 +316,8 @@ impl Agent {
             clock: None,
             workspace: opts.workspace,
             ledger: Ledger::default(),
+            repeats: Repeats::default(),
+            stuck: None,
             stats: Stats::default(),
             opts,
         }
@@ -340,6 +354,7 @@ impl Agent {
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
         self.ledger = Ledger::default();
+        self.repeats = Repeats::default();
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
         for _ in 0..self.opts.max_steps {
@@ -453,7 +468,9 @@ impl Agent {
                         tool_calls: calls.clone(),
                     });
                     for (i, call) in calls.iter().enumerate() {
-                        let result = if i < MAX_CALLS_PER_STEP {
+                        let result = if self.stuck.is_some() {
+                            "[error] not run: the turn ended".to_owned()
+                        } else if i < MAX_CALLS_PER_STEP {
                             self.execute(call, on).await
                         } else {
                             format!("[error] not run: at most {MAX_CALLS_PER_STEP} calls per step")
@@ -462,6 +479,9 @@ impl Agent {
                             tool_call_id: call.id.clone(),
                             content: result,
                         });
+                    }
+                    if let Some(why) = self.stuck.take() {
+                        return Ok(TurnEnd::Stuck(why));
                     }
                 }
                 Outcome::Truncated { partial } => {
@@ -528,11 +548,44 @@ impl Agent {
             tool: call.name.clone(),
             arguments: call.arguments.clone(),
         });
-        let result = match projection::parse(self.family, &call.name, &call.arguments) {
-            Ok(parsed) => self.run(&call.name, parsed, on).await,
-            Err(e) => {
-                self.stats.bad_arguments += 1;
-                format!("[error] {e}")
+        let parsed = projection::parse(self.family, &call.name, &call.arguments);
+        let key = match &parsed {
+            Ok(c) => Fingerprint::of(&self.cwd, c),
+            Err(_) => Fingerprint::Unparsed {
+                tool: call.name.clone(),
+                arguments: call.arguments.clone(),
+            },
+        };
+        let result = match self.repeats.check(&key) {
+            Check::Run => {
+                let mut result = match parsed {
+                    Ok(parsed) => self.run(&call.name, parsed, on).await,
+                    Err(e) => {
+                        self.stats.bad_arguments += 1;
+                        format!("[error] {e}")
+                    }
+                };
+                if let Some(note) = self.repeats.record(key, &result) {
+                    self.stats.repeated += 1;
+                    result.push_str("\n\n");
+                    result.push_str(&note);
+                }
+                result
+            }
+            Check::Skip(text) => {
+                self.stats.repeats_skipped += 1;
+                text
+            }
+            Check::Stop(text) => {
+                let mut args: String = call.arguments.chars().take(120).collect();
+                if args.len() < call.arguments.len() {
+                    args.push('…');
+                }
+                self.stuck = Some(format!(
+                    "{} kept giving the same result with nothing new in between: {args}",
+                    call.name
+                ));
+                text
             }
         };
         on(AgentEvent::ToolFinished {
@@ -766,6 +819,9 @@ impl Agent {
                         if effect == Effect::SideEffects {
                             self.workspace = WorkspaceState::DIRTY;
                         }
+                        if effect != Effect::ReadOnly {
+                            self.repeats.changed();
+                        }
                         self.cwd = r.cwd;
                         r.text
                     }
@@ -803,6 +859,7 @@ impl Agent {
             Ok(text) => {
                 self.stats.edits_applied += u32::from(text.starts_with("[edit:"));
                 self.workspace = WorkspaceState::DIRTY;
+                self.repeats.changed();
                 self.ledger.changed(path.clone());
                 self.seen.insert(path);
                 text
@@ -1424,6 +1481,136 @@ mod tests {
             n[0].contains("because the reasoning kept repeating")
                 && n[0].ends_with("Stop deliberating: act on what you decided with a tool call, or give the final answer."),
             "{n:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_edit_again_is_marked_then_skipped_then_ends_the_turn() {
+        // M1 stamp A', Gemma: one wrong old_string again, with another new text each time
+        let edit = |new: &str| {
+            calls(
+                &[(
+                    "edit",
+                    serde_json::json!({"path": "lib.rs", "old_string": "    7", "new_string": new}),
+                )],
+                FinishReason::ToolCalls,
+            )
+        };
+        let steps = vec![
+            edit("    2"),
+            edit("    3"),
+            edit("    4"),
+            edit("    5"),
+            answer("never"),
+        ];
+        let mut r = agent(steps, WorkspaceState::CLEAN);
+        let (end, _) = turn(&mut r).await;
+        assert!(
+            matches!(&end, TurnEnd::Stuck(why) if why.starts_with("edit kept giving the same result")),
+            "{end:?}"
+        );
+        let results = tool_results(&r.agent);
+        assert_eq!(results.len(), 4);
+        assert!(
+            results[0].starts_with("[error] lib.rs: old_string not found")
+                && !results[0].contains("[ognivo]"),
+            "{}",
+            results[0]
+        );
+        assert!(
+            results[1].ends_with("an edit with this old_string gave this same result before, and nothing has changed since."),
+            "{}",
+            results[1]
+        );
+        assert!(
+            results[2].starts_with("[ognivo] Not run: an edit with this old_string"),
+            "{}",
+            results[2]
+        );
+        assert!(
+            results[3].starts_with("[ognivo] Not run: this call kept giving"),
+            "{}",
+            results[3]
+        );
+        let s = &r.agent.stats;
+        assert_eq!(
+            (s.edits_failed, s.repeated, s.repeats_skipped, s.steps),
+            (2, 1, 1, 4)
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_same_result_with_nothing_changed_is_a_repeat() {
+        let grep = || {
+            calls(
+                &[("grep", serde_json::json!({"pattern": "fn a"}))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let steps = vec![
+            grep(),
+            grep(),
+            calls(
+                &[(
+                    "edit",
+                    serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"}),
+                )],
+                FinishReason::ToolCalls,
+            ),
+            grep(),
+            answer("done"),
+        ];
+        let mut r = agent(steps, WorkspaceState::CLEAN);
+        let (end, _) = turn(&mut r).await;
+        assert!(matches!(&end, TurnEnd::Answer(_)), "{end:?}");
+        let results = tool_results(&r.agent);
+        assert!(
+            results[1].ends_with("nothing has changed since."),
+            "{}",
+            results[1]
+        );
+        assert!(
+            results[2].starts_with("[edit: applied exact]"),
+            "{}",
+            results[2]
+        );
+        // the same result as before the edit, which could have changed it
+        assert_eq!(results[3], results[0]);
+        assert_eq!(r.agent.stats.repeated, 1);
+    }
+
+    #[tokio::test]
+    async fn a_command_that_may_change_things_is_never_a_repeat() {
+        let shell = |command: &str| {
+            calls(
+                &[("shell", serde_json::json!({"command": command}))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let grep = || {
+            calls(
+                &[("grep", serde_json::json!({"pattern": "fn a"}))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let steps = vec![
+            grep(),
+            shell("touch x"),
+            grep(),
+            shell("touch x"),
+            shell("touch x"),
+            shell("touch x"),
+            answer("done"),
+            answer("done"),
+        ];
+        let mut r = agent_with(steps, WorkspaceState::CLEAN, Box::new(AllowAll));
+        let (end, _) = turn(&mut r).await;
+        assert!(matches!(&end, TurnEnd::Answer(_)), "{end:?}");
+        let results = tool_results(&r.agent);
+        assert_eq!(results.len(), 6);
+        assert!(
+            results.iter().all(|t| !t.contains("[ognivo]")),
+            "{results:?}"
         );
     }
 }

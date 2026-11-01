@@ -5,7 +5,8 @@
 //! below forgives one of those, and every pass applies only a unique match; nothing is
 //! fuzzy in the content itself. Passes, in order:
 //! 1. exact substring;
-//! 2. exact after stripping a line-number prefix that every line of `old` carries;
+//! 2. exact after stripping the line-number prefixes copied into `old`, and the same
+//!    prefixes in `new`;
 //! 3. line by line, ignoring trailing whitespace;
 //! 4. line by line, ignoring indentation; the replacement is re-indented by the same
 //!    shift.
@@ -118,8 +119,8 @@ pub fn apply(
         return Ok(done);
     }
     // 2. line-number prefixes copied from read output
-    if let Some(stripped_old) = strip_line_numbers(old) {
-        let stripped_new = strip_line_numbers(new).unwrap_or_else(|| new.to_owned());
+    if let Some(numbering) = Numbering::of(old) {
+        let (stripped_old, stripped_new) = (numbering.strip(old), numbering.strip(new));
         if stripped_old != stripped_new
             && let Some(done) = exact(
                 text,
@@ -234,30 +235,82 @@ fn exact(
     }
 }
 
-/// Strips `N│`, `N: `, `N→` or a right-aligned `N<TAB>` prefix when every non-empty line
-/// carries one, as copied from line-numbered output. `None` when they do not all carry it.
-fn strip_line_numbers(s: &str) -> Option<String> {
-    let mut out = Vec::new();
-    let mut any = false;
-    for line in s.split('\n') {
-        if line.trim().is_empty() {
-            out.push(line.to_owned());
-            continue;
+/// Line-number prefixes copied from line-numbered output (`read`, `cat -n`, `grep -n`):
+/// `N│`, `N: `, `N→` or `N<TAB>`, one separator, the numbers left-aligned or right-aligned
+/// to one column. Models copy them into some lines and not others: a copy that starts
+/// after the first number (M1 stamp A', gpt-oss), lines they add to `new` without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Numbering {
+    sep: &'static str,
+    /// No number is padded.
+    left: bool,
+    /// Where every separator starts, when they all start in one column.
+    column: Option<usize>,
+}
+
+impl Numbering {
+    /// The numbering of the lines of `old` that carry a prefix; `None` when no line does or
+    /// the prefixes disagree.
+    fn of(old: &str) -> Option<Self> {
+        let mut prefixes = old.split('\n').filter_map(prefix).map(|(p, _)| p);
+        let first = prefixes.next()?;
+        let mut n = Numbering {
+            sep: first.sep,
+            left: first.pad == 0,
+            column: Some(first.column),
+        };
+        for p in prefixes {
+            if p.sep != n.sep {
+                return None;
+            }
+            n.left &= p.pad == 0;
+            if n.column != Some(p.column) {
+                n.column = None;
+            }
         }
-        let digits_start = line.len() - line.trim_start().len();
-        let rest = &line[digits_start..];
-        let digits = rest.chars().take_while(char::is_ascii_digit).count();
-        if digits == 0 {
-            return None;
-        }
-        let after = &rest[digits..];
-        let body = ["│", ": ", "→", "\t"]
-            .iter()
-            .find_map(|sep| after.strip_prefix(sep))?;
-        out.push(body.to_owned());
-        any = true;
+        (n.left || n.column.is_some()).then_some(n)
     }
-    any.then(|| out.join("\n"))
+
+    /// `s` without the prefixes of this numbering; other lines stay as they are.
+    fn strip(self, s: &str) -> String {
+        s.split('\n')
+            .map(|line| match prefix(line) {
+                Some((p, body)) if self.fits(p) => body,
+                _ => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn fits(self, p: Prefix) -> bool {
+        p.sep == self.sep && ((self.left && p.pad == 0) || self.column == Some(p.column))
+    }
+}
+
+/// A number at the start of a line and the separator after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Prefix {
+    /// Spaces before the number: right-aligned numbers have them.
+    pad: usize,
+    /// Where the separator starts.
+    column: usize,
+    sep: &'static str,
+}
+
+/// The prefix of `line` and the text after it.
+fn prefix(line: &str) -> Option<(Prefix, &str)> {
+    let rest = line.trim_start_matches(' ');
+    let pad = line.len() - rest.len();
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    ["│", ": ", "→", "\t"].into_iter().find_map(|sep| {
+        rest[digits..].strip_prefix(sep).map(|body| {
+            let column = pad + digits;
+            (Prefix { pad, column, sep }, body)
+        })
+    })
 }
 
 /// Shifts `new` by the indentation difference between `old`'s first non-blank line and
@@ -356,7 +409,36 @@ mod tests {
             assert_eq!(k, MatchKind::LineNumbers);
         }
         // a code line that merely starts with a number is not a prefix
-        assert!(strip_line_numbers("let a = 1;\n2 + 3").is_none());
+        assert!(Numbering::of("let a = 1;\n2 + 3").is_none());
+        // nor are numbers with two separators, or neither left-aligned nor in one column
+        assert!(Numbering::of("1│a\n2: b").is_none());
+        assert!(Numbering::of(" 9│a\n100│b").is_none());
+    }
+
+    #[test]
+    fn numbers_copied_into_some_lines_are_stripped_there() {
+        // M1 stamp A', gpt-oss, flowcoin-ct-memeq-multibit: the copy starts after the
+        // first number, the next one is wrong, and the added line has none
+        let src =
+            "{\n    {.name = \"a\", .run = test_a},\n    {.name = \"b\", .run = test_b},\n}\n";
+        let old = "    {.name = \"a\", .run = test_a},\n260│    {.name = \"b\", .run = test_b},\n";
+        let new = "    {.name = \"a\", .run = test_a},\n    {.name = \"c\", .run = test_c},\n260│    {.name = \"b\", .run = test_b},\n";
+        let (t, k) = applied(apply(src, old, new, false));
+        assert_eq!(k, MatchKind::LineNumbers);
+        assert_eq!(
+            t,
+            "{\n    {.name = \"a\", .run = test_a},\n    {.name = \"c\", .run = test_c},\n    {.name = \"b\", .run = test_b},\n}\n"
+        );
+        // right-aligned numbers; text in new that only looks numbered stays
+        let src = "codes = {\n    200: \"OK\",\n}\n";
+        let old = " 8│codes = {\n 9│    200: \"OK\",\n10│}\n";
+        let new = " 8│codes = {\n 9│    200: \"OK\",\n    404: \"Not Found\",\n10│}\n";
+        let (t, k) = applied(apply(src, old, new, false));
+        assert_eq!(k, MatchKind::LineNumbers);
+        assert_eq!(
+            t,
+            "codes = {\n    200: \"OK\",\n    404: \"Not Found\",\n}\n"
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 use crate::ToolId;
 
 /// A tool call in ognivo's own terms.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Call {
     Read {
         path: String,
