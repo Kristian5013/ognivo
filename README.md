@@ -67,7 +67,8 @@ npm start -w @ognivo/desktop
 ```
 
 `npm run dev -w @ognivo/ui` serves the UI with hot reload at http://127.0.0.1:5180; start the
-window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it.
+window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it. `npm run perf -w @ognivo/desktop`
+measures the GUI's perf budgets in a real window for about ten seconds; the screen must be on.
 
 ## License
 

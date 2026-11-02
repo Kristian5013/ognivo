@@ -1,24 +1,12 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { useMemo, useState } from "react";
+import { memo, useCallback, useSyncExternalStore } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { Streamdown } from "streamdown";
 
 import { ending, seconds } from "../format.ts";
-import type { Item, Thread, Turn, VoidItem } from "../model.ts";
+import type { VoidItem } from "../model.ts";
+import type { Row, ThreadStore } from "../store.ts";
 import { ToolCard } from "./tool.tsx";
-
-type Row =
-  | { kind: "user"; key: string; turn: Turn }
-  | { kind: "item"; key: string; item: Item }
-  | { kind: "end"; key: string; turn: Turn };
-
-function rows(thread: Thread): Row[] {
-  return thread.turns.flatMap((turn): Row[] => [
-    { kind: "user", key: `u${turn.index}`, turn },
-    ...turn.items.map((item): Row => ({ kind: "item", key: item.id, item })),
-    ...(turn.end ? [{ kind: "end", key: `e${turn.index}`, turn } as const] : []),
-  ]);
-}
 
 function Chevron({ open }: { open: boolean }) {
   return (
@@ -28,27 +16,38 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+/** Generations end after their reasoning: the duration reads the list, which they change. */
+function useGenerationMs(store: ThreadStore, generation?: number): number | undefined {
+  const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
+  return useSyncExternalStore(subscribe, () =>
+    generation === undefined ? undefined : store.generations[generation]?.generationMs,
+  );
+}
+
 function Reasoning({
-  text,
-  ms,
-  open,
-  onOpenChange,
+  store,
+  row,
 }: {
-  text: string;
-  ms?: number;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+  store: ThreadStore;
+  row: Extract<Row, { kind: "item" }> & { item: { kind: "reasoning" } };
 }) {
+  const ms = useGenerationMs(store, row.item.generation);
   return (
-    <Collapsible.Root open={open} onOpenChange={onOpenChange}>
+    <Collapsible.Root open={row.open} onOpenChange={(o) => store.setOpen(row.item.id, o)}>
       <Collapsible.Trigger className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground">
-        <Chevron open={open} />
-        {ms ? `Thought for ${seconds(ms)}` : "Thought"}
+        <Chevron open={row.open} />
+        {row.live ? (
+          <span className="animate-pulse">Thinking…</span>
+        ) : ms ? (
+          `Thought for ${seconds(ms)}`
+        ) : (
+          "Thought"
+        )}
       </Collapsible.Trigger>
       <Collapsible.Content>
-        {open && (
+        {row.open && (
           <p className="mt-1.5 border-l-2 border-border pl-3 leading-5 whitespace-pre-wrap text-muted-foreground">
-            {text}
+            {row.item.text}
           </p>
         )}
       </Collapsible.Content>
@@ -72,87 +71,79 @@ function Void({ item }: { item: VoidItem }) {
   );
 }
 
-/** A recorded session, turn by turn: only what is on screen is rendered. */
-export function ThreadView({ thread }: { thread: Thread }) {
-  const data = useMemo(() => rows(thread), [thread]);
-  // changes are what the user checks first: they start open; `?open=all` opens everything
-  // (screenshots, perf runs)
-  const [open, setOpen] = useState<ReadonlySet<string>>(() => {
-    const all = new URLSearchParams(location.search).get("open") === "all";
-    return new Set(
-      thread.turns.flatMap((t) =>
-        t.items
-          .filter((i) => all || (i.kind === "tool" && i.call?.name === "Edit"))
-          .map((i) => i.id),
-      ),
-    );
-  });
-  const toggle = (id: string) => (on: boolean) =>
-    setOpen((s) => {
-      const next = new Set(s);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
-
-  const item = (i: Item) => {
-    switch (i.kind) {
-      case "reasoning":
-        return (
-          <Reasoning
-            text={i.text}
-            ms={i.generation === undefined ? undefined : thread.generations[i.generation]?.generationMs}
-            open={open.has(i.id)}
-            onOpenChange={toggle(i.id)}
-          />
-        );
-      case "message":
-        return <Streamdown className="leading-6">{i.text}</Streamdown>;
-      case "tool":
-        return <ToolCard item={i} open={open.has(i.id)} onOpenChange={toggle(i.id)} />;
-      case "notice":
-        return (
-          <p className="text-[12px] leading-5 text-muted-foreground">
-            <span className="mr-2 font-medium text-spark">ognivo</span>
-            {i.text.replace(/^\[ognivo\]\s*/, "")}
-          </p>
-        );
-      case "void":
-        return <Void item={i} />;
+function Content({ store, row }: { store: ThreadStore; row: Row }) {
+  switch (row.kind) {
+    case "user":
+      return (
+        <div className="mt-5 rounded-lg bg-raised px-4 py-3">
+          <Streamdown className="leading-6">{row.text}</Streamdown>
+        </div>
+      );
+    case "end":
+      return (
+        <div className="mt-2 mb-6 flex items-center gap-3 text-[12px] text-muted-foreground">
+          <span className="h-px flex-1 bg-border" />
+          <span className={row.end === "answer" ? undefined : "text-warn"}>
+            Turn {row.turn} {ending(row.end)}
+            {row.why ? `: ${row.why}` : ""}
+          </span>
+          <span className="h-px flex-1 bg-border" />
+        </div>
+      );
+    case "item": {
+      const item = row.item;
+      switch (item.kind) {
+        case "reasoning":
+          return <Reasoning store={store} row={{ ...row, item }} />;
+        case "message":
+          return (
+            <Streamdown className="leading-6" parseIncompleteMarkdown isAnimating={row.live}>
+              {item.text}
+            </Streamdown>
+          );
+        case "tool":
+          return (
+            <ToolCard item={item} open={row.open} onOpenChange={(o) => store.setOpen(item.id, o)} />
+          );
+        case "notice":
+          return (
+            <p className="text-[12px] leading-5 text-muted-foreground">
+              <span className="mr-2 font-medium text-spark">ognivo</span>
+              {item.text.replace(/^\[ognivo\]\s*/, "")}
+            </p>
+          );
+        case "void":
+          return <Void item={item} />;
+      }
     }
-  };
+  }
+}
 
-  const row = (r: Row) => {
-    switch (r.kind) {
-      case "user":
-        return (
-          <div className="mt-5 rounded-lg bg-raised px-4 py-3">
-            <Streamdown className="leading-6">{r.turn.user}</Streamdown>
-          </div>
-        );
-      case "item":
-        return item(r.item);
-      case "end":
-        return (
-          <div className="mt-2 mb-6 flex items-center gap-3 text-[12px] text-muted-foreground">
-            <span className="h-px flex-1 bg-border" />
-            <span className={r.turn.end === "answer" ? undefined : "text-warn"}>
-              Turn {r.turn.index} {ending(r.turn.end)}
-              {r.turn.why ? `: ${r.turn.why}` : ""}
-            </span>
-            <span className="h-px flex-1 bg-border" />
-          </div>
-        );
-    }
-  };
+/** One row, re-rendered when that row changes and only then. */
+const RowView = memo(function RowView({ store, index }: { store: ThreadStore; index: number }) {
+  const subscribe = useCallback((l: () => void) => store.subscribeRow(index, l), [store, index]);
+  const row = useSyncExternalStore(subscribe, () => store.row(index));
+  return row ? (
+    <div className="mx-auto max-w-3xl px-6 py-1">
+      <Content store={store} row={row} />
+    </div>
+  ) : null;
+});
 
+/** A thread, turn by turn: only what is on screen is rendered, and it follows the end
+ * while the end is in view. `atEnd` opens it at its end, where a stream goes on. */
+export function ThreadView({ store, atEnd }: { store: ThreadStore; atEnd?: boolean }) {
+  const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
+  const length = useSyncExternalStore(subscribe, () => store.length);
   return (
     <Virtuoso
       className="min-h-0 flex-1"
-      data={data}
-      computeItemKey={(_, r) => r.key}
+      totalCount={length}
+      computeItemKey={(index) => store.key(index)}
       increaseViewportBy={800}
-      itemContent={(_, r) => <div className="mx-auto max-w-3xl px-6 py-1">{row(r)}</div>}
+      initialTopMostItemIndex={atEnd ? Math.max(0, length - 1) : 0}
+      followOutput={(atBottom) => (atBottom ? "auto" : false)}
+      itemContent={(index) => <RowView store={store} index={index} />}
     />
   );
 }

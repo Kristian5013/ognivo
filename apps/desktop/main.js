@@ -11,18 +11,22 @@
 //   OGNIVO_UI_DEV=http://127.0.0.1:5180   the UI's dev server instead of apps/ui/dist
 //   OGNIVO_UI_QUERY='session=qwen.long-file&open=all'
 //   OGNIVO_SCREENSHOT=out.png             render without showing a window, save, quit
+//   OGNIVO_INACTIVE=1                     show the window without taking the focus (perf runs)
+//
+// Start it with start.js (npm start), which sets the GPU it renders on first (gpu.js).
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BrowserWindow, app, dialog, protocol, session, shell } from "electron";
+import { BrowserWindow, app, dialog, protocol, screen, session, shell } from "electron";
 
 const SCHEME = "app";
 const UI = join(dirname(fileURLToPath(import.meta.url)), "../ui/dist");
 const DEV = process.env.OGNIVO_UI_DEV;
 const QUERY = process.env.OGNIVO_UI_QUERY;
 const SHOT = process.env.OGNIVO_SCREENSHOT;
+const INACTIVE = process.env.OGNIVO_INACTIVE === "1";
 
 const CSP = [
   "default-src 'self'",
@@ -101,14 +105,17 @@ async function openOutside(win, href) {
 
 function createWindow() {
   const start = `${DEV ?? `${SCHEME}://ui/index.html`}${QUERY ? `?${QUERY}` : ""}`;
+  // a window as big as the screen's work area or bigger gets maximized by the window
+  // manager: on a scaled laptop screen 1400x900 covered it all
+  const area = screen.getPrimaryDisplay().workAreaSize;
   const win = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    width: Math.min(1400, Math.round(area.width * 0.8)),
+    height: Math.min(900, Math.round(area.height * 0.8)),
     minWidth: 800,
     minHeight: 500,
     title: "ognivo",
     backgroundColor: "#0f1012",
-    show: !SHOT,
+    show: false,
     webPreferences: {
       sandbox: true,
       contextIsolation: true,
@@ -142,6 +149,12 @@ function createWindow() {
       app.quit();
     });
   }
+  // shown once it has something to show; a perf run's window leaves the focus where it is
+  win.once("ready-to-show", () => {
+    if (SHOT) return;
+    if (INACTIVE) win.showInactive();
+    else win.show();
+  });
   void win.loadURL(start);
 }
 

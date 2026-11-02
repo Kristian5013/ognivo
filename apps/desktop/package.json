@@ -7,10 +7,12 @@
   "type": "module",
   "main": "main.js",
   "scripts": {
-    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
-    "install-electron": "node ../../node_modules/electron/install.js"
+    "start": "node start.js",
+    "install-electron": "node ../../node_modules/electron/install.js",
+    "perf": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.64.1",
     "electron": "45.1.0"
   }
 }

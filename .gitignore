@@ -6,6 +6,9 @@ node_modules/
 dist/
 out/
 *.tsbuildinfo
+# Playwright's results and reports
+test-results/
+playwright-report/
 
 # Python (dev-only harnesses)
 __pycache__/
