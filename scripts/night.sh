@@ -96,6 +96,8 @@ else
 fi
 NIGHT=$OUT_ROOT/$DATE
 SHA=$(git -C "$REPO" rev-parse HEAD)
+# the window as it is tonight (--now gives one of its own)
+SHOWN="$(date -d "@$START" '+%H:%M')-$(date -d "@$END" '+%H:%M')"
 
 if ((DRY_RUN)); then
     echo "night $DATE: window $(date -d "@$START" '+%F %H:%M')-$(date -d "@$END" '+%H:%M')"
@@ -132,7 +134,7 @@ lock_release() {
     LOCK_PID=
 }
 write_night() {
-    python3 -I - "$NIGHT/night.json" "$DATE" "$SHA" "$WINDOW" "$SEEDS" "$MODELS" "${NOTES[@]}" << 'PY'
+    python3 -I - "$NIGHT/night.json" "$DATE" "$SHA" "$SHOWN" "$SEEDS" "$MODELS" "${NOTES[@]}" << 'PY'
 import json, sys
 path, date, sha, window, seeds, models, *notes = sys.argv[1:]
 json.dump({"date": date, "commit": sha, "window": window, "seeds": seeds,
@@ -165,7 +167,7 @@ lock_hold_until() {   # lock_hold_until EPOCH
         # the lock dies with this script (pdeathsig) and times out by itself; 9>&-: the night
         # lock must not live on in it
         setpriv --pdeathsig TERM -- systemd-inhibit --what="$what" --who=ognivo \
-            --why="ognivo night ($WINDOW)" --mode=block sleep "$secs" < /dev/null > /dev/null 2>&1 9>&- &
+            --why="ognivo night ($SHOWN)" --mode=block sleep "$secs" < /dev/null > /dev/null 2>&1 9>&- &
         LOCK_PID=$!
         log "holding a systemd-inhibit lock ($what) until $(date -d "@$1" '+%F %H:%M')"
         [[ $what == sleep:idle ]] && log "note: no lid-switch lock here: closing the lid will still suspend the machine"
@@ -178,18 +180,26 @@ lock_hold_until() {   # lock_hold_until EPOCH
 log "night $DATE: window $(date -d "@$START" '+%F %H:%M')-$(date -d "@$END" '+%H:%M'), commit $SHA, models: $MODELS, seeds: $SEEDS"
 [[ -n $(git -C "$REPO" status --porcelain --untracked-files=no) ]] \
     && log "note: the working tree has uncommitted changes; the night measures $SHA without them"
-SRC=$CACHE/src
-rm -rf "$SRC"
-mkdir -p "$SRC"
-git -C "$REPO" archive "$SHA" | tar -x -C "$SRC"
+# one copy per commit, never changed: another night or a test may be running from it
+SRC=$CACHE/src-${SHA:0:12}
+if [[ ! -e $SRC/.complete ]]; then
+    rm -rf "$SRC"
+    mkdir -p "$SRC"
+    git -C "$REPO" archive "$SHA" | tar -x -C "$SRC"
+    touch "$SRC/.complete"
+fi
+find "$CACHE" -maxdepth 1 -name 'src-*' -mtime +7 -exec rm -rf {} + 2> /dev/null || true
 export CARGO_TARGET_DIR=$CACHE/target
 log "building $SHA in $SRC"
 if ! (cd "$SRC" && "$CARGO" build --release --locked --offline -q -p ognivo-evals --bin t2 --bin night-report) >> "$LOG" 2>&1; then
     note "the build of $SHA failed (see night.log)"
     exit 1
 fi
-T2=$CARGO_TARGET_DIR/release/t2
-REPORT=$CARGO_TARGET_DIR/release/night-report
+# the night's own binaries: the shared target directory gets the next build
+mkdir -p "$NIGHT/bin"
+cp "$CARGO_TARGET_DIR/release/t2" "$CARGO_TARGET_DIR/release/night-report" "$NIGHT/bin/"
+T2=$NIGHT/bin/t2
+REPORT=$NIGHT/bin/night-report
 export OGNIVO_REPO=$SRC M0_MODELS_JSON=$SRC/evals/m0-baseline/harness/config/models.json
 llama_cmd() { python3 -I "$SRC/evals/m0-baseline/harness/scripts/llama_cmd.py" "$@"; }
 for m in $MODELS; do
