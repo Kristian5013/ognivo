@@ -377,7 +377,7 @@ fn steps(
                                 // returning without `chunks` drops the connection, and
                                 // llama-server cancels the generation
                                 Some((channel, l)) => {
-                                    let done = stopped(acc, channel, &l, seed);
+                                    let done = stopped(acc, channel, &l, &ctx.guard, seed);
                                     batch.push(Ok(DriverEvent::Finished(Box::new(done))));
                                     (batch, State::End)
                                 }
@@ -430,8 +430,8 @@ fn fold(
 fn finished(acc: ChatCompletion, guard: &Guard, seed: u32) -> Finished {
     Finished {
         outcome: acc.outcome(guard),
-        content: unescape(&acc.content).into_owned(),
-        reasoning: unescape(&acc.reasoning).into_owned(),
+        content: guard.restore(&acc.content).into_owned(),
+        reasoning: guard.restore(&acc.reasoning).into_owned(),
         finish: acc.finish,
         usage: acc.usage,
         seed,
@@ -459,14 +459,20 @@ pub fn read_recorded(
             return Ok(finished(acc, guard, seed));
         };
         if let Some((channel, l)) = fold(&mut acc, &mut watch, chat_events(&v)?) {
-            return Ok(stopped(acc, channel, &l, seed));
+            return Ok(stopped(acc, channel, &l, guard, seed));
         }
     }
     Err(no_done())
 }
 
 /// The result of an attempt the repetition guard stopped: nothing in it may run.
-fn stopped(acc: ChatCompletion, mut channel: Channel, l: &Loop, seed: u32) -> Finished {
+fn stopped(
+    acc: ChatCompletion,
+    mut channel: Channel,
+    l: &Loop,
+    guard: &Guard,
+    seed: u32,
+) -> Finished {
     if let Channel::Arguments { index, name } = &mut channel {
         *name = acc
             .tool_calls
@@ -478,10 +484,10 @@ fn stopped(acc: ChatCompletion, mut channel: Channel, l: &Loop, seed: u32) -> Fi
         outcome: Outcome::Repeating {
             partial: acc.tool_calls,
             channel,
-            sample: unescape(&l.sample).into_owned(),
+            sample: guard.restore(&l.sample).into_owned(),
         },
-        content: unescape(&acc.content).into_owned(),
-        reasoning: unescape(&acc.reasoning).into_owned(),
+        content: guard.restore(&acc.content).into_owned(),
+        reasoning: guard.restore(&acc.reasoning).into_owned(),
         finish: None,
         usage: acc.usage,
         seed,

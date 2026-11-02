@@ -8,6 +8,7 @@ mod common;
 
 use common::{Gen, Project, Reply, Server, agent, options, profile};
 use ognivo_core::agent::{AgentEvent, TurnEnd};
+use ognivo_models::guard::JOINER;
 use ognivo_models::{Family, Guard};
 use serde_json::{Value, json};
 
@@ -67,6 +68,8 @@ async fn control_tokens_never_reach_the_server_whole() {
         let list: String = tokens.iter().map(|t| format!("{t}\n")).collect();
         // what the model reads, so what it copies
         let broken = guard.escape(&list).into_owned();
+        // M1 T2-mini: gpt-oss copied the joiner as U+200D ZERO WIDTH JOINER
+        let lookalike = broken.replace(JOINER, "\u{200D}");
         // not framing: a copy without the joiner may run
         let plain = *tokens
             .iter()
@@ -94,12 +97,12 @@ async fn control_tokens_never_reach_the_server_whole() {
                 &[(
                     "c5",
                     write,
-                    json!({file: "out.txt", content: format!("{broken}{plain}\n")}),
+                    json!({file: "out.txt", content: format!("{broken}{lookalike}{plain}\n")}),
                 )],
             ),
             // the first answer after a change goes back: nothing was built or tested
             Gen::answer("", "Copied."),
-            Gen::answer("", &broken),
+            Gen::answer("", &format!("{broken}{lookalike}")),
         ];
         let server = Server::start(gens.iter().cloned().map(Reply::Stream).collect()).await;
         let mut a = agent(&server.url, &p, options(&proj.root, &p));
@@ -134,12 +137,12 @@ async fn control_tokens_never_reach_the_server_whole() {
         assert!(last.contains(escaped(plain).trim_matches('"')), "{id}");
         assert_eq!(
             std::fs::read_to_string(proj.root.join("out.txt")).unwrap(),
-            format!("{list}{plain}\n"),
+            format!("{list}{list}{plain}\n"),
             "{id}"
         );
         let TurnEnd::Answer(answer) = end else {
             panic!("{id}: {end:?}");
         };
-        assert_eq!(answer.text, list, "{id}");
+        assert_eq!(answer.text, format!("{list}{list}"), "{id}");
     }
 }

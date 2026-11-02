@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::engine::{EngineError, SamplerSpec, Usage};
-use crate::guard::{self, Guard};
+use crate::guard::Guard;
 
 /// One message of the conversation, in OpenAI chat shape. The session store keeps it as
 /// `{"role", "content"}` with `reasoning`, `tool_calls` or `tool_call_id` where they apply.
@@ -557,7 +557,7 @@ fn check_calls(calls: &[ToolCall], guard: &Guard) -> Result<Vec<ToolCall>, Strin
                 c.name
             ));
         }
-        let arguments = if guard::unescape_json(&mut args) {
+        let arguments = if guard.restore_json(&mut args) {
             args.to_string()
         } else {
             c.arguments.clone()

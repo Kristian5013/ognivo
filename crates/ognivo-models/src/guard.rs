@@ -10,6 +10,11 @@
 //! everything the model sends back. The model reads the broken string as text and may copy
 //! it with or without the joiner: the tools get the original either way.
 //!
+//! The model does not always copy the joiner itself: in M1 T2-mini gpt-oss wrote U+200D
+//! ZERO WIDTH JOINER in its place. A guarded string broken by a run of such invisible format
+//! characters ([`LOOKALIKES`], the joiner among them) after its first character comes back
+//! whole too ([`Guard::restore`]). Elsewhere they stay, so emoji sequences keep their joiners.
+//!
 //! A string that frames the model's own messages and calls ([`TokenTable::framing`]) and
 //! comes back unbroken inside tool arguments is not such a copy: the model wrote its own
 //! format there and ran past the end of the call. In M1 stamp A gpt-oss wrote its next
@@ -25,6 +30,10 @@ use crate::profile::TokenTable;
 
 /// U+2060 WORD JOINER: invisible, and outside every control token of the three profiles.
 pub const JOINER: char = '\u{2060}';
+
+/// Invisible format characters a model may write where it saw the joiner: ZERO WIDTH SPACE,
+/// NON-JOINER and JOINER, and the byte order mark.
+pub const LOOKALIKES: [char; 4] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'];
 
 #[derive(Debug, Clone, Default)]
 pub struct Guard {
@@ -70,6 +79,53 @@ impl Guard {
             Cow::Owned(s) => Some(s),
             Cow::Borrowed(_) => None,
         })
+    }
+
+    /// What the model sent, as the tools and the user must get it: every guarded string it
+    /// wrote with [`LOOKALIKES`] in place of the joiner whole, then [`unescape`].
+    pub fn restore<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        match self.rejoin(text) {
+            Cow::Borrowed(t) => unescape(t),
+            Cow::Owned(t) => Cow::Owned(unescape(&t).into_owned()),
+        }
+    }
+
+    /// [`Guard::restore`] on every string of a JSON value, keys included; whether anything
+    /// changed.
+    pub fn restore_json(&self, v: &mut Value) -> bool {
+        map_strings(v, &|s| match self.restore(s) {
+            Cow::Owned(s) => Some(s),
+            Cow::Borrowed(_) => None,
+        })
+    }
+
+    /// Guarded strings broken by a run of invisible format characters with at least one of
+    /// [`LOOKALIKES`] in it, whole; runs of the joiner alone are left to [`unescape`].
+    fn rejoin<'a>(&self, text: &'a str) -> Cow<'a, str> {
+        if !text.contains(&LOOKALIKES[..]) {
+            return Cow::Borrowed(text);
+        }
+        let invisible = |c: char| c == JOINER || LOOKALIKES.contains(&c);
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        'scan: while let Some(c) = rest.chars().next() {
+            let after = &rest[c.len_utf8()..];
+            let tail = after.trim_start_matches(invisible);
+            let run = &after[..after.len() - tail.len()];
+            if run.contains(&LOOKALIKES[..]) {
+                for g in &self.guarded {
+                    let mut chars = g.chars();
+                    if chars.next() == Some(c) && tail.starts_with(chars.as_str()) {
+                        out.push_str(g);
+                        rest = &tail[chars.as_str().len()..];
+                        continue 'scan;
+                    }
+                }
+            }
+            out.push(c);
+            rest = after;
+        }
+        Cow::Owned(out)
     }
 
     /// The first framing string, unbroken, in any string of a JSON value.
@@ -213,6 +269,38 @@ mod tests {
         // the model copies what it saw, or writes the plain text: the tools get the file text
         assert_eq!(unescape(&shown), format!("SPECIALS = [\"{bos}\"]"));
         assert_eq!(unescape(&format!("[\"{bos}\"]")), format!("[\"{bos}\"]"));
+    }
+
+    #[test]
+    fn a_copy_with_another_invisible_joiner_restores_the_same_text() {
+        let g = guard("gpt-oss-20b");
+        let start = tok(&["<|", "start|>"]);
+        let rest = &start[1..];
+        // M1 T2-mini: gpt-oss saw `<` U+2060 `|start|>` and wrote `<` U+200D `|start|>`
+        for c in LOOKALIKES {
+            let copy = format!("ends with <{c}{rest} here");
+            assert_eq!(g.restore(&copy), format!("ends with {start} here"), "{c:?}");
+        }
+        let mixed = format!("<{JOINER}\u{200D}{JOINER}{rest}");
+        assert_eq!(g.restore(&mixed), start);
+        // the joiner alone keeps the exact inverse, and a guarded string's text stays
+        assert_eq!(g.restore(&g.escape(&start)), start);
+        assert_eq!(
+            g.restore(&format!("<{JOINER}{JOINER}{rest}")),
+            format!("<{JOINER}{rest}")
+        );
+        // outside guarded strings the characters are text: emoji sequences keep them
+        for text in [
+            "👨\u{200D}👩\u{200D}👧",
+            "a\u{200B}b",
+            "<\u{200D}|nothing|>",
+            "\u{FEFF}x",
+        ] {
+            assert_eq!(g.restore(text), text);
+        }
+        let mut args = json!({"content": format!("<\u{200B}{rest}"), "k": ["x"]});
+        assert!(g.restore_json(&mut args));
+        assert_eq!(args["content"], start);
     }
 
     #[test]
