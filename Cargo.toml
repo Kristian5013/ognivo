@@ -36,6 +36,8 @@ similar = "3.2.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time", "net", "io-util"] }
 toml = "1.1.8"
+tree-sitter = "0.27.1"
+tree-sitter-bash = "0.25.1"
 zstd = { version = "0.14.3", default-features = false }
 
 [workspace.lints.rust]

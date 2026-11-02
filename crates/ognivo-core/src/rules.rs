@@ -29,6 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use globset::{GlobBuilder, GlobMatcher};
+use ognivo_tools::command::{Simple, simple_commands};
 use serde::Deserialize;
 
 use crate::approval::Decision;
@@ -282,9 +283,9 @@ fn parse(
                 Some(head) => (head.trim_end(), true),
                 None => (spec, false),
             };
-            match parts(spec).as_deref() {
-                Some([part]) if !part.assigns && !part.words.is_empty() => Pattern::Words {
-                    words: part.words.clone(),
+            match simple_commands(spec).as_deref() {
+                Some([c]) if !c.assigns && !c.redirects && !c.words.is_empty() => Pattern::Words {
+                    words: c.words.clone(),
                     prefix,
                 },
                 _ => return Err("not one plain command".into()),
@@ -376,7 +377,7 @@ impl Rules {
         policy: Decision,
         read_only: impl Fn(&str) -> bool,
     ) -> Ruling {
-        let split = parts(command);
+        let split = simple_commands(command);
         // a command this cannot split is cut roughly, for deny and ask only
         let words: Vec<Vec<String>> = match &split {
             Some(parts) => parts.iter().map(|p| p.words.clone()).collect(),
@@ -427,8 +428,9 @@ impl Rules {
         let Some(parts) = split else {
             return Ruling::Ask;
         };
-        let covered = |p: &Part| {
-            !p.assigns && allow.iter().any(|r| r.matches_words(&p.words)) || read_only(&p.text)
+        let covered = |p: &Simple| {
+            !p.assigns && !p.redirects && allow.iter().any(|r| r.matches_words(&p.words))
+                || read_only(&p.text)
         };
         if parts.iter().all(covered) {
             Ruling::Allow
@@ -499,154 +501,8 @@ impl Rule {
     }
 }
 
-/// One plain command of a command line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Part {
-    /// As written, for the classifier.
-    text: String,
-    /// Its words, quotes removed, without the variable assignments in front.
-    words: Vec<String>,
-    /// It sets variables for the command.
-    assigns: bool,
-}
-
-/// Splits a command line into plain commands at `&&`, `||`, `;`, `|` and line ends. Words
-/// may be quoted; `2>&1`-style duplications and redirections to `/dev/null` are dropped.
-/// Anything else (substitutions, subshells, braces, backslashes, globs in quotes aside,
-/// other redirections, background jobs, comments) makes it `None`: such a command is never
-/// allowed by rules of words.
-fn parts(command: &str) -> Option<Vec<Part>> {
-    let chars: Vec<(usize, char)> = command.char_indices().collect();
-    let mut parts = Vec::new();
-    let mut words: Vec<String> = Vec::new();
-    let mut word: Option<String> = None;
-    // the words as written, quotes as one mark each, `\0` after each: for assignments
-    let mut raw = String::new();
-    let mut start = 0;
-    // the last separator needs a command after it: `&&`, `||`, `|`
-    let mut dangling = false;
-    let mut i = 0;
-    let finish_word = |word: &mut Option<String>, raw: &mut String, words: &mut Vec<String>| {
-        if let Some(w) = word.take() {
-            words.push(w);
-            raw.push('\0');
-        }
-    };
-    let finish_part =
-        |words: &mut Vec<String>, raw: &mut String, text: &str, parts: &mut Vec<Part>| {
-            let assigned = raw
-                .split('\0')
-                .take_while(|r| is_assignment(r))
-                .count()
-                .min(words.len());
-            let part = Part {
-                text: text.trim().to_owned(),
-                words: words.split_off(assigned),
-                assigns: assigned > 0,
-            };
-            words.clear();
-            raw.clear();
-            if part.words.is_empty() {
-                return false;
-            }
-            parts.push(part);
-            true
-        };
-    while i < chars.len() {
-        let (at, c) = chars[i];
-        match c {
-            '\'' => {
-                let close = chars[i + 1..].iter().position(|&(_, c)| c == '\'')? + i + 1;
-                let text = &command[at + 1..chars[close].0];
-                word.get_or_insert_with(String::new).push_str(text);
-                raw.push('\'');
-                i = close + 1;
-                continue;
-            }
-            '"' => {
-                let close = chars[i + 1..].iter().position(|&(_, c)| c == '"')? + i + 1;
-                let text = &command[at + 1..chars[close].0];
-                if text.contains(['$', '`', '\\']) {
-                    return None;
-                }
-                word.get_or_insert_with(String::new).push_str(text);
-                raw.push('"');
-                i = close + 1;
-                continue;
-            }
-            ' ' | '\t' => finish_word(&mut word, &mut raw, &mut words),
-            '\n' | ';' | '|' | '&' => {
-                let next = chars.get(i + 1).map(|&(_, c)| c);
-                let width = match (c, next) {
-                    ('&', Some('&')) | ('|', Some('|')) => 2,
-                    ('&', _) | ('|', Some('&')) => return None,
-                    _ => 1,
-                };
-                finish_word(&mut word, &mut raw, &mut words);
-                if !finish_part(&mut words, &mut raw, &command[start..at], &mut parts) {
-                    return None;
-                }
-                dangling = matches!(c, '&' | '|');
-                i += width;
-                start = chars.get(i).map_or(command.len(), |&(at, _)| at);
-                continue;
-            }
-            '>' => {
-                // the digits before it are the file descriptor, not a word
-                if word
-                    .as_deref()
-                    .is_some_and(|w| !w.chars().all(|c| c.is_ascii_digit()))
-                    || raw.ends_with(['\'', '"'])
-                {
-                    return None;
-                }
-                // the descriptor's digits leave the word and its raw marks
-                if word.take().is_some() {
-                    match raw.rfind('\0') {
-                        Some(end) => raw.truncate(end + 1),
-                        None => raw.clear(),
-                    }
-                }
-                let rest = &command[at + 1..];
-                let skip = if let Some(fd) = rest.strip_prefix('&') {
-                    let n = fd.chars().take_while(char::is_ascii_digit).count();
-                    if n == 0 {
-                        return None;
-                    }
-                    1 + n
-                } else {
-                    let after = rest.trim_start().strip_prefix("/dev/null")?;
-                    if !after.is_empty() && !after.starts_with([' ', '\t', '\n', ';', '|', '&']) {
-                        return None;
-                    }
-                    rest.len() - after.len()
-                };
-                let end = at + 1 + skip;
-                i = chars
-                    .iter()
-                    .position(|&(a, _)| a >= end)
-                    .unwrap_or(chars.len());
-                continue;
-            }
-            '<' | '$' | '`' | '(' | ')' | '{' | '}' | '\\' => return None,
-            '#' if word.is_none() => return None,
-            _ => {
-                word.get_or_insert_with(String::new).push(c);
-                raw.push(c);
-            }
-        }
-        i += 1;
-    }
-    finish_word(&mut word, &mut raw, &mut words);
-    let last = finish_part(&mut words, &mut raw, &command[start..], &mut parts);
-    if !last && (dangling || parts.is_empty()) {
-        return None;
-    }
-    Some(parts)
-}
-
 /// The words of a command line cut at its separators, quotes and all: what deny and ask
-/// rules see of a command [`parts`] cannot split.
+/// rules see of a command [`simple_commands`] cannot split.
 fn rough(command: &str) -> Vec<Vec<String>> {
     command
         .split(['\n', ';', '|', '&'])
@@ -660,83 +516,9 @@ fn rough(command: &str) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// `NAME=…` as the shell sees an assignment: the raw word starts with a name and `=`.
-fn is_assignment(raw: &str) -> bool {
-    let Some((name, _)) = raw.split_once('=') else {
-        return false;
-    };
-    let mut chars = name.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn words(command: &str) -> Option<Vec<Vec<String>>> {
-        parts(command).map(|ps| ps.into_iter().map(|p| p.words).collect())
-    }
-
-    fn w(list: &[&[&str]]) -> Option<Vec<Vec<String>>> {
-        Some(
-            list.iter()
-                .map(|p| p.iter().map(|s| (*s).to_owned()).collect())
-                .collect(),
-        )
-    }
-
-    #[test]
-    fn a_command_line_splits_into_plain_commands() {
-        assert_eq!(words("cargo test"), w(&[&["cargo", "test"]]));
-        assert_eq!(
-            words("cargo test 2>&1 | tail -n 20"),
-            w(&[&["cargo", "test"], &["tail", "-n", "20"]])
-        );
-        assert_eq!(
-            words("git add -A && git commit -m \"fix the bug\"; git status"),
-            w(&[
-                &["git", "add", "-A"],
-                &["git", "commit", "-m", "fix the bug"],
-                &["git", "status"]
-            ])
-        );
-        assert_eq!(
-            words("make 2>/dev/null || true"),
-            w(&[&["make"], &["true"]])
-        );
-        assert_eq!(words("echo 'a; b' > /dev/null"), w(&[&["echo", "a; b"]]));
-        assert_eq!(words("  ls\n  pwd  "), w(&[&["ls"], &["pwd"]]));
-        // what is not a plain command
-        for bad in [
-            "echo $(rm -rf x)",
-            "echo `id`",
-            "echo \"$HOME\"",
-            "(cd x && make)",
-            "{ make; }",
-            "cat < input",
-            "make > out.log",
-            "make &",
-            "make |& tail",
-            "a && && b",
-            "echo 'open",
-            "rm x\\ y",
-            "make # done",
-            "&& make",
-            "make &&",
-            "make |",
-        ] {
-            assert_eq!(parts(bad), None, "{bad}");
-        }
-        let p = &parts("FOO=1 BAR=\"2\" cargo test").unwrap()[0];
-        assert!(p.assigns);
-        assert_eq!(p.words, ["cargo", "test"]);
-        // a quoted `=` in an argument is not an assignment
-        assert!(!parts("echo FOO=1").unwrap()[0].assigns);
-        assert!(!parts("\"FOO=1\" cmd").unwrap()[0].assigns);
-    }
 
     impl Rules {
         /// [`Rules::command`] run in the project root of these tests.
