@@ -15,8 +15,11 @@
 //! - wrappers are seen through: `timeout`, `nice`, `time`, `env` without settings, and
 //!   `bash -c` or `sh -c` with a script that is classified the same way;
 //! - each option is on the tool's allowlist (getopt tools also take short flags together,
-//!   `-la`, `-rn`), and each path argument resolves, symlinks included, to a location inside
-//!   the project root;
+//!   `-la`, `-rn`, the last of them perhaps with its value glued on, `-An`, `-rnA3`; a long
+//!   option takes its value after `=` too), and each path argument resolves, symlinks
+//!   included, to a location inside the project root;
+//! - `sed` runs a script that only prints: no `-i`, no script file, no command or flag that
+//!   writes a file, reads one or runs a command (`w`, `r`, `e` and the like);
 //! - for `cat`/`head`/`tail`/`wc` and the hex dumpers, each path is an existing regular
 //!   file (no FIFOs, devices or links to `/dev/zero`);
 //! - a script of the project (`bash x.sh`, `python3 x.py`, `./x.sh`) is project code when it
@@ -338,10 +341,19 @@ fn spec_for(words: &[&str]) -> Option<(Spec, usize)> {
         ["grep", ..] => (
             s(
                 &[
-                    "-n", "-i", "-r", "-l", "-c", "-w", "-v", "-E", "-F", "-x", "-H", "-h", "-o",
-                    "-s", "-q", "--",
+                    "-n", "-i", "-r", "-l", "-c", "-w", "-v", "-E", "-F", "-P", "-x", "-H", "-h",
+                    "-o", "-s", "-q", "--",
                 ],
-                &["-e", "-m", "-A", "-B", "-C"],
+                &[
+                    "-e",
+                    "-m",
+                    "-A",
+                    "-B",
+                    "-C",
+                    "--include",
+                    "--exclude",
+                    "--exclude-dir",
+                ],
                 &["-A", "-B", "-C", "-m"],
                 false,
             )
@@ -860,6 +872,7 @@ fn plain(words: &[&str], root: &Path, cwds: &[PathBuf], depth: usize) -> Effect 
         // `cd` inside a wrapper moves nothing the agent sees
         ["cd", ..] => Effect::SideEffects,
         ["echo", ..] | ["true"] | ["false"] => Effect::ReadOnly,
+        ["sed", args @ ..] => sed(args, root, cwds),
         ["python" | "python3", "-m", "pytest", rest @ ..] => {
             let mut inner = vec!["pytest"];
             inner.extend_from_slice(rest);
@@ -960,9 +973,13 @@ fn tool(words: &[&str], root: &Path, cwd: &Path) -> Effect {
                 }
             } else if !spec.flags.contains(&arg)
                 && !numeric_flag(arg, spec.numeric_prefixes)
-                && !(spec.clusters && cluster(arg, spec.flags))
+                && !long_value(arg, spec.with_value)
             {
-                return Effect::SideEffects;
+                match short_options(arg, &spec) {
+                    Some(false) => {}
+                    Some(true) if args.next().is_some() => {}
+                    _ => return Effect::SideEffects,
+                }
             }
             continue;
         }
@@ -991,17 +1008,252 @@ fn resolve(cwd: &Path, arg: &str) -> PathBuf {
     std::fs::canonicalize(&joined).unwrap_or_else(|_| normalize(&joined))
 }
 
-/// `-la`, `-rn`: allowed one-letter flags written together.
-fn cluster(arg: &str, flags: &[&str]) -> bool {
-    let Some(letters) = arg.strip_prefix('-') else {
-        return false;
-    };
-    let short = |c: char| {
-        flags
-            .iter()
+/// Short options the getopt way: allowed one-letter flags together (`-la`, `-rn`), the last
+/// of them perhaps an option that takes a value, glued on (`-An`, `-tx1`, `-rnA3`) or in the
+/// next word (`-rnA 3`). `Some(true)` when the value is the next word; `None` when the tool
+/// does not parse its options with getopt or a letter is not allowed.
+fn short_options(arg: &str, spec: &Spec) -> Option<bool> {
+    let letters = arg.strip_prefix('-').filter(|_| spec.clusters)?;
+    let short = |list: &[&str], c: char| {
+        list.iter()
             .any(|f| f.len() == 2 && f.starts_with('-') && f.ends_with(c))
     };
-    letters.len() > 1 && letters.chars().all(|c| c.is_ascii_alphabetic() && short(c))
+    for (i, c) in letters.char_indices() {
+        if !c.is_ascii_alphabetic() {
+            return None;
+        }
+        if short(spec.with_value, c) {
+            return Some(i + 1 == letters.len());
+        }
+        if !short(spec.flags, c) {
+            return None;
+        }
+    }
+    Some(false)
+}
+
+/// `--max-count=5`, `--exclude-dir=.git`: an allowed long option with its value after `=`.
+fn long_value(arg: &str, with_value: &[&str]) -> bool {
+    arg.starts_with("--")
+        && arg
+            .split_once('=')
+            .is_some_and(|(name, _)| with_value.contains(&name))
+}
+
+/// `sed` that only prints ([`sed_prints_only`]), reading regular files inside the project
+/// or its input. `-i`, a script from a file and any other option ask.
+fn sed(args: &[&str], root: &Path, cwds: &[PathBuf]) -> Effect {
+    const FLAGS: [&str; 14] = [
+        "-n",
+        "--quiet",
+        "--silent",
+        "-E",
+        "-r",
+        "--regexp-extended",
+        "-s",
+        "--separate",
+        "-z",
+        "--null-data",
+        "-u",
+        "--unbuffered",
+        "--posix",
+        "--sandbox",
+    ];
+    let (mut scripts, mut files) = (Vec::new(), Vec::new());
+    let mut words = args.iter();
+    let mut options = true;
+    while let Some(&w) = words.next() {
+        if !options || w == "-" || !w.starts_with('-') {
+            files.push(w);
+        } else if w == "--" {
+            options = false;
+        } else if w == "-e" || w == "--expression" {
+            match words.next() {
+                Some(script) => scripts.push(*script),
+                None => return Effect::SideEffects,
+            }
+        } else if let Some(script) = w.strip_prefix("--expression=") {
+            scripts.push(script);
+        } else if !FLAGS.contains(&w) {
+            // `-nE`, `-ne SCRIPT`, `-ne5p`
+            let letters = &w[1..];
+            match letters.find(|c: char| !"nErszu".contains(c)) {
+                None => {}
+                Some(i) if letters[i..].starts_with('e') && letters[i + 1..].is_empty() => {
+                    match words.next() {
+                        Some(script) => scripts.push(*script),
+                        None => return Effect::SideEffects,
+                    }
+                }
+                Some(i) if letters[i..].starts_with('e') => scripts.push(&letters[i + 1..]),
+                Some(_) => return Effect::SideEffects,
+            }
+        }
+    }
+    if scripts.is_empty() {
+        if files.is_empty() {
+            return Effect::SideEffects;
+        }
+        scripts.push(files.remove(0));
+    }
+    if !scripts.iter().all(|s| sed_prints_only(s)) {
+        return Effect::SideEffects;
+    }
+    cwds.iter()
+        .map(|cwd| {
+            let ctx = ExecContext {
+                root: root.to_owned(),
+                cwd: cwd.to_owned(),
+            };
+            let readable = |f: &&str| {
+                let path = ctx.resolve(f);
+                *f == "-"
+                    || (ctx.inside(&path) && std::fs::metadata(&path).is_ok_and(|m| m.is_file()))
+            };
+            if ctx.inside(&ctx.resolve(".")) && files.iter().all(readable) {
+                Effect::ReadOnly
+            } else {
+                Effect::SideEffects
+            }
+        })
+        .fold(Effect::ReadOnly, worse)
+}
+
+/// Whether a sed script only prints: line, `$` and `/regex/` addresses, and commands that
+/// write no file, read none and run nothing. `s` may carry the flags `g`, `p`, `i`, `I`,
+/// `m`, `M` and a count, never `e` or `w`; its delimiter is ASCII punctuation, so the
+/// script splits the same in a byte locale. `w`, `W`, `r`, `R`, `e` and anything this does
+/// not know make it ask.
+fn sed_prints_only(script: &str) -> bool {
+    let s: Vec<char> = script.chars().collect();
+    let blank = |c: Option<&char>| matches!(c, Some(' ' | '\t'));
+    // the index after the delimiter that closes a part starting at `i`
+    let part = |mut i: usize, d: char| -> Option<usize> {
+        while let Some(&c) = s.get(i) {
+            match c {
+                '\\' => i += 2,
+                '\n' => return None,
+                _ if c == d => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        None
+    };
+    // a command ends at blanks, then `;`, a newline, `}`, a comment or the end
+    let end = |mut i: usize| -> Option<usize> {
+        while blank(s.get(i)) {
+            i += 1;
+        }
+        matches!(s.get(i), None | Some(';' | '\n' | '}' | '#')).then_some(i)
+    };
+    let mut i = 0;
+    while let Some(&c) = s.get(i) {
+        match c {
+            ' ' | '\t' | '\n' | ';' | '}' => {
+                i += 1;
+                continue;
+            }
+            '#' => {
+                while s.get(i).is_some_and(|&c| c != '\n') {
+                    i += 1;
+                }
+                continue;
+            }
+            _ => {}
+        }
+        for second in [false, true] {
+            if second {
+                if s.get(i) != Some(&',') {
+                    break;
+                }
+                i += 1;
+            }
+            match s.get(i) {
+                Some('$') => i += 1,
+                Some('/') => {
+                    let Some(j) = part(i + 1, '/') else {
+                        return false;
+                    };
+                    i = j;
+                    while matches!(s.get(i), Some('I' | 'M')) {
+                        i += 1;
+                    }
+                }
+                Some(&c) if c.is_ascii_digit() || (second && matches!(c, '+' | '~')) => {
+                    i += 1;
+                    while s.get(i).is_some_and(|&c| c.is_ascii_digit() || c == '~') {
+                        i += 1;
+                    }
+                }
+                _ if second => return false,
+                _ => break,
+            }
+        }
+        while blank(s.get(i)) {
+            i += 1;
+        }
+        if s.get(i) == Some(&'!') {
+            i += 1;
+            while blank(s.get(i)) {
+                i += 1;
+            }
+        }
+        let Some(&cmd) = s.get(i) else {
+            return false;
+        };
+        i += 1;
+        let next = match cmd {
+            '{' => Some(i),
+            'p' | 'P' | 'd' | 'D' | 'n' | 'N' | 'g' | 'G' | 'h' | 'H' | 'x' | 'z' | '=' | 'l'
+            | 'F' => end(i),
+            'q' | 'Q' => {
+                while blank(s.get(i)) || s.get(i).is_some_and(char::is_ascii_digit) {
+                    i += 1;
+                }
+                end(i)
+            }
+            's' | 'y' => match s.get(i) {
+                Some(&d) if d.is_ascii_punctuation() && d != '\\' => {
+                    let j = part(i + 1, d).and_then(|j| part(j, d));
+                    j.and_then(|mut j| {
+                        while cmd == 's'
+                            && s.get(j).is_some_and(|&c| {
+                                matches!(c, 'g' | 'p' | 'i' | 'I' | 'm' | 'M') || c.is_ascii_digit()
+                            })
+                        {
+                            j += 1;
+                        }
+                        end(j)
+                    })
+                }
+                _ => None,
+            },
+            // labels and branches
+            ':' | 'b' | 't' | 'T' => {
+                while s.get(i).is_some_and(|&c| c != ';' && c != '\n') {
+                    i += 1;
+                }
+                Some(i)
+            }
+            // text to print, up to an unescaped newline
+            'a' | 'i' | 'c' => {
+                while let Some(&c) = s.get(i) {
+                    match c {
+                        '\\' => i += 2,
+                        '\n' => break,
+                        _ => i += 1,
+                    }
+                }
+                Some(i.min(s.len()))
+            }
+            _ => None,
+        };
+        match next {
+            Some(j) => i = j,
+            None => return false,
+        }
+    }
+    true
 }
 
 /// `-n5`, `-U3`, `-20`: an allowed short option with only digits glued on.
@@ -1078,6 +1330,18 @@ mod tests {
             "hexdump -C src/lib.rs",
             "od -c src/lib.rs",
             "xxd -l 64 src/lib.rs",
+            // the T2 night of 2026-11-02: refused too
+            "od -An -t x1 src/lib.rs",
+            "grep -oP 'fn \\w+' src/lib.rs",
+            "grep -r main . --exclude-dir=.git",
+            // values glued on, or after `=`
+            "od -An -tx1 src/lib.rs",
+            "grep -rnA3 main src",
+            "grep -rnA 3 main src",
+            "grep -rn --include '*.rs' main src",
+            "sort -k2,2 -t, src/lib.rs",
+            "hexdump -n64 -C src/lib.rs",
+            "git log --max-count=5",
         ] {
             assert_eq!(c(cmd), Effect::ReadOnly, "{cmd}");
         }
@@ -1090,6 +1354,61 @@ mod tests {
             "xxd src/lib.rs src/lib.rs", // the second file is overwritten
             "xxd -r src/lib.rs",
             "head -n5x src/lib.rs",
+            "grep -rnf patterns src", // patterns from a file
+            "grep -rnA",
+            "grep --exclude-from=list main src",
+            "sort -rnk2 -o out.txt src/lib.rs",
+            "git diff --output=patch.txt",
+        ] {
+            assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn sed_that_only_prints_is_read_only() {
+        let f = project("sed");
+        let c = |cmd| classify_command(cmd, &f.ctx);
+        for cmd in [
+            // the T2 night of 2026-11-02: gemma asked for these and was refused
+            "sed -n '3p' src/lib.rs",
+            "find src -type f | sed 's|^\\./||'",
+            "sed -n '1,20p' src/lib.rs",
+            "sed -n '/fn main/,/^}/p' src/lib.rs",
+            "sed -ne '1p' src/lib.rs",
+            "sed -n -e '1p' -e '$p' src/lib.rs",
+            "sed --expression='s/a/b/g' src/lib.rs",
+            "sed -E 's/(fn) +/\\1 /2' src/lib.rs",
+            "sed '1!G;h;$!d' src/lib.rs",
+            "sed -n '/main/{p;q}' src/lib.rs",
+            "sed ':a;N;$!ba;s/\\n/ /g' src/lib.rs",
+            "sed 'y/abc/xyz/' src/lib.rs",
+            "sed '1i // header' src/lib.rs",
+            "cat src/lib.rs | sed -n '2,$p'",
+        ] {
+            assert_eq!(c(cmd), Effect::ReadOnly, "{cmd}");
+        }
+        for cmd in [
+            "sed -i 's/a/b/' src/lib.rs",
+            "sed --in-place 's/a/b/' src/lib.rs",
+            "sed -ni '1p' src/lib.rs",
+            "sed 's/a/b/' -i src/lib.rs",
+            "sed 's/a/b/w out.txt' src/lib.rs",
+            "sed 's/a/b/gw out.txt' src/lib.rs",
+            "sed 's/a/b/e' src/lib.rs",
+            "sed '1e id' src/lib.rs",
+            "sed 'w out.txt' src/lib.rs",
+            "sed -n 'pw out.txt' src/lib.rs",
+            "sed '1r /etc/passwd' src/lib.rs",
+            "sed 'R /etc/passwd' src/lib.rs",
+            "sed -f script.sed src/lib.rs",
+            "sed --expr='s/a/b/w x' src/lib.rs", // an abbreviation sed would take
+            "sed 's\u{a7}a\u{a7}b\u{a7}w x' src/lib.rs", // splits otherwise in a byte locale
+            "sed '\\%main%p' src/lib.rs",
+            "sed -n '5' src/lib.rs",
+            "sed -n '1p' /etc/passwd",
+            "sed -n '1p' etc-link/passwd",
+            "sed -n '1p' zero",
+            "sed",
         ] {
             assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
         }
