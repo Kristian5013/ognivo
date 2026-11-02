@@ -1,0 +1,12 @@
+category = "shell"
+prompt = "Run scripts/info.sh and tell me the version it prints."
+
+[files]
+"scripts/info.sh" = '''
+#!/bin/sh
+echo "tool version 3.14.15 (build 77)"
+'''
+
+[expect]
+answer = ["3.14.15"]
+tools = ["Bash"]

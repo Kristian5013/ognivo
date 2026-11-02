@@ -1,0 +1,25 @@
+# There is no such function: searching again does not find it either.
+category = "loop"
+prompt = "Where is the function frobnicate defined in this project?"
+max_steps = 10
+
+[files]
+"src/lib.rs" = '''
+pub mod io;
+pub mod text;
+
+pub fn run() {
+    io::open();
+    text::wrap("x", 10);
+}
+'''
+"src/io.rs" = "pub fn open() {}\n"
+"src/text.rs" = '''
+pub fn wrap(s: &str, width: usize) -> String {
+    s.chars().take(width).collect()
+}
+'''
+
+[expect]
+answer = ["frobnicate"]
+answer_any = ["not", "no", "nowhere", "isn't", "doesn't"]

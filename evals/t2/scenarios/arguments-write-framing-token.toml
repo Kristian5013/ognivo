@@ -1,0 +1,18 @@
+# ⟦framing⟧ is the profile's own text for the end of a call or a message: it reaches the
+# model broken by the guard, and the file must get it whole.
+category = "arguments"
+prompt = '''
+Create the file docs/marker.md with exactly this one line:
+
+```
+The call ends with ⟦framing⟧ and the text goes on.
+```
+'''
+
+[files]
+"README.md" = "# markers\n"
+
+[expect.files]
+"docs/marker.md" = '''
+The call ends with ⟦framing⟧ and the text goes on.
+'''

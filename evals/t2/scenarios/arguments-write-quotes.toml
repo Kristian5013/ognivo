@@ -1,0 +1,20 @@
+category = "arguments"
+prompt = '''
+Create the file data/quoted.txt with exactly this content, every character as it is:
+
+```
+She said "hi" and left.
+Path: C:\Users\demo\file.txt
+Regex: ^\d{3}-\d{4}$
+```
+'''
+
+[files]
+"README.md" = "# data\n"
+
+[expect.files]
+"data/quoted.txt" = '''
+She said "hi" and left.
+Path: C:\Users\demo\file.txt
+Regex: ^\d{3}-\d{4}$
+'''

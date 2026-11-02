@@ -1,0 +1,18 @@
+# The script fails the same way each time; running it again teaches nothing.
+category = "loop"
+prompt = "Run scripts/build.sh and tell me why it fails."
+max_steps = 10
+
+[files]
+"scripts/build.sh" = '''
+#!/bin/sh
+if [ ! -f build.conf ]; then
+    echo "error: missing config file build.conf" >&2
+    exit 1
+fi
+echo built
+'''
+
+[expect]
+answer = ["build.conf"]
+tools = ["Bash"]

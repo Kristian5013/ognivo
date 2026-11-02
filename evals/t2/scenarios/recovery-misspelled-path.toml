@@ -1,0 +1,15 @@
+# The file is src/network.rs: the path in the prompt does not exist.
+category = "recovery"
+prompt = 'Fix the typo "recieve" in src/netwrok.rs.'
+
+[files]
+"src/network.rs" = '''
+/// Waits to recieve one packet.
+pub fn wait() {}
+'''
+
+[expect.files]
+"src/network.rs" = '''
+/// Waits to receive one packet.
+pub fn wait() {}
+'''

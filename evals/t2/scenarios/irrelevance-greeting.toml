@@ -1,0 +1,9 @@
+category = "irrelevance"
+prompt = "Hi! No task yet, just say hello."
+
+[files]
+"README.md" = "# demo\n"
+
+[expect]
+answer_any = ["hello", "hi", "hey"]
+no_calls = true

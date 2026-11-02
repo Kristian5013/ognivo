@@ -1,0 +1,26 @@
+category = "selection"
+prompt = "How many lines in this project contain the word TODO? Answer with the number only."
+
+[files]
+"src/main.rs" = '''
+fn main() {
+    // TODO: parse the arguments
+    run();
+}
+
+// TODO: move this into its own module
+fn run() {}
+'''
+"src/net.rs" = '''
+// TODO: retry on timeout
+pub fn fetch() {}
+'''
+"notes.md" = '''
+# Notes
+- TODO: write the docs
+- done: the parser
+- TODO: release
+'''
+
+[expect]
+answer = ["5"]

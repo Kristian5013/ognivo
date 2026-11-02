@@ -1,0 +1,30 @@
+category = "edit"
+prompt = "In shapes.py, change Square.scaled so that it multiplies by 3 instead of 2. Circle stays as it is."
+
+[files]
+"shapes.py" = '''
+class Circle:
+    def scaled(self, x):
+        return x * 2
+
+
+class Square:
+    def scaled(self, x):
+        if x < 0:
+            raise ValueError("negative")
+        return x * 2
+'''
+
+[expect.files]
+"shapes.py" = '''
+class Circle:
+    def scaled(self, x):
+        return x * 2
+
+
+class Square:
+    def scaled(self, x):
+        if x < 0:
+            raise ValueError("negative")
+        return x * 3
+'''

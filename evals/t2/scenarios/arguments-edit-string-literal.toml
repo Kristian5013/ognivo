@@ -1,0 +1,20 @@
+category = "arguments"
+prompt = '''In src/msg.rs, make MSG hold the text Say "hi" to C:\temp, written as a normal (not raw) Rust string literal.'''
+
+[files]
+"src/msg.rs" = '''
+pub const MSG: &str = "Hello";
+
+pub fn show() {
+    println!("{MSG}");
+}
+'''
+
+[expect.files]
+"src/msg.rs" = '''
+pub const MSG: &str = "Say \"hi\" to C:\\temp";
+
+pub fn show() {
+    println!("{MSG}");
+}
+'''

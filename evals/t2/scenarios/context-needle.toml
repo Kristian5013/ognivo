@@ -1,0 +1,12 @@
+# 4000 lines: more than one read shows.
+category = "context"
+prompt = "data/log.txt has exactly one line with ERROR in it. What is the code on that line? Answer with the number only."
+
+[[generated]]
+path = "data/log.txt"
+lines = 4000
+line = "{n}: ok"
+replace = { "3137" = "3137: ERROR code=7781" }
+
+[expect]
+answer = ["7781"]

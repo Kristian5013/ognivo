@@ -1,0 +1,34 @@
+category = "edit"
+prompt = "Rename the function calc_total to compute_total everywhere in the project."
+
+[files]
+"src/lib.rs" = '''
+pub fn calc_total(items: &[u32]) -> u32 {
+    items.iter().sum()
+}
+'''
+"src/main.rs" = '''
+use demo::calc_total;
+
+fn main() {
+    let a = calc_total(&[1, 2]);
+    let b = calc_total(&[3]);
+    println!("{a} {b}");
+}
+'''
+
+[expect.files]
+"src/lib.rs" = '''
+pub fn compute_total(items: &[u32]) -> u32 {
+    items.iter().sum()
+}
+'''
+"src/main.rs" = '''
+use demo::compute_total;
+
+fn main() {
+    let a = compute_total(&[1, 2]);
+    let b = compute_total(&[3]);
+    println!("{a} {b}");
+}
+'''

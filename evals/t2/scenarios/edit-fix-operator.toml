@@ -1,0 +1,24 @@
+category = "edit"
+prompt = "add in src/math.rs returns the wrong result. Fix it so that it returns the sum of a and b."
+
+[files]
+"src/math.rs" = '''
+pub fn add(a: i64, b: i64) -> i64 {
+    a - b
+}
+
+pub fn sub(a: i64, b: i64) -> i64 {
+    a - b
+}
+'''
+
+[expect.files]
+"src/math.rs" = '''
+pub fn add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+pub fn sub(a: i64, b: i64) -> i64 {
+    a - b
+}
+'''

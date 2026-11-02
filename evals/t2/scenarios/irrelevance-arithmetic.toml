@@ -1,0 +1,9 @@
+category = "irrelevance"
+prompt = "What is 17 * 23? Answer with the number only."
+
+[files]
+"README.md" = "# calc\n"
+
+[expect]
+answer = ["391"]
+no_calls = true

@@ -32,6 +32,8 @@ pub struct Gen {
     pub content: String,
     /// Id, name and the arguments' exact text.
     pub calls: Vec<(String, String, String)>,
+    /// Cut by `max_tokens`: the stream ends with `finish_reason` length.
+    pub cut: bool,
 }
 
 impl Gen {
@@ -43,6 +45,7 @@ impl Gen {
                 .iter()
                 .map(|(id, name, args)| ((*id).into(), (*name).into(), args.to_string()))
                 .collect(),
+            cut: false,
         }
     }
 
@@ -51,6 +54,7 @@ impl Gen {
             reasoning: reasoning.into(),
             content: text.into(),
             calls: Vec::new(),
+            cut: false,
         }
     }
 
@@ -79,10 +83,10 @@ impl Gen {
                 ));
             }
         }
-        let finish = if self.calls.is_empty() {
-            "stop"
-        } else {
-            "tool_calls"
+        let finish = match (self.cut, self.calls.is_empty()) {
+            (true, _) => "length",
+            (false, true) => "stop",
+            (false, false) => "tool_calls",
         };
         chunks.push(delta(json!({}), Some(finish)));
         chunks.push(json!({"choices": [], "usage": {"completion_tokens": 20, "prompt_tokens": prompt, "total_tokens": prompt + 20}, "timings": {"cache_n": 0, "prompt_n": prompt, "predicted_n": 20}}));

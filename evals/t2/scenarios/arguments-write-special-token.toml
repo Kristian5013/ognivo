@@ -1,0 +1,17 @@
+# ⟦special⟧ is a control token of the profile that frames nothing (bos, eos, media...).
+category = "arguments"
+prompt = '''
+Create the file docs/stop.md with exactly this one line:
+
+```
+Generation stops at ⟦special⟧ here.
+```
+'''
+
+[files]
+"README.md" = "# tokens\n"
+
+[expect.files]
+"docs/stop.md" = '''
+Generation stops at ⟦special⟧ here.
+'''

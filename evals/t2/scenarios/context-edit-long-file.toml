@@ -1,0 +1,12 @@
+category = "context"
+prompt = 'In data/table.txt, change the entry for 1203 from "v1203" to "special". Change nothing else.'
+
+[[generated]]
+path = "data/table.txt"
+lines = 1500
+line = "{n} = v{n}"
+
+[expect]
+contains = { "data/table.txt" = ["\n1202 = v1202\n1203 = special\n1204 = v1204\n", "1500 = v1500\n"] }
+absent = { "data/table.txt" = ["v1203"] }
+lines = { "data/table.txt" = 1500 }

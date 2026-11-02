@@ -1,0 +1,26 @@
+category = "arguments"
+prompt = '''
+Create config.json with exactly this content:
+
+```
+{
+  "name": "demo",
+  "pattern": "a\\.b",
+  "message": "line one\nline two",
+  "path": "C:\\temp\\x"
+}
+```
+'''
+
+[files]
+"README.md" = "# demo\n"
+
+[expect.files]
+"config.json" = '''
+{
+  "name": "demo",
+  "pattern": "a\\.b",
+  "message": "line one\nline two",
+  "path": "C:\\temp\\x"
+}
+'''

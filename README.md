@@ -34,7 +34,7 @@ the `trajectory.json` Harbor reads.
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell) and their per-model shapes |
 | `crates/ognivo-protocol` | core ⇄ client event types |
 | `crates/ognivo-store` | event log |
-| `crates/ognivo-evals` | evaluation harness: T0 (the recorded completions replayed, failure and injection corpora, the prompt-cache check) |
+| `crates/ognivo-evals` | evaluation harness: T0 (the recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (`t2`: scenarios on fixture projects against a live server) |
 | `profiles/` | per-model profiles (TOML) |
 | `scripts/` | `check.sh` (lints, tests and T0 before each commit), pinned llama.cpp build, benchmarks, server probes |
 | `docs/` | architecture (Russian for now), M0 measurements, research |

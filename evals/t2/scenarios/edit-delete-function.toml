@@ -1,0 +1,21 @@
+category = "edit"
+prompt = "Remove the function unused_helper from src/lib.rs. Change nothing else."
+
+[files]
+"src/lib.rs" = '''
+pub fn keep_one() -> u8 {
+    1
+}
+
+fn unused_helper() -> u8 {
+    2
+}
+
+pub fn keep_two() -> u8 {
+    3
+}
+'''
+
+[expect]
+contains = { "src/lib.rs" = ["pub fn keep_one() -> u8 {\n    1\n}\n", "pub fn keep_two() -> u8 {\n    3\n}\n"] }
+absent = { "src/lib.rs" = ["unused_helper", "    2\n"] }

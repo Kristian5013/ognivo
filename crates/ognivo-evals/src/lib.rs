@@ -11,7 +11,9 @@
 //! - the KV-fidelity simulation: within a prompt every request repeats the one before and
 //!   goes on with the generation it got (`tests/kv.rs`).
 //!
-//! T2 (a live micro-suite on mock tools, nightly) and T3 (agentic tasks through Harbor)
-//! come next.
+//! T2-mini ([`t2`], the `t2` binary) runs scenarios on fixture projects against a live
+//! llama-server, nightly: the M1 exit metrics per profile. T3 (agentic tasks through
+//! Harbor) comes next.
 
 pub mod replay;
+pub mod t2;

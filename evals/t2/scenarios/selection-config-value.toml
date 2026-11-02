@@ -1,0 +1,17 @@
+category = "selection"
+prompt = "What is the value of `timeout` in config/app.ini? Answer with the value only."
+
+[files]
+"config/app.ini" = '''
+[server]
+host = 127.0.0.1
+port = 8091
+timeout = 45s
+retries = 3
+
+[client]
+timeout_ms = 2500
+'''
+
+[expect]
+answer = ["45s"]

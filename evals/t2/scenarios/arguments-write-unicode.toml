@@ -1,0 +1,20 @@
+category = "arguments"
+prompt = '''
+Create the file greetings.txt with exactly these three lines:
+
+```
+Привет, мир! 👋
+naïve café — “quoted”
+数据 → 結果 ✓
+```
+'''
+
+[files]
+"README.md" = "# greetings\n"
+
+[expect.files]
+"greetings.txt" = '''
+Привет, мир! 👋
+naïve café — “quoted”
+数据 → 結果 ✓
+'''

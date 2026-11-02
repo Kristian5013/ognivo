@@ -1,0 +1,29 @@
+# The line to change is in the file twice: an edit of it alone is not unique.
+category = "recovery"
+prompt = "In src/steps.rs, inside the function second, change `let n = 1;` to `let n = 2;`. Leave the function first as it is."
+
+[files]
+"src/steps.rs" = '''
+pub fn first() -> u32 {
+    let n = 1;
+    n + 10
+}
+
+pub fn second() -> u32 {
+    let n = 1;
+    n + 20
+}
+'''
+
+[expect.files]
+"src/steps.rs" = '''
+pub fn first() -> u32 {
+    let n = 1;
+    n + 10
+}
+
+pub fn second() -> u32 {
+    let n = 2;
+    n + 20
+}
+'''

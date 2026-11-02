@@ -1,0 +1,12 @@
+category = "selection"
+prompt = "List every file under src/ with its path from the project root (like src/x.rs), one per line, and nothing else."
+
+[files]
+"src/a.rs" = "pub fn a() {}\n"
+"src/b.rs" = "pub fn b() {}\n"
+"src/nested/c.rs" = "pub fn c() {}\n"
+"README.md" = "# demo\n"
+"docs/guide.md" = "Read src/a.rs first.\n"
+
+[expect]
+answer = ["src/a.rs", "src/b.rs", "src/nested/c.rs"]

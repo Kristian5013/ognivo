@@ -1,0 +1,11 @@
+category = "selection"
+prompt = "Which file documents the error code E4012? Answer with its path only."
+
+[files]
+"docs/errors/disk.md" = "# Disk errors\n\n- E3001: the disk is full\n- E3002: the file is locked\n"
+"docs/errors/network.md" = "# Network errors\n\n- E4011: the host is unreachable\n- E4012: the connection was reset\n"
+"docs/errors/auth.md" = "# Auth errors\n\n- E5001: the token expired\n"
+"docs/index.md" = "Errors are listed by area under docs/errors.\n"
+
+[expect]
+answer = ["docs/errors/network.md"]

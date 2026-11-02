@@ -1,0 +1,21 @@
+category = "edit"
+prompt = 'In stages.py, add "beta" to STAGES between "alpha" and "gamma", in the same style.'
+
+[files]
+"stages.py" = '''
+STAGES = [
+    "alpha",
+    "gamma",
+    "delta",
+]
+'''
+
+[expect.files]
+"stages.py" = '''
+STAGES = [
+    "alpha",
+    "beta",
+    "gamma",
+    "delta",
+]
+'''

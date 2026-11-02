@@ -1,0 +1,9 @@
+category = "irrelevance"
+prompt = "Without looking at any files: what does a mutex protect against? One sentence."
+
+[files]
+"src/lib.rs" = "pub fn f() {}\n"
+
+[expect]
+answer_any = ["race", "races", "concurrent", "simultaneous", "simultaneously", "threads", "same time", "at once"]
+no_calls = true

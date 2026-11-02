@@ -1,0 +1,32 @@
+category = "selection"
+prompt = "In which file is the function `parse_range` defined? Answer with the file's path only."
+
+[files]
+"src/lib.rs" = '''
+pub mod range;
+pub mod util;
+pub mod report;
+'''
+"src/range.rs" = '''
+/// Parses "a-b" into the numbers from a to b.
+pub fn parse_range(s: &str) -> Option<Vec<u32>> {
+    let (a, b) = s.split_once('-')?;
+    let (a, b): (u32, u32) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (a <= b).then(|| (a..=b).collect())
+}
+'''
+"src/util.rs" = '''
+use crate::range::parse_range;
+
+pub fn count(s: &str) -> usize {
+    parse_range(s).map_or(0, |v| v.len())
+}
+'''
+"src/report.rs" = '''
+pub fn report(n: usize) -> String {
+    format!("{n} cpus")
+}
+'''
+
+[expect]
+answer = ["src/range.rs"]

@@ -1,0 +1,10 @@
+category = "shell"
+prompt = "How many lines does data/items.txt have? Answer with the number only."
+
+[[generated]]
+path = "data/items.txt"
+lines = 137
+line = "item {n}"
+
+[expect]
+answer = ["137"]

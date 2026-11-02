@@ -1,0 +1,20 @@
+category = "edit"
+prompt = "In deploy.yaml, replace every old.example.com with new.example.com."
+
+[files]
+"deploy.yaml" = '''
+primary: old.example.com
+mirrors:
+  - old.example.com:8080
+  - backup.example.org
+health: https://old.example.com/health
+'''
+
+[expect.files]
+"deploy.yaml" = '''
+primary: new.example.com
+mirrors:
+  - new.example.com:8080
+  - backup.example.org
+health: https://new.example.com/health
+'''
