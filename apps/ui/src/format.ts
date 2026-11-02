@@ -4,6 +4,11 @@ export function seconds(ms: number): string {
   return ms < 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms / 1000)} s`;
 }
 
+/** Like `seconds`, but milliseconds under one: a prefill from the cache takes 30 ms. */
+export function duration(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)} ms` : seconds(ms);
+}
+
 export function count(n: number): string {
   return n < 10_000 ? String(n) : `${(n / 1000).toFixed(n < 100_000 ? 1 : 0)}k`;
 }

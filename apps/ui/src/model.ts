@@ -24,11 +24,35 @@ export interface ToolResult {
   seconds?: number;
 }
 
-/** One generation of the model: what it cost and how it ended. */
+/** A message of the conversation as ognivo keeps it and sends it (ognivo-models
+ * generic.rs: StoredMessage). */
+export interface StoredMessage {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  reasoning?: string;
+  tool_calls?: { id: string; name: string; arguments: string }[];
+  tool_call_id?: string;
+}
+
+/** A tool as the model is offered it. */
+export interface ToolDecl {
+  name: string;
+  description: string;
+  parameters: unknown;
+}
+
+/** One generation of the model: what it was asked, what it cost and how it ended. */
 export interface Generation {
   index: number;
   /** `calls`, `answer` or `malformed`. */
   outcome: string;
+  /** The server's finish reason: `tool_calls`, `stop`, `length`. */
+  finish?: string;
+  seed?: number;
+  /** sha256 of the request's messages and tools (ognivo-core agent.rs: prompt_hash). */
+  promptHash?: string;
+  /** Its request: the first `messages` messages of conversation `conversation`. */
+  request?: { conversation: number; messages: number };
   prompt: number;
   cached: number;
   completion: number;
@@ -100,6 +124,9 @@ export interface Thread {
   model: string;
   server: string;
   system: string;
+  /** The conversations as ognivo kept them, by number: a compaction starts a new one. */
+  conversations: Record<number, StoredMessage[]>;
+  tools: ToolDecl[];
   turns: Turn[];
   generations: Generation[];
 }

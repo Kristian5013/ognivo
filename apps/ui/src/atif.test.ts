@@ -158,3 +158,28 @@ describe("the fixtures", () => {
     }
   });
 });
+
+describe("the fixtures' requests", () => {
+  const dir = join(import.meta.dirname, "../fixtures");
+  const names = readdirSync(dir).filter((f) => f.endsWith(".json"));
+
+  it.each(names)("%s: every request is in the record, and a usable answer follows its own", (name) => {
+    const t = fromAtif(JSON.parse(readFileSync(join(dir, name), "utf8")) as AtifTrace);
+    const items = t.turns.flatMap((turn) => turn.items);
+    let previous = 0;
+    for (const g of t.generations) {
+      expect(g.request, `generation ${g.index}`).toBeDefined();
+      const conversation = t.conversations[g.request!.conversation]!;
+      expect(g.request!.messages).toBeGreaterThanOrEqual(previous);
+      expect(g.request!.messages).toBeLessThanOrEqual(conversation.length);
+      previous = g.request!.messages;
+      const made = items.filter((i) => i.generation === g.index);
+      // what ran nothing is not in the history; what did is the message after the request
+      if (made.some((i) => i.kind === "void")) continue;
+      const answer = conversation[g.request!.messages];
+      expect(answer?.role, `generation ${g.index}`).toBe("assistant");
+      const calls = made.filter((i) => i.kind === "tool").map((i) => (i.kind === "tool" ? i.shown : ""));
+      expect((answer?.tool_calls ?? []).map((c) => c.name)).toEqual(calls);
+    }
+  });
+});

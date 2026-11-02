@@ -4,8 +4,9 @@ import { lineDelta, refusalReason, summary } from "../format.ts";
 import type { ToolItem } from "../model.ts";
 import type { ThreadStore } from "../store.ts";
 import { EditDiff } from "./diff.tsx";
+import { Inspector } from "./inspector.tsx";
 
-export type Panel = "changes" | "approvals";
+export type Panel = "changes" | "approvals" | "inspector";
 
 function Empty({ children }: { children: string }) {
   return <p className="m-auto px-6 text-center text-muted-foreground">{children}</p>;
@@ -172,22 +173,27 @@ export function SidePanel({
   store,
   panel,
   onPanel,
+  generation,
+  onGeneration,
 }: {
   store: ThreadStore;
   panel: Panel;
   onPanel: (panel: Panel) => void;
+  /** The generation the Inspector shows; the last one when none. */
+  generation?: number;
+  onGeneration: (generation: number) => void;
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeChanges(l), [store]);
   useSyncExternalStore(subscribe, () => store.changesVersion);
   const files = store.changedFiles();
   const refused = store.refusedCalls();
-  const tab = (id: Panel, label: string, count: number) => (
+  const tab = (id: Panel, label: string, count?: number) => (
     <button
       type="button"
       onClick={() => onPanel(id)}
       className={`border-b-2 px-3 py-1.5 ${panel === id ? "border-spark text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}
     >
-      {label} <span className="text-muted-foreground">{count}</span>
+      {label} {count !== undefined && <span className="text-muted-foreground">{count}</span>}
     </button>
   );
   return (
@@ -195,8 +201,15 @@ export function SidePanel({
       <div className="flex shrink-0 gap-1 border-b border-border px-2 text-[12px]">
         {tab("changes", "Changes", files.length)}
         {tab("approvals", "Approvals", refused.length)}
+        {tab("inspector", "Inspector")}
       </div>
-      {panel === "changes" ? <Changes files={files} /> : <Approvals calls={refused} />}
+      {panel === "changes" ? (
+        <Changes files={files} />
+      ) : panel === "approvals" ? (
+        <Approvals calls={refused} />
+      ) : (
+        <Inspector store={store} generation={generation} onGeneration={onGeneration} />
+      )}
     </aside>
   );
 }

@@ -4,7 +4,9 @@ import type {
   Call,
   Generation,
   Item,
+  StoredMessage,
   Thread,
+  ToolDecl,
   ToolItem,
   ToolName,
   ToolResult,
@@ -32,6 +34,11 @@ interface AtifStep {
   };
   extra?: {
     outcome?: string;
+    finish?: string;
+    seed?: number;
+    prompt_hash?: string;
+    /** Added by the fixtures script from the session store (scripts/fixtures.mjs). */
+    request?: { conversation: number; messages: number };
     reason?: string;
     rejected_calls?: { name?: string; arguments?: unknown }[];
   };
@@ -40,7 +47,7 @@ interface AtifStep {
 export interface AtifTrace {
   schema_version: string;
   session_id: string;
-  agent?: { model_name?: string };
+  agent?: { model_name?: string; tool_definitions?: { function: ToolDecl }[] };
   steps: AtifStep[];
   extra?: {
     ognivo?: {
@@ -49,6 +56,8 @@ export interface AtifTrace {
       server?: string;
       title?: string;
       turns?: { turn: number; end?: string; why?: string }[];
+      /** Added by the fixtures script from the session store. */
+      conversations?: Record<string, StoredMessage[]>;
     };
   };
 }
@@ -175,6 +184,10 @@ export function fromAtif(trace: AtifTrace): Thread {
     generations.push({
       index: g,
       outcome,
+      finish: step.extra?.finish,
+      seed: step.extra?.seed,
+      promptHash: step.extra?.prompt_hash,
+      request: step.extra?.request,
       prompt: step.metrics?.prompt_tokens ?? 0,
       cached: step.metrics?.cached_tokens ?? 0,
       completion: step.metrics?.completion_tokens ?? 0,
@@ -231,6 +244,10 @@ export function fromAtif(trace: AtifTrace): Thread {
     model: trace.agent?.model_name ?? meta.profile ?? "",
     server: meta.server ?? "",
     system,
+    conversations: Object.fromEntries(
+      Object.entries(meta.conversations ?? {}).map(([n, list]) => [Number(n), list]),
+    ),
+    tools: (trace.agent?.tool_definitions ?? []).map((d) => d.function),
     turns,
     generations,
   };

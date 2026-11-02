@@ -218,7 +218,11 @@
     "seed": 2,
     "prompt_hash": "sha256:80e73566c2e83ccee5eb7ff8d54d2a50351c3155db534b4befd76fabece631a2",
     "ms": 1814,
-    "turn": 1
+    "turn": 1,
+    "request": {
+     "conversation": 1,
+     "messages": 2
+    }
    },
    "step_id": 3,
    "timestamp": "2026-11-02T12:22:13.465Z",
@@ -252,7 +256,11 @@
     "seed": 3,
     "prompt_hash": "sha256:a3147b029b2da0df40f78bcd333f27c76d21cde1d9c6ae8d99832f261b90ac4c",
     "ms": 867,
-    "turn": 1
+    "turn": 1,
+    "request": {
+     "conversation": 1,
+     "messages": 4
+    }
    },
    "step_id": 4,
    "timestamp": "2026-11-02T12:22:14.335Z"
@@ -307,6 +315,40 @@
     "prompt_tokens_processed": 1053,
     "prompt_tokens_cached": 1506,
     "completion_tokens": 75
+   },
+   "conversations": {
+    "1": [
+     {
+      "role": "system",
+      "content": "You are ognivo, a coding agent. You work in the project at /home/dev/demo through tools: read and search files, edit them, run shell commands.\n- Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n- Change only what the task needs.\n- After changing code, run the project's build or tests with the shell tool.\n- In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n- Commands run without a terminal; do not start interactive programs."
+     },
+     {
+      "role": "user",
+      "content": "Run scripts/info.sh and tell me the version it prints.\n\n[ognivo] Time limit: 5 min. ognivo stops the turn when it runs out."
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "reasoning": "Let me take a look at the script and run it.\n",
+      "tool_calls": [
+       {
+        "id": "ZJjum7wTc8wUEpAwiQd0pmScy6RrTPvq",
+        "name": "Bash",
+        "arguments": "{\"command\":\"bash scripts/info.sh\"}"
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "[shell: exit 0, 0.0 s]\ntool version 3.14.15 (build 77)\n",
+      "tool_call_id": "ZJjum7wTc8wUEpAwiQd0pmScy6RrTPvq"
+     },
+     {
+      "role": "assistant",
+      "content": "The script printed: **tool version 3.14.15 (build 77)**",
+      "reasoning": "The script output the version.\n"
+     }
+    ]
    }
   }
  }

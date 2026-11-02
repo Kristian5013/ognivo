@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
+import { Composer } from "./components/composer.tsx";
 import { type Panel, SidePanel } from "./components/panels.tsx";
 import { ThreadView } from "./components/thread.tsx";
 import { count, ending, percent } from "./format.ts";
@@ -9,17 +10,19 @@ import { play, timeline } from "./replay.ts";
 import { type Session, bench, sessions, shifted } from "./sessions.ts";
 import { ThreadStore } from "./store.ts";
 
-// `?session=qwen.long-file` opens that one, `?open=all` opens everything and
-// `?panel=changes` or `approvals` the side panel (screenshots);
+// `?session=qwen.long-file` opens that one, `?open=all` opens everything,
+// `?panel=changes`, `approvals` or `inspector` the side panel and `?draft=…` starts the
+// composer with that text (screenshots);
 // `?bench=10000&stream=qwen.probing&speed=1` measures the perf budgets of §10 on a thread
 // of that many items with that session streaming at its end.
 const params = new URLSearchParams(location.search);
 const OPEN_ALL = params.get("open") === "all";
 const BENCH = Number(params.get("bench")) || undefined;
-const PANEL = ["changes", "approvals"].includes(params.get("panel") ?? "")
+const PANEL = ["changes", "approvals", "inspector"].includes(params.get("panel") ?? "")
   ? (params.get("panel") as Panel)
   : undefined;
 const SPEEDS = [1, 4, 16];
+const DRAFT = params.get("draft") ?? "";
 
 /** Endpoint, model and what the session cost so far: the start of the Runtime HUD (§10). */
 function Hud({
@@ -86,7 +89,7 @@ function Hud({
           >
             {replaying ? "Stop" : "Replay"}
           </button>
-          {(["changes", "approvals"] as const).map((p) => (
+          {(["changes", "approvals", "inspector"] as const).map((p) => (
             <button
               key={p}
               type="button"
@@ -94,7 +97,7 @@ function Hud({
               onClick={() => onPanel(panel === p ? undefined : p)}
               className={`rounded border px-2 py-0.5 hover:bg-raised ${panel === p ? "border-spark/60 text-foreground" : "border-border"}`}
             >
-              {p === "changes" ? "Changes" : "Approvals"}
+              {p === "changes" ? "Changes" : p === "approvals" ? "Approvals" : "Inspector"}
             </button>
           ))}
         </span>
@@ -140,22 +143,6 @@ function Sidebar({ selected, onSelect }: { selected?: string; onSelect: (key: st
   );
 }
 
-/** Where the user writes; it sends nothing until there is a core to send to. */
-function Composer() {
-  const [text, setText] = useState("");
-  return (
-    <div className="border-t border-border px-6 py-3">
-      <textarea
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        rows={2}
-        placeholder="Ask ognivo (no core connected yet)"
-        className="mx-auto block w-full max-w-3xl resize-none rounded-lg border border-border bg-panel px-3 py-2 leading-5 outline-none placeholder:text-muted-foreground focus:border-spark/60"
-      />
-    </div>
-  );
-}
-
 function useBench(): { session: Session; store: ThreadStore } | undefined {
   return useMemo(() => {
     if (!BENCH) return undefined;
@@ -175,6 +162,15 @@ export function App() {
   const [replay, setReplay] = useState<{ store: ThreadStore; stop: () => void }>();
   const [speed, setSpeed] = useState(() => Number(params.get("speed")) || 1);
   const [panel, setPanel] = useState<Panel | undefined>(PANEL);
+  // `?generation=3` opens the Inspector at that generation (screenshots)
+  const [generation, setGeneration] = useState<number | undefined>(() => {
+    const g = params.get("generation");
+    return g === null ? undefined : Number(g);
+  });
+  const inspect = useCallback((g: number) => {
+    setGeneration(g);
+    setPanel("inspector");
+  }, []);
 
   // the bench streams a recorded session at the end of its long thread
   useEffect(() => {
@@ -209,6 +205,7 @@ export function App() {
         onSelect={(key) => {
           stop();
           setSelected(key);
+          setGeneration(undefined);
         }}
       />
       <main className="flex min-w-0 flex-1 flex-col">
@@ -227,14 +224,23 @@ export function App() {
               key={store.info.id + (replay ? ".replay" : "")}
               store={store}
               atEnd={Boolean(big)}
+              onInspect={inspect}
             />
-            <Composer />
+            <Composer key={store.info.id} store={store} draft={DRAFT} />
           </>
         ) : (
           <p className="m-auto text-muted-foreground">No sessions.</p>
         )}
       </main>
-      {store && panel && <SidePanel store={store} panel={panel} onPanel={setPanel} />}
+      {store && panel && (
+        <SidePanel
+          store={store}
+          panel={panel}
+          onPanel={setPanel}
+          generation={generation}
+          onGeneration={setGeneration}
+        />
+      )}
     </div>
   );
 }

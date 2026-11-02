@@ -119,20 +119,50 @@ function Content({ store, row }: { store: ThreadStore; row: Row }) {
   }
 }
 
-/** One row, re-rendered when that row changes and only then. */
-const RowView = memo(function RowView({ store, index }: { store: ThreadStore; index: number }) {
+/** One row, re-rendered when that row changes and only then. What a generation made has
+ * a way into the Inspector in its margin. */
+const RowView = memo(function RowView({
+  store,
+  index,
+  onInspect,
+}: {
+  store: ThreadStore;
+  index: number;
+  onInspect?: (generation: number) => void;
+}) {
   const subscribe = useCallback((l: () => void) => store.subscribeRow(index, l), [store, index]);
   const row = useSyncExternalStore(subscribe, () => store.row(index));
-  return row ? (
-    <div className="mx-auto max-w-3xl px-6 py-1">
+  if (!row) return null;
+  const generation = row.kind === "item" ? row.item.generation : undefined;
+  return (
+    <div className="group relative mx-auto max-w-3xl px-6 py-1">
+      {onInspect && generation !== undefined && (
+        <button
+          type="button"
+          title="Inspect this generation"
+          aria-label="Inspect this generation"
+          onClick={() => onInspect(generation)}
+          className="absolute top-1.5 left-0.5 rounded px-1 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-spark focus:opacity-100"
+        >
+          ⌕
+        </button>
+      )}
       <Content store={store} row={row} />
     </div>
-  ) : null;
+  );
 });
 
 /** A thread, turn by turn: only what is on screen is rendered, and it follows the end
  * while the end is in view. `atEnd` opens it at its end, where a stream goes on. */
-export function ThreadView({ store, atEnd }: { store: ThreadStore; atEnd?: boolean }) {
+export function ThreadView({
+  store,
+  atEnd,
+  onInspect,
+}: {
+  store: ThreadStore;
+  atEnd?: boolean;
+  onInspect?: (generation: number) => void;
+}) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   const length = useSyncExternalStore(subscribe, () => store.length);
   return (
@@ -143,7 +173,7 @@ export function ThreadView({ store, atEnd }: { store: ThreadStore; atEnd?: boole
       increaseViewportBy={800}
       initialTopMostItemIndex={atEnd ? Math.max(0, length - 1) : 0}
       followOutput={(atBottom) => (atBottom ? "auto" : false)}
-      itemContent={(index) => <RowView store={store} index={index} />}
+      itemContent={(index) => <RowView store={store} index={index} onInspect={onInspect} />}
     />
   );
 }

@@ -155,6 +155,16 @@ export class ThreadStore {
     };
   }
 
+  /** Every item, in order (the composer's file list, on demand). */
+  items(): Item[] {
+    return this.rows.flatMap((r) => (r.kind === "item" ? [r.item] : []));
+  }
+
+  /** The items generation `generation` made, in order (the Inspector's, on demand). */
+  itemsOf(generation: number): Item[] {
+    return this.rows.flatMap((r) => (r.kind === "item" && r.item.generation === generation ? [r.item] : []));
+  }
+
   /** Changes when a file changes or a call waits for an approval. */
   get changesVersion(): number {
     return this.indexVersion;

@@ -226,7 +226,11 @@
       "added": 3,
       "removed": 0
      }
-    ]
+    ],
+    "request": {
+     "conversation": 1,
+     "messages": 2
+    }
    },
    "step_id": 3,
    "timestamp": "2026-11-02T11:52:48.006Z",
@@ -259,7 +263,11 @@
     "seed": 3,
     "prompt_hash": "sha256:a0f3e3c17aed2a0a139278a9623db34aecd95fddae7b57f01b4117acbdb89dc0",
     "ms": 524,
-    "turn": 1
+    "turn": 1,
+    "request": {
+     "conversation": 1,
+     "messages": 4
+    }
    },
    "step_id": 4,
    "timestamp": "2026-11-02T11:52:48.532Z"
@@ -320,6 +328,38 @@
     "prompt_tokens_processed": 1025,
     "prompt_tokens_cached": 944,
     "completion_tokens": 87
+   },
+   "conversations": {
+    "1": [
+     {
+      "role": "system",
+      "content": "You are ognivo, a coding agent. You work in the project at /home/dev/demo through tools: read and search files, edit them, run shell commands.\n- Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n- Change only what the task needs.\n- After changing code, run the project's build or tests with the shell tool.\n- In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n- Commands run without a terminal; do not start interactive programs."
+     },
+     {
+      "role": "user",
+      "content": "Create the file greetings.txt with exactly these three lines:\n\n```\nПривет, мир! 👋\nnaïve café — “quoted”\n数据 → 結果 ✓\n```\n\n\n[ognivo] Time limit: 5 min. ognivo stops the turn when it runs out."
+     },
+     {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "vOFuaZZjOOnOu5mNhtmPSmovqDFtsttx",
+        "name": "write",
+        "arguments": "{\"file\":\"greetings.txt\",\"text\":\"Привет, мир! 👋\\nnaïve café — “quoted”\\n数据 → 結果 ✓\\n\"}"
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "content": "[write: created greetings.txt — 3 lines, 79 B]",
+      "tool_call_id": "vOFuaZZjOOnOu5mNhtmPSmovqDFtsttx"
+     },
+     {
+      "role": "assistant",
+      "content": "The file `greetings.txt` has been created with the requested content.\n\n```\nПривет, мир! 👋\nnaïve café — “quoted”\n数据 → 結果 ✓\n```"
+     }
+    ]
    }
   }
  }

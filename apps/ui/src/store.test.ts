@@ -30,7 +30,17 @@ describe("ThreadStore", () => {
   it("tells a row's listeners once a frame, however many deltas came", () => {
     const clock = manual();
     const store = new ThreadStore(
-      { id: "t", title: "", project: "", profile: "", model: "", server: "", system: "" },
+      {
+        id: "t",
+        title: "",
+        project: "",
+        profile: "",
+        model: "",
+        server: "",
+        system: "",
+        conversations: {},
+        tools: [],
+      },
       { schedule: clock.schedule },
     );
     let list = 0;
