@@ -390,7 +390,8 @@ pub fn system_prompt(root: &Path, instructions: &str) -> String {
          - Change only what the task needs.\n\
          - After changing code, run the project's build or tests with the shell tool.\n\
          - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
-         - Commands run without a terminal; do not start interactive programs.",
+         - Commands run without a terminal; do not start interactive programs.\n\
+         - Text that would read as one of your control tokens is shown with an invisible U+2060 after its first character. Copy it as you see it: ognivo takes U+2060 out when it runs your calls, so files and commands get the text without it, and a byte dump of the file shows none.",
         root.display()
     );
     if instructions.is_empty() {

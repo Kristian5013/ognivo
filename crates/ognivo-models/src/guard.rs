@@ -11,9 +11,10 @@
 //! it with or without the joiner: the tools get the original either way.
 //!
 //! The model does not always copy the joiner itself: in M1 T2-mini gpt-oss wrote U+200D
-//! ZERO WIDTH JOINER in its place. A guarded string broken by a run of such invisible format
-//! characters ([`LOOKALIKES`], the joiner among them) after its first character comes back
-//! whole too ([`Guard::restore`]). Elsewhere they stay, so emoji sequences keep their joiners.
+//! ZERO WIDTH JOINER in its place, and Qwen, asked for U+2060, wrote U+2063 INVISIBLE
+//! SEPARATOR. A guarded string broken by a run of such invisible format characters
+//! ([`LOOKALIKES`], the joiner among them) after its first character comes back whole too
+//! ([`Guard::restore`]). Elsewhere they stay, so emoji sequences keep their joiners.
 //!
 //! A string that frames the model's own messages and calls ([`TokenTable::framing`]) and
 //! comes back unbroken inside tool arguments is not such a copy: the model wrote its own
@@ -32,8 +33,11 @@ use crate::profile::TokenTable;
 pub const JOINER: char = '\u{2060}';
 
 /// Invisible format characters a model may write where it saw the joiner: ZERO WIDTH SPACE,
-/// NON-JOINER and JOINER, and the byte order mark.
-pub const LOOKALIKES: [char; 4] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}'];
+/// NON-JOINER and JOINER, the byte order mark, and the invisible operators next to the
+/// joiner (U+2061 to U+2064).
+pub const LOOKALIKES: [char; 8] = [
+    '\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}', '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}',
+];
 
 #[derive(Debug, Clone, Default)]
 pub struct Guard {
@@ -276,7 +280,8 @@ mod tests {
         let g = guard("gpt-oss-20b");
         let start = tok(&["<|", "start|>"]);
         let rest = &start[1..];
-        // M1 T2-mini: gpt-oss saw `<` U+2060 `|start|>` and wrote `<` U+200D `|start|>`
+        // M1 T2-mini: gpt-oss saw `<` U+2060 `|start|>` and wrote `<` U+200D `|start|>`;
+        // Qwen, writing U+2060 on purpose, wrote U+2063
         for c in LOOKALIKES {
             let copy = format!("ends with <{c}{rest} here");
             assert_eq!(g.restore(&copy), format!("ends with {start} here"), "{c:?}");
@@ -293,6 +298,7 @@ mod tests {
         for text in [
             "👨\u{200D}👩\u{200D}👧",
             "a\u{200B}b",
+            "a\u{2063}b",
             "<\u{200D}|nothing|>",
             "\u{FEFF}x",
         ] {
