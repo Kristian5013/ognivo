@@ -80,14 +80,17 @@ pub trait Approver: Send {
     fn can_ask(&self) -> bool;
 }
 
-/// Headless default: nobody can answer, so every question is a refusal.
+/// Headless default: nobody can answer, so every question is a refusal. The refusal says
+/// not to work around it: told to "do the task another way", models went on from a refused
+/// `cargo test` to `cargo build`, `cargo check` and `rustc` until the step limit (the T2
+/// night of 2026-11-02).
 #[derive(Debug, Default)]
 pub struct NoUser;
 
 impl Approver for NoUser {
     fn approve<'a>(&'a mut self, req: &'a ApprovalRequest) -> BoxFuture<'a, Verdict> {
         let text = format!(
-            "{} needs the user's approval ({}), and this run has no user. Do not retry it; do the task another way or explain the limit in your final answer.",
+            "{} needs the user's approval ({}), and this run has no user. Do not retry it or work around it with another command: change files with the edit and write tools, and if it was a check, finish without it. Say in your final answer what did not run.",
             req.action, req.reason
         );
         Box::pin(async move { Verdict::Refuse(text) })
