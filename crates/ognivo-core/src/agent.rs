@@ -1021,7 +1021,9 @@ impl Agent {
                 Outcome::Answer if f.content.trim().is_empty() => {
                     self.stats.empty_answers += 1;
                     unusable += 1;
-                    let note = "[ognivo] Your last output ended with neither a tool call nor an answer: it stopped inside your reasoning, so nothing was run. Make the call you were planning directly, or give the final answer.".to_owned();
+                    // "nothing was run" alone read as "your calls did not run": gpt-oss
+                    // made a write that had run again, three times (2026-11-02, second run)
+                    let note = "[ognivo] Your last output ended with neither a tool call nor an answer: it stopped inside your reasoning, so that output ran nothing. The calls before it ran, and their results are above. Make the call you were planning directly, or give the final answer.".to_owned();
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
                 }
