@@ -24,6 +24,18 @@ impl Run {
     fn passed(&self) -> bool {
         self.exit_code == Some(0) && !self.timed_out
     }
+
+    /// `exited 101`, `timed out` or `was killed`.
+    pub fn outcome(&self) -> String {
+        if self.timed_out {
+            "timed out".to_owned()
+        } else {
+            match self.exit_code {
+                Some(c) => format!("exited {c}"),
+                None => "was killed".to_owned(),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -75,6 +87,14 @@ impl Ledger {
 
     pub fn refused(&mut self, command: &str) {
         self.entries.push(Entry::Refused(command.to_owned()));
+    }
+
+    /// The builds and tests of the turn, in order.
+    pub fn runs(&self) -> impl Iterator<Item = &Run> {
+        self.entries.iter().filter_map(|e| match e {
+            Entry::Ran(r) => Some(r),
+            _ => None,
+        })
     }
 
     pub fn status(&self, root: &Path) -> Verification {
@@ -200,15 +220,7 @@ pub fn summary(v: &Verification) -> Option<String> {
                 list(&what)
             );
             if let Some(r) = last_run {
-                let how = if r.timed_out {
-                    "timed out".to_owned()
-                } else {
-                    match r.exit_code {
-                        Some(c) => format!("exited {c}"),
-                        None => "was killed".to_owned(),
-                    }
-                };
-                s.push_str(&format!("; {} {how}", quoted(&r.command)));
+                s.push_str(&format!("; {} {}", quoted(&r.command), r.outcome()));
             }
             if !refused.is_empty() {
                 let refused: Vec<String> = refused.iter().map(|c| quoted(c)).collect();
@@ -232,7 +244,7 @@ fn list(items: &[String]) -> String {
 }
 
 /// A command in backquotes on one line: its first line, cut to [`COMMAND_CHARS`].
-fn quoted(command: &str) -> String {
+pub fn quoted(command: &str) -> String {
     let command = command.trim();
     let line: String = command
         .lines()

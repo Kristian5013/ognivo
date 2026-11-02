@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::Args;
 use ognivo_core::agent::{Agent, AgentOptions, Approver};
@@ -17,6 +18,9 @@ use ognivo_store::{NewSession, SessionRow, Store};
 
 /// The session store, in the data directory.
 const STORE_FILE: &str = "ognivo.db";
+/// How long the start waits for the server's `/props`; without them only the profile's
+/// budget decides when to compact.
+const PROPS_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
@@ -80,8 +84,6 @@ pub struct Connected {
     /// The profile's id.
     pub profile: String,
     pub level: Option<String>,
-    /// The same server, for questions outside the agent's steps.
-    pub server: LlamaServer,
     /// What git says is changed in the project now; `None` outside git.
     changed: Option<Vec<PathBuf>>,
     pub opts: AgentOptions,
@@ -228,12 +230,14 @@ impl SessionArgs {
             .level
             .clone()
             .or_else(|| stored.and_then(|r| r.level.clone()));
-        let (family, id, max_tokens) = (
-            profile.family,
-            profile.id.clone(),
-            profile.context.max_tokens,
-        );
-        let driver = ChatDriver::new(server.clone(), profile, level.as_deref(), self.slot)
+        let (family, id, context) = (profile.family, profile.id.clone(), profile.context);
+        // the slot's context bounds when the history is compacted
+        let n_ctx = tokio::time::timeout(PROPS_TIMEOUT, server.props())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|p| p.n_ctx);
+        let driver = ChatDriver::new(server, profile, level.as_deref(), self.slot)
             .map_err(Failure::usage)?;
         let seed = stored.map(|r| r.seed).or(self.seed).unwrap_or_else(|| {
             std::time::SystemTime::now()
@@ -246,13 +250,13 @@ impl SessionArgs {
             family,
             profile: id,
             level,
-            server,
             opts: AgentOptions {
                 workspace: state(changed.as_deref(), &[]),
                 root,
                 data_dir,
                 max_steps: self.max_steps,
-                max_tokens,
+                context,
+                n_ctx,
                 seed,
                 time_limit: None,
                 user_instructions: user_instructions(),

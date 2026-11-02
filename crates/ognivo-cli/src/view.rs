@@ -104,6 +104,22 @@ impl View {
             AgentEvent::Restarted { reason } => self
                 .screen
                 .line(&format!("· restarted: {}", printable(&reason)), Paint::Dim),
+            AgentEvent::Compacting { tokens, limit } => self.screen.line(
+                &format!(
+                    "· compacting the conversation: about {} tokens, over the {} budget",
+                    kilo(tokens),
+                    kilo(limit)
+                ),
+                Paint::Dim,
+            ),
+            AgentEvent::Compacted {
+                replaced,
+                kept,
+                summary,
+            } => {
+                let (line, paint) = compacted(replaced, kept, summary.as_deref());
+                self.screen.line(&line, paint);
+            }
             AgentEvent::Reasoning { .. } => {}
         }
     }
@@ -356,6 +372,39 @@ pub fn counts(created: bool, hunks: &[Hunk]) -> String {
     }
 }
 
+/// `· compacted: 46 messages became a summary of 310 words; 3 steps kept`.
+pub fn compacted(replaced: usize, kept: usize, summary: Option<&str>) -> (String, Paint) {
+    let steps = match kept {
+        0 => "no step kept".to_owned(),
+        1 => "1 step kept".to_owned(),
+        n => format!("{n} steps kept"),
+    };
+    match summary {
+        Some(text) => (
+            format!(
+                "· compacted: {replaced} messages became a summary of {} words; {steps}",
+                text.split_whitespace().count()
+            ),
+            Paint::Dim,
+        ),
+        None => (
+            format!(
+                "· compacted without a summary, the model wrote none: {replaced} messages became ognivo's facts; {steps}"
+            ),
+            Paint::Yellow,
+        ),
+    }
+}
+
+/// `999`, `98.3K`.
+pub fn kilo(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}K", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 /// `AGENTS.md, CLAUDE.md (cut)`: the instruction files the model got.
 pub fn given(files: &[Given]) -> String {
     let names: Vec<String> = files
@@ -601,6 +650,12 @@ impl Screen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(kilo(999), "999");
+        assert_eq!(kilo(98_304), "98.3K");
+    }
 
     #[test]
     fn control_characters_are_shown_not_obeyed() {

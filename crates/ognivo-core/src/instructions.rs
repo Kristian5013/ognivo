@@ -234,6 +234,14 @@ impl Instructions {
         self.looked.extend(dirs);
     }
 
+    /// Forgets the files of subdirectories, which a compacted conversation no longer holds:
+    /// they come again with the next call that reaches them.
+    pub fn forget_near(&mut self) {
+        let root = &self.root;
+        self.given.retain(|g| g.scope == *root);
+        self.looked.clear();
+    }
+
     fn directory(&mut self, dir: &Path, place: &Place, found: &mut Found) {
         for name in NAMES {
             // ~/.claude is Claude Code's own directory: its CLAUDE.md is a user file

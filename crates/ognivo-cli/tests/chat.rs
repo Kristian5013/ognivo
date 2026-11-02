@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use common::{HANG, answer_stream, call_stream, fake_server};
+use common::{HANG, answer_stream, call_stream, chunk, fake_server, sse};
 use serde_json::json;
 
 fn spawn(url: &str, root: &Path, data: &Path, stdin: &str) -> Child {
@@ -618,4 +618,92 @@ async fn a_session_without_a_turn_leaves_nothing_and_a_missing_one_is_named() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// A call whose step leaves the server holding `held` tokens.
+fn call_holding(id: &str, name: &str, args: &str, held: u64) -> String {
+    let events = [
+        chunk(json!({"role": "assistant", "content": null}), None),
+        chunk(
+            json!({"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": args}}]}),
+            None,
+        ),
+        chunk(json!({}), Some("tool_calls")),
+        json!({"choices": [], "timings": {"cache_n": 0, "prompt_n": held, "predicted_n": 20}}),
+    ];
+    sse(&events)
+}
+
+#[tokio::test]
+async fn a_full_context_is_compacted_and_the_turn_goes_on() {
+    let read = |id: &str, path: &str| call_stream(id, "read", &format!(r#"{{"path":"{path}"}}"#));
+    let (url, bodies) = fake_server(vec![
+        read("c1", "big1.txt"),
+        read("c2", "big2.txt"),
+        read("c3", "big3.txt"),
+        call_holding("c4", "read", r#"{"path":"small.txt"}"#, 70_000),
+        answer_stream("Task: read the files. Next: answer."),
+        answer_stream("Read them."),
+    ])
+    .await;
+    let (dir, root) = project();
+    let line = format!("{}\n", "x".repeat(59));
+    for name in ["big1.txt", "big2.txt", "big3.txt"] {
+        std::fs::write(root.join(name), line.repeat(1000)).unwrap();
+    }
+    std::fs::write(root.join("small.txt"), "small\n").unwrap();
+    let data = dir.path().join("data");
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "read all the files\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    let at = |s: &str| stdout.find(s).unwrap_or_else(|| panic!("{s}: {stdout}"));
+    assert!(at("→ read small.txt") < at("\n· compacting the conversation: about 70."));
+    assert!(
+        stdout.contains("K tokens, over the 68.8K budget\n"),
+        "{stdout}"
+    );
+    assert!(at("· compacting the conversation") < at("\n· compacted: "));
+    assert!(at(" became a summary of 6 words; ") < at("Read them."));
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 6);
+    // the summary is asked for with no calls, over the whole history
+    assert_eq!(bodies[4]["tool_choice"], json!("none"));
+    let ask = bodies[4]["messages"].as_array().unwrap();
+    assert!(
+        ask.last().unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[ognivo] The context is nearly full")
+    );
+    assert_eq!(
+        ask.len(),
+        bodies[3]["messages"].as_array().unwrap().len() + 3
+    );
+    // the next step: the system message, the note, the kept steps ending with the small read
+    let next = bodies[5]["messages"].as_array().unwrap();
+    assert_eq!(next[0], ask[0]);
+    let note = next[1]["content"].as_str().unwrap();
+    assert!(
+        note.starts_with("[ognivo] The conversation was compacted to fit the context")
+            && note.contains("\n1. read all the files\n")
+            && note.contains("Task: read the files. Next: answer."),
+        "{note}"
+    );
+    let last = next.last().unwrap();
+    assert_eq!(last["role"], json!("tool"));
+    assert!(
+        last["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("[read: small.txt"),
+        "{last}"
+    );
+    assert!(next.len() < ask.len() - 2, "{}", next.len());
 }

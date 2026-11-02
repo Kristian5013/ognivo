@@ -22,7 +22,7 @@ use ognivo_core::verify;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::session::{Failure, SessionArgs};
-use crate::view::{given, not_read};
+use crate::view::{compacted, given, kilo, not_read};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -215,6 +215,16 @@ fn show(e: &AgentEvent, jsonl: bool) {
                 eprintln!("{}", not_read(s));
             }
         }
+        AgentEvent::Compacting { tokens, limit } => eprintln!(
+            "· compacting the conversation: about {} tokens, over the {} budget",
+            kilo(*tokens),
+            kilo(*limit)
+        ),
+        AgentEvent::Compacted {
+            replaced,
+            kept,
+            summary,
+        } => eprintln!("{}", compacted(*replaced, *kept, summary.as_deref()).0),
         AgentEvent::Refused { tool, reason } => eprintln!("✗ {tool}: {reason}"),
         AgentEvent::Notice { text } => eprintln!("· {text}"),
     }

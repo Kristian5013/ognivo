@@ -59,6 +59,8 @@ pub struct Notes {
     pub skipped: Vec<Skipped>,
     /// Files the user reverted since the model's last turn.
     pub reverted: Vec<String>,
+    /// The user's requests, oldest first: a compaction quotes them.
+    pub requests: Vec<String>,
     /// A turn began and did not end: ognivo stopped in it.
     pub in_turn: bool,
 }

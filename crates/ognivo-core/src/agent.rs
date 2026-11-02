@@ -26,9 +26,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
+use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
-    Channel, ChatMessage, DriverError, DriverEvent, Family, ModelDriver, Outcome, StepRequest,
-    ToolCall, ToolChoice, ToolDecl,
+    Channel, ChatMessage, DriverError, DriverEvent, Family, Finished, ModelDriver, Outcome,
+    StepRequest, ToolCall, ToolChoice, ToolDecl,
 };
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
@@ -40,6 +41,7 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::compact;
 use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
 use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
@@ -156,6 +158,22 @@ pub enum AgentEvent {
     Notice {
         text: String,
     },
+    /// The history is about to be compacted (§5.6): the next prompt would hold about
+    /// `tokens`, over the `limit`.
+    Compacting {
+        tokens: u64,
+        limit: u64,
+    },
+    /// The earlier history became one message with the user's requests, the model's
+    /// summary and ognivo's facts.
+    Compacted {
+        /// Messages it replaced.
+        replaced: usize,
+        /// Steps kept as they were.
+        kept: usize,
+        /// The model's summary; `None` when it wrote none.
+        summary: Option<String>,
+    },
 }
 
 /// Counters behind the M1 exit metrics.
@@ -186,6 +204,7 @@ pub struct Stats {
     pub repeats_skipped: u32,
     /// Answers sent back before acceptance: to run a build or test, or to drop a claim.
     pub answers_sent_back: u32,
+    pub compactions: u32,
     /// Prompt tokens the server processed, and those it took from the KV cache.
     pub prompt_tokens_processed: u64,
     pub prompt_tokens_cached: u64,
@@ -220,7 +239,10 @@ pub struct AgentOptions {
     /// `~/.ognivo/data` or the run's own data directory.
     pub data_dir: PathBuf,
     pub max_steps: u32,
-    pub max_tokens: u32,
+    /// The profile's working budget and `max_tokens` of a step.
+    pub context: ContextBudget,
+    /// The server slot's context, if the server says.
+    pub n_ctx: Option<u32>,
     /// Seed of the first step; each step adds one, so a run is reproducible.
     pub seed: u32,
     /// Review state at the start: clean only when nothing unreviewed is known to exist
@@ -305,6 +327,12 @@ pub struct Agent {
     running: Option<String>,
     /// Tokens the server held after the last step.
     context: u64,
+    /// Messages the server held then; those after came since.
+    counted: usize,
+    /// The user's requests of the conversation, oldest first, for a compaction.
+    requests: Vec<String>,
+    /// Where the running turn's request is in the history.
+    turn_start: usize,
     /// Where the session is kept, if it is.
     session: Option<Session>,
     /// A turn is running: it began and has not ended.
@@ -374,6 +402,9 @@ impl Agent {
             stuck: None,
             running: None,
             context: 0,
+            counted: 0,
+            requests: Vec::new(),
+            turn_start: 0,
             session: None,
             in_turn: false,
             stats: Stats::default(),
@@ -425,6 +456,7 @@ impl Agent {
             agent.instructions.mark_looked(looked);
             agent.seen = seen.into_iter().collect();
             agent.reverted = notes.reverted;
+            agent.requests = notes.requests;
         }
         agent.session = Some(session);
         if notes.in_turn {
@@ -590,6 +622,8 @@ impl Agent {
         ))];
         self.seen.clear();
         self.context = 0;
+        self.counted = 0;
+        self.requests.clear();
         let notes = self.notes();
         if let Some(s) = self.session.as_mut() {
             s.start_conversation(&self.messages, &notes);
@@ -632,6 +666,7 @@ impl Agent {
             instructions: self.prompt_instructions.files.clone(),
             skipped: self.prompt_instructions.skipped.clone(),
             reverted: self.reverted.clone(),
+            requests: self.requests.clone(),
             in_turn: self.in_turn,
         }
     }
@@ -656,12 +691,196 @@ impl Agent {
         on(e);
     }
 
+    /// The next generation's request; it counts as a step, and its seed follows from that.
+    fn request(&mut self, tool_choice: ToolChoice, messages: Vec<ChatMessage>) -> StepRequest {
+        self.stats.steps += 1;
+        StepRequest {
+            messages,
+            tools: self.tools.clone(),
+            tool_choice,
+            max_tokens: self.opts.context.max_tokens,
+            seed: self.opts.seed.wrapping_add(self.stats.steps),
+        }
+    }
+
+    /// Runs one generation to its end, showing its text and reasoning through `on` when
+    /// given. `None`: the deadline passed, and dropping the stream cancelled it.
+    async fn generate(
+        &mut self,
+        req: StepRequest,
+        deadline: Option<Instant>,
+        mut on: Option<&mut (dyn FnMut(AgentEvent) + Send)>,
+    ) -> Result<Option<Finished>, DriverError> {
+        let mut events = self.driver.step(req);
+        let mut finished = None;
+        loop {
+            let next = match deadline {
+                Some(d) => match tokio::time::timeout_at(d, events.next()).await {
+                    Ok(next) => next,
+                    Err(_) => return Ok(None),
+                },
+                None => events.next().await,
+            };
+            let Some(ev) = next else { break };
+            let shown = match ev? {
+                DriverEvent::Reasoning(text) => AgentEvent::Reasoning { text },
+                DriverEvent::Text(text) => AgentEvent::Text { text },
+                DriverEvent::ToolCallDelta { .. } => continue,
+                DriverEvent::Restarted { reason, .. } => {
+                    self.stats.restarts += 1;
+                    AgentEvent::Restarted { reason }
+                }
+                DriverEvent::Finished(f) => {
+                    finished = Some(*f);
+                    continue;
+                }
+            };
+            if let Some(on) = on.as_deref_mut() {
+                self.emit(on, shown);
+            }
+        }
+        let f = finished.ok_or_else(|| {
+            DriverError::InvalidRequest("the driver ended a step without a result".into())
+        })?;
+        self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
+        self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
+        self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
+        Ok(Some(f))
+    }
+
+    /// The tokens the next prompt will hold, about: what the server held after the last
+    /// step and an estimate of the messages since.
+    fn prompt_estimate(&self) -> u64 {
+        let counted = self.counted.min(self.messages.len());
+        let held = if self.context > 0 {
+            self.context
+        } else {
+            compact::estimate(&self.messages[..counted])
+        };
+        held + compact::estimate(&self.messages[counted..])
+    }
+
+    /// Compacts the history when the next prompt would pass the limit (§5.6). `Some` ends
+    /// the turn: the time limit ran out while the model wrote its summary.
+    async fn compact_if_needed(
+        &mut self,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+        deadline: Option<Instant>,
+    ) -> Result<Option<TurnEnd>, DriverError> {
+        let limit = compact::limit(&self.opts.context, self.opts.n_ctx);
+        let tokens = self.prompt_estimate();
+        if tokens <= limit {
+            return Ok(None);
+        }
+        let from = compact::kept_from(&self.messages, self.turn_start, limit / 4);
+        // dropping too little would not make room
+        if compact::estimate(&self.messages[1..from]) < tokens / 4 {
+            return Ok(None);
+        }
+        self.emit(on, AgentEvent::Compacting { tokens, limit });
+        let mut messages = self.messages.clone();
+        messages.push(ChatMessage::User(compact::SUMMARY_REQUEST.to_owned()));
+        let req = self.request(ToolChoice::None, messages);
+        let summary = match self.generate(req, deadline, None).await? {
+            None => return Ok(Some(TurnEnd::TimeLimit)),
+            Some(f) => match f.outcome {
+                Outcome::Answer if !f.content.trim().is_empty() => Some(f.content),
+                _ => None,
+            },
+        };
+        let facts = self.facts();
+        let mut kept = self.messages.split_off(from);
+        compact::fit(&mut kept, limit / 4);
+        let steps = kept
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
+            .count();
+        let note = compact::note(&self.requests, summary.as_deref(), &facts, steps > 0);
+        let replaced = self.messages.len() - 1;
+        self.messages.truncate(1);
+        self.messages.push(ChatMessage::User(note));
+        self.messages.extend(kept);
+        self.turn_start = 1;
+        self.context = 0;
+        self.counted = 0;
+        // its memory of results is gone with them
+        self.repeats = Repeats::default();
+        self.instructions.forget_near();
+        self.stats.compactions += 1;
+        // a new cache epoch: the session's next conversation
+        let notes = self.notes();
+        if let Some(s) = self.session.as_mut() {
+            s.start_conversation(&self.messages, &notes);
+        }
+        self.save();
+        self.emit(
+            on,
+            AgentEvent::Compacted {
+                replaced,
+                kept: steps,
+                summary,
+            },
+        );
+        Ok(None)
+    }
+
+    /// What ognivo knows for certain, for a compaction's note.
+    fn facts(&mut self) -> Vec<String> {
+        let mut facts = Vec::new();
+        let changes: Vec<String> = self
+            .journal
+            .changes()
+            .iter()
+            .map(|c| format!("{} ({})", c.shown, compact::counts(c)))
+            .collect();
+        if !changes.is_empty() {
+            facts.push(format!(
+                "Changed in this session and not reviewed by the user yet: {}.",
+                changes.join(", ")
+            ));
+        }
+        let commands: Vec<String> = self
+            .journal
+            .side_effects()
+            .iter()
+            .map(|c| verify::quoted(c))
+            .collect();
+        if !commands.is_empty() {
+            facts.push(format!(
+                "Commands with side effects since the last review: {}.",
+                commands.join(", ")
+            ));
+        }
+        let runs: Vec<String> = self
+            .ledger
+            .runs()
+            .map(|r| format!("{} {}", verify::quoted(&r.command), r.outcome()))
+            .collect();
+        if !runs.is_empty() {
+            facts.push(format!(
+                "Builds and tests in this turn, in order: {}.",
+                runs.join("; ")
+            ));
+        }
+        if let Some(line) = verify::summary(&self.ledger.status(&self.opts.root)) {
+            facts.push(format!("{line}."));
+        }
+        if let Some(c) = &self.clock {
+            facts.push(format!(
+                "About {} of the turn's time limit are left.",
+                about(c.left())
+            ));
+        }
+        facts
+    }
+
     /// The steps of a turn, until it ends.
     async fn steps(
         &mut self,
         user: &str,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Result<TurnEnd, DriverError> {
+        let request = user;
         self.clock = self.opts.time_limit.map(|limit| Clock {
             start: Instant::now(),
             limit,
@@ -682,6 +901,8 @@ impl Agent {
             self.reverted.clear();
         }
         self.messages.push(ChatMessage::User(user));
+        self.turn_start = self.messages.len() - 1;
+        self.requests.push(request.to_owned());
         self.save();
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
@@ -698,49 +919,18 @@ impl Agent {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(TurnEnd::TimeLimit);
             }
-            self.stats.steps += 1;
-            let req = StepRequest {
-                messages: self.messages.clone(),
-                tools: self.tools.clone(),
-                tool_choice: ToolChoice::Auto,
-                max_tokens: self.opts.max_tokens,
-                seed: self.opts.seed.wrapping_add(self.stats.steps),
-            };
-            let mut events = self.driver.step(req);
-            let mut finished = None;
-            loop {
-                let next = match deadline {
-                    // dropping the stream at the limit cancels the generation
-                    Some(d) => match tokio::time::timeout_at(d, events.next()).await {
-                        Ok(next) => next,
-                        Err(_) => return Ok(TurnEnd::TimeLimit),
-                    },
-                    None => events.next().await,
-                };
-                let Some(ev) = next else { break };
-                match ev? {
-                    DriverEvent::Reasoning(text) => self.emit(on, AgentEvent::Reasoning { text }),
-                    DriverEvent::Text(text) => self.emit(on, AgentEvent::Text { text }),
-                    DriverEvent::ToolCallDelta { .. } => {}
-                    DriverEvent::Restarted { reason, .. } => {
-                        self.stats.restarts += 1;
-                        self.emit(on, AgentEvent::Restarted { reason });
-                    }
-                    DriverEvent::Finished(f) => finished = Some(*f),
-                }
+            if let Some(end) = self.compact_if_needed(on, deadline).await? {
+                return Ok(end);
             }
-            let Some(f) = finished else {
-                return Err(DriverError::InvalidRequest(
-                    "the driver ended a step without a result".into(),
-                ));
+            let req = self.request(ToolChoice::Auto, self.messages.clone());
+            let Some(f) = self.generate(req, deadline, Some(&mut *on)).await? else {
+                return Ok(TurnEnd::TimeLimit);
             };
-            self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
-            self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
-            self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
             if let Some(prompt) = f.usage.prompt_n {
                 self.context = u64::from(prompt)
                     + u64::from(f.usage.cache_n.unwrap_or(0))
                     + u64::from(f.usage.predicted_n.unwrap_or(0));
+                self.counted = self.messages.len();
             }
             let reasoning = (!f.reasoning.is_empty()).then_some(f.reasoning);
             match f.outcome {
@@ -832,7 +1022,7 @@ impl Agent {
                     };
                     let note = format!(
                         "[ognivo] Your last output reached the {} token limit {what}, so nothing was run and it was discarded. Think less, then call the tool directly with complete arguments.",
-                        self.opts.max_tokens
+                        self.opts.context.max_tokens
                     );
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
@@ -1451,7 +1641,12 @@ mod tests {
             root: root.to_owned(),
             data_dir: root.parent().unwrap().join("data"),
             max_steps: 10,
-            max_tokens: 16384,
+            context: ContextBudget {
+                working_max: 98_304,
+                compact_at: 0.70,
+                max_tokens: 16384,
+            },
+            n_ctx: None,
             seed: 1,
             workspace,
             time_limit,
@@ -2462,5 +2657,129 @@ mod tests {
         // the last conversation is the one that goes on
         assert_eq!(agent.messages(), now.as_slice());
         assert_eq!(now.len(), 3);
+    }
+
+    /// A turn that reads two files of 20 KB, under the limit, and then a small one, after
+    /// which the server says it holds more than the limit.
+    fn filling(summary: ChatCompletion) -> Run {
+        let read = |path: &str| {
+            calls(
+                &[("read", serde_json::json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let mut full = read("lib.rs");
+        full.usage.prompt_n = Some(30_000);
+        let mut r = agent(
+            vec![
+                read("big1.txt"),
+                read("big2.txt"),
+                full,
+                summary,
+                answer("done"),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        let line = format!("{}\n", "x".repeat(59));
+        for name in ["big1.txt", "big2.txt"] {
+            std::fs::write(r.root.join(name), line.repeat(340)).unwrap();
+        }
+        // a 40K slot: compaction at 40K - 16K - 512
+        r.agent.opts.n_ctx = Some(40_000);
+        r
+    }
+
+    #[tokio::test]
+    async fn a_full_context_is_compacted_into_a_summary_and_the_last_step() {
+        let mut r = filling(answer("Task: fix it.\nNext: change lib.rs."));
+        let id = kept(&mut r);
+        let (end, events) = turn(&mut r).await;
+        answered(end);
+        let seen = r.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 5);
+        // the summary is asked for over the whole history, with the same tools and no calls
+        let ask = &seen[3];
+        assert_eq!(ask.tool_choice, ToolChoice::None);
+        assert_eq!(ask.tools, seen[2].tools);
+        assert_eq!(&ask.messages[..6], &seen[2].messages[..]);
+        assert_eq!(ask.messages.len(), 6 + 2 + 1);
+        assert_eq!(
+            ask.messages.last(),
+            Some(&ChatMessage::User(compact::SUMMARY_REQUEST.into()))
+        );
+        // then: the system message, the note, and the last step as it was
+        let next = &seen[4].messages;
+        assert_eq!(next.len(), 4);
+        assert_eq!(next[0], seen[2].messages[0]);
+        let ChatMessage::User(note) = &next[1] else {
+            panic!("{next:?}");
+        };
+        assert!(note.contains("\n1. fix it\n"), "{note}");
+        assert!(
+            note.contains("written before the compaction:\nTask: fix it.\nNext: change lib.rs.\n"),
+            "{note}"
+        );
+        assert!(
+            note.ends_with("Go on with the latest request from where the steps below leave off."),
+            "{note}"
+        );
+        assert!(
+            matches!(&next[2], ChatMessage::Assistant { tool_calls, .. } if tool_calls[0].arguments.contains("lib.rs"))
+        );
+        assert!(
+            matches!(&next[3], ChatMessage::Tool { content, .. } if content.starts_with("[read: lib.rs"))
+        );
+        let compacting = events.iter().find_map(|e| match e {
+            AgentEvent::Compacting { tokens, limit } => Some((*tokens, *limit)),
+            _ => None,
+        });
+        let (tokens, limit) = compacting.unwrap();
+        assert!(tokens > 30_000, "{tokens}");
+        assert_eq!(limit, 40_000 - 16_384 - 512);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Compacted {
+                replaced: 5,
+                kept: 1,
+                summary: Some(_)
+            }
+        )));
+        assert_eq!(r.agent.stats.compactions, 1);
+        // the session goes on from the compacted conversation
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        let now = agent.messages().to_vec();
+        drop(agent);
+        let (agent, _) = resumed(&root, id, vec![]);
+        assert_eq!(agent.messages(), now.as_slice());
+        assert_eq!(agent.requests, ["fix it"]);
+    }
+
+    #[tokio::test]
+    async fn without_a_summary_the_facts_and_the_last_step_remain() {
+        let tries_a_call = calls(
+            &[("read", serde_json::json!({"path": "lib.rs"}))],
+            FinishReason::ToolCalls,
+        );
+        let mut r = filling(tries_a_call);
+        let (end, events) = turn(&mut r).await;
+        answered(end);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Compacted {
+                kept: 1,
+                summary: None,
+                ..
+            }
+        )));
+        let seen = r.seen.lock().unwrap();
+        let ChatMessage::User(note) = &seen[4].messages[1] else {
+            panic!();
+        };
+        assert!(
+            note.contains("There is no summary: writing it failed."),
+            "{note}"
+        );
     }
 }

@@ -5,12 +5,9 @@ mod common;
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 
-use common::{answer_stream, call_stream, fake_server};
+use common::{HANG, answer_stream, call_stream, fake_server};
 use serde_json::{Value, json};
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
 
 #[tokio::test]
 async fn reads_edits_and_answers() {
@@ -137,13 +134,8 @@ fn auto_approval_refuses_to_run_on_the_host() {
 /// `timeout` stops the agent with SIGTERM: the end event is still written, exit 143.
 #[tokio::test]
 async fn sigterm_ends_the_run_with_an_end_event() {
-    // a server that accepts the request and never answers
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move {
-        let (_sock, _) = listener.accept().await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-    });
+    // a server that takes the request and never answers it
+    let (url, _) = fake_server(vec![HANG.to_owned()]).await;
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let bin = env!("CARGO_BIN_EXE_ognivo");
@@ -205,24 +197,8 @@ async fn sigterm_ends_the_run_with_an_end_event() {
 /// why and what was verified, and the model had been told the limit.
 #[tokio::test]
 async fn the_time_limit_ends_the_run_with_exit_124() {
-    // a server that reads the request and never answers
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let request = Arc::new(Mutex::new(String::new()));
-    let seen = request.clone();
-    tokio::spawn(async move {
-        let (mut sock, _) = listener.accept().await.unwrap();
-        let mut part = [0u8; 65536];
-        loop {
-            let n = sock.read(&mut part).await.unwrap_or(0);
-            if n == 0 {
-                break;
-            }
-            seen.lock()
-                .unwrap()
-                .push_str(&String::from_utf8_lossy(&part[..n]));
-        }
-    });
+    // a server that takes the request and never answers it
+    let (url, bodies) = fake_server(vec![HANG.to_owned()]).await;
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("data");
     let bin = env!("CARGO_BIN_EXE_ognivo");
@@ -271,10 +247,9 @@ async fn the_time_limit_ends_the_run_with_exit_124() {
         (Some("time_limit"), Some(124))
     );
     assert_eq!(end["verification"], json!({"status": "no_changes"}));
-    assert!(
-        request.lock().unwrap().contains(
-            "hello\\n\\n[ognivo] Time limit: 2 s. ognivo stops the turn when it runs out."
-        ),
+    assert_eq!(
+        bodies.lock().unwrap()[0]["messages"][1]["content"],
+        json!("hello\n\n[ognivo] Time limit: 2 s. ognivo stops the turn when it runs out."),
         "the model was not told the limit"
     );
 }

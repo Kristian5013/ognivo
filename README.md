@@ -16,7 +16,8 @@ Code give them: from the user, from every directory down to the project, and fro
 subdirectory once the agent works there, with `@path` imports. Sessions are kept in SQLite
 (`~/.ognivo/data/ognivo.db`) as they go: `chat --resume ID` or `--continue` picks one up
 with its conversation and edit journal, and `ognivo sessions` lists them or finds them by
-words. There is no compaction yet: `/clear` starts the session's next conversation.
+words. When the context fills up, the history is compacted in the middle of a turn: the
+model's summary, ognivo's facts and the last steps replace the rest.
 
 ## Layout
 

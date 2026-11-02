@@ -31,7 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 use ognivo_store::{SessionRow, Store};
 
 use crate::session::{Failure, SessionArgs};
-use crate::view::{self, Paint, Screen, Style, View, duration, printable};
+use crate::view::{self, Paint, Screen, Style, View, duration, kilo, printable};
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -87,7 +87,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
-    let n_ctx = s.server.props().await.ok().and_then(|p| p.n_ctx);
+    let n_ctx = s.opts.n_ctx;
     let screen = Screen::new(Style::detect());
     let terminal = tcgetattr(std::io::stdin()).ok();
     let input = Input::spawn(s.opts.data_dir.join("chat_history"));
@@ -741,14 +741,6 @@ fn declined(action: &str, why: Option<&str>) -> String {
 }
 
 /// `2.1K` above a thousand.
-fn kilo(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}K", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
 /// The line editor on a thread of its own: rustyline blocks, and the agent must not. Off a
 /// terminal it reads plain lines, which is how the tests drive it.
 #[derive(Debug, Clone)]
@@ -883,11 +875,5 @@ mod tests {
         assert_eq!(answer("yy"), None);
         assert_eq!(answer("y please"), None);
         assert_eq!(answer(""), None);
-    }
-
-    #[test]
-    fn sizes() {
-        assert_eq!(kilo(999), "999");
-        assert_eq!(kilo(98_304), "98.3K");
     }
 }
