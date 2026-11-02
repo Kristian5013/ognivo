@@ -36,7 +36,7 @@ pub(crate) fn events(resp: reqwest::Response) -> BoxStream<'static, Result<SseEv
                     None => match bytes.next().await {
                         Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
                         Some(Err(e)) => {
-                            let err = EngineError::Http(e.to_string());
+                            let err = crate::llama::http_err(e);
                             return Some((Err(err), (bytes, buf, true)));
                         }
                         None if buf.trim_ascii().is_empty() => return None,

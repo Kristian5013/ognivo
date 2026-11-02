@@ -82,8 +82,20 @@ impl Props {
     }
 }
 
-fn http_err(e: reqwest::Error) -> EngineError {
-    EngineError::Http(e.to_string())
+/// The error with its causes: reqwest's own message names only the URL, and the cause (a
+/// refused connection, one closed under the request) is what tells failures apart.
+pub(crate) fn http_err(e: reqwest::Error) -> EngineError {
+    let mut text = e.to_string();
+    let mut cause = std::error::Error::source(&e);
+    while let Some(c) = cause {
+        let c_text = c.to_string();
+        if !text.contains(&c_text) {
+            text.push_str(": ");
+            text.push_str(&c_text);
+        }
+        cause = c.source();
+    }
+    EngineError::Http(text)
 }
 
 /// A chat stream that ended without `[DONE]`: cut off, so nothing in it may run.
@@ -121,9 +133,14 @@ impl LlamaServer {
         idle: Option<Duration>,
     ) -> Result<Self, EngineError> {
         // No system proxy: servers are local or on the LAN, and HTTP(S)_PROXY would
-        // otherwise route even loopback traffic through it.
+        // otherwise route even loopback traffic through it. No idle connections kept:
+        // llama-server closes the connection after every stream although its headers offer
+        // keep-alive (its stream callback ends with `false`, which cpp-httplib takes for a
+        // failed write), so a kept one can be gone when the next request goes out. A new
+        // connection to such a server costs nothing next to a generation.
         let mut builder = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
+            .pool_max_idle_per_host(0)
             .no_proxy();
         if let Some(idle) = idle {
             builder = builder.read_timeout(idle);
@@ -334,5 +351,88 @@ mod tests {
         let router = json!({"role": "router", "build_info": "b11924-12cc59ba4", "default_generation_settings": {"n_ctx": 0, "params": {}}});
         let r = Props::from_json(&router);
         assert_eq!((r.role.as_deref(), r.n_ctx), (Some("router"), None));
+    }
+
+    /// Reads one request, headers and a Content-Length body; false at the end of the
+    /// connection.
+    async fn read_request(sock: &mut tokio::net::TcpStream) -> bool {
+        use tokio::io::AsyncReadExt;
+        let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
+        loop {
+            if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                let len = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .map_or(0, |v| v.trim().parse().unwrap());
+                if buf.len() >= end + 4 + len {
+                    return true;
+                }
+            }
+            match sock.read(&mut chunk).await {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+    }
+
+    /// llama-server closes the connection after every stream although its headers offer
+    /// keep-alive, so a pooled connection can be gone when the next request goes out (2 of
+    /// 525 requests in the T2 night of 2026-11-02, each right after a quick tool). This
+    /// server answers the way llama-server does, then keeps the socket open and drops a
+    /// second request on it unanswered: a reused connection fails every time, not now and
+    /// then.
+    #[tokio::test]
+    async fn every_stream_gets_a_connection_of_its_own() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    if !read_request(&mut sock).await {
+                        return;
+                    }
+                    let chunk = json!({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]});
+                    let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nKeep-Alive: timeout=5, max=100\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+                        body.len()
+                    );
+                    sock.write_all(resp.as_bytes()).await.unwrap();
+                    read_request(&mut sock).await;
+                });
+            }
+        });
+        let server = LlamaServer::new(&url, None).unwrap();
+        for i in 0..3 {
+            let stream = server
+                .chat_stream(&json!({"stream": true}), None)
+                .await
+                .unwrap_or_else(|e| panic!("request {i}: {e}"));
+            let events: Vec<_> = stream.collect().await;
+            assert!(
+                events.len() == 1 && events[0].is_ok(),
+                "request {i}: {events:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_names_its_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let e = LlamaServer::new(&url, None)
+            .unwrap()
+            .get("/props")
+            .await
+            .unwrap_err();
+        let text = e.to_string();
+        assert!(
+            text.contains("error sending request for url") && text.contains("refused"),
+            "{text}"
+        );
     }
 }
