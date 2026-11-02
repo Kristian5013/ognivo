@@ -4,8 +4,11 @@
 //! - the messages after every call result and every note: a saved message changes only
 //!   while it is the last one (a note is added to it), so a save rewrites that one and
 //!   adds the new ones;
-//! - the events as they happen, a run of streamed text or reasoning as one event, and the
-//!   user's message, every answer to a question and the end of each turn with them;
+//! - the events as they happen, and with them the user's message, every answer to a
+//!   question, the end of each turn, each generation whole (its text, reasoning, calls,
+//!   tokens and timing, and a hash of what it was asked) and the start of each conversation
+//!   with its system prompt; streamed text and reasoning are kept as such only when their
+//!   generation did not finish;
 //! - the edit journal after every call that changed it, file contents as blobs.
 //!
 //! When the store fails, the session goes on in memory, and [`Session::failure`] says so
@@ -14,7 +17,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use ognivo_models::ChatMessage;
+use std::time::Duration;
+
+use ognivo_models::{ChatMessage, FinishReason, Finished, Outcome};
 use ognivo_store::{JournalChanges, NewSession, SavedJournal, SessionId, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,8 +48,8 @@ pub struct Session {
     looked: HashSet<PathBuf>,
     /// The conversation's notes as saved.
     notes: String,
-    /// Streamed text or reasoning not in the log yet.
-    pending: Option<(&'static str, String)>,
+    /// Streamed text and reasoning of the running generation, in runs.
+    pending: Vec<(&'static str, String)>,
     failed: bool,
     /// The store's first failure, until it is reported.
     failure: Option<String>,
@@ -146,7 +151,7 @@ impl Session {
             seen: HashSet::new(),
             looked: HashSet::new(),
             notes: String::new(),
-            pending: None,
+            pending: Vec::new(),
             failed: false,
             failure: None,
         }
@@ -174,10 +179,30 @@ impl Session {
         }
     }
 
-    /// Starts the next conversation with its first messages.
-    pub(crate) fn start_conversation(&mut self, messages: &[ChatMessage], notes: &Notes) {
+    /// Starts the next conversation with its first messages; `reason`: `start`, `clear`
+    /// or `compaction`.
+    pub(crate) fn start_conversation(
+        &mut self,
+        messages: &[ChatMessage],
+        notes: &Notes,
+        reason: &str,
+    ) {
         self.flush();
         self.conversation += 1;
+        let text = |m: Option<&ChatMessage>| match m {
+            Some(ChatMessage::System(t) | ChatMessage::User(t)) => Some(t.clone()),
+            _ => None,
+        };
+        let mut event = json!({
+            "type": "conversation",
+            "n": self.conversation,
+            "reason": reason,
+            "system": text(messages.first()),
+        });
+        if reason == "compaction" {
+            event["note"] = json!(text(messages.get(1)));
+        }
+        self.append(event);
         self.saved = 0;
         self.last = None;
         self.seen.clear();
@@ -342,18 +367,64 @@ impl Session {
         self.ok(r);
     }
 
+    /// One finished generation: what it said and called, what it cost, and a hash of what it
+    /// was asked. The text and reasoning streamed for it are in here, so they are dropped.
+    pub(crate) fn generation(
+        &mut self,
+        purpose: &str,
+        f: &Finished,
+        prompt_hash: &str,
+        took: Duration,
+    ) {
+        self.pending.clear();
+        let call = |c: &ognivo_models::ToolCall| json!({"id": c.id, "name": c.name, "arguments": c.arguments});
+        let (outcome, run, rejected): (
+            &str,
+            &[ognivo_models::ToolCall],
+            &[ognivo_models::ToolCall],
+        ) = match &f.outcome {
+            Outcome::Calls(calls) => ("calls", calls.calls(), &[]),
+            Outcome::Answer => ("answer", &[], &[]),
+            Outcome::Truncated { partial } => ("truncated", &[], partial),
+            Outcome::Repeating { partial, .. } => ("repeating", &[], partial),
+            Outcome::Malformed { calls, .. } => ("malformed", &[], calls),
+        };
+        let finish = f.finish.as_ref().map(|r| match r {
+            FinishReason::Stop => "stop".to_owned(),
+            FinishReason::ToolCalls => "tool_calls".to_owned(),
+            FinishReason::Length => "length".to_owned(),
+            FinishReason::Other(other) => other.clone(),
+        });
+        self.append(json!({
+            "type": "generation",
+            "purpose": purpose,
+            "outcome": outcome,
+            "finish": finish,
+            "seed": f.seed,
+            "content": f.content,
+            "reasoning": f.reasoning,
+            "tool_calls": run.iter().map(call).collect::<Vec<_>>(),
+            "rejected_calls": rejected.iter().map(call).collect::<Vec<_>>(),
+            "prompt_tokens": f.usage.prompt_n,
+            "cached_tokens": f.usage.cache_n,
+            "completion_tokens": f.usage.predicted_n,
+            "prompt_ms": f.usage.prompt_ms,
+            "generation_ms": f.usage.predicted_ms,
+            "ms": took.as_millis() as u64,
+            "prompt_hash": prompt_hash,
+        }));
+    }
+
     fn pend(&mut self, kind: &'static str, text: &str) {
-        match &mut self.pending {
+        match self.pending.last_mut() {
             Some((k, run)) if *k == kind => run.push_str(text),
-            _ => {
-                self.flush();
-                self.pending = Some((kind, text.to_owned()));
-            }
+            _ => self.pending.push((kind, text.to_owned())),
         }
     }
 
+    /// What a generation streamed before it was cut off.
     fn flush(&mut self) {
-        if let Some((kind, text)) = self.pending.take() {
+        for (kind, text) in std::mem::take(&mut self.pending) {
             self.append(json!({"type": kind, "text": text}));
         }
     }

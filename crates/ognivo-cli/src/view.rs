@@ -72,6 +72,7 @@ impl View {
                 tool,
                 arguments,
                 call,
+                ..
             } => self.started(&tool, &arguments, call.as_ref()),
             AgentEvent::FileChanged {
                 path,

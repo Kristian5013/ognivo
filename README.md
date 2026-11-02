@@ -20,7 +20,9 @@ words. When the context fills up, the history is compacted in the middle of a tu
 model's summary, ognivo's facts and the last steps replace the rest. Permission rules come
 from `~/.ognivo/config.toml` and the project, in Claude Code's syntax and from its
 `settings.json` files too (deny > ask > allow); a project's allow rules count once you
-trust them.
+trust them. Shell commands are parsed with tree-sitter-bash. Every session can be
+exported as an ATIF trajectory (`ognivo sessions --atif ID`, `ognivo run --atif FILE`),
+the `trajectory.json` Harbor reads.
 
 ## Layout
 

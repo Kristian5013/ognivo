@@ -128,6 +128,8 @@ pub enum AgentEvent {
         reason: String,
     },
     ToolStarted {
+        /// The model's id for the call.
+        id: String,
         tool: String,
         arguments: String,
         /// The call as ognivo runs it; `None` when the arguments do not parse.
@@ -142,6 +144,7 @@ pub enum AgentEvent {
         hunks: Vec<Hunk>,
     },
     ToolFinished {
+        id: String,
         tool: String,
         result: String,
     },
@@ -295,6 +298,13 @@ impl Clock {
     }
 }
 
+/// What the agent asked the model, as a fingerprint for traces: sha256 of its messages
+/// and tools as JSON.
+fn prompt_hash(req: &StepRequest) -> String {
+    let body = json!({"messages": req.messages, "tools": req.tools}).to_string();
+    format!("sha256:{}", ognivo_models::template::sha256_hex(&body))
+}
+
 /// `15.9K` tokens.
 fn about_tokens(n: u64) -> String {
     format!("{:.1}K", n as f64 / 1000.0)
@@ -431,7 +441,7 @@ impl Agent {
 
     /// Keeps this new agent's session in `session` from now on.
     pub fn keep_in(&mut self, mut session: Session) {
-        session.start_conversation(&self.messages, &self.notes());
+        session.start_conversation(&self.messages, &self.notes(), "start");
         self.session = Some(session);
         self.save();
     }
@@ -462,7 +472,7 @@ impl Agent {
         }
         agent.stats = stats;
         if messages.is_empty() {
-            session.start_conversation(&agent.messages, &agent.notes());
+            session.start_conversation(&agent.messages, &agent.notes(), "start");
         } else {
             agent.messages = messages;
             agent.prompt_instructions = Load {
@@ -643,7 +653,7 @@ impl Agent {
         self.requests.clear();
         let notes = self.notes();
         if let Some(s) = self.session.as_mut() {
-            s.start_conversation(&self.messages, &notes);
+            s.start_conversation(&self.messages, &notes, "clear");
         }
         self.save();
     }
@@ -721,13 +731,17 @@ impl Agent {
     }
 
     /// Runs one generation to its end, showing its text and reasoning through `on` when
-    /// given. `None`: the deadline passed, and dropping the stream cancelled it.
+    /// given, and keeps it in the session's log under `purpose`. `None`: the deadline
+    /// passed, and dropping the stream cancelled it.
     async fn generate(
         &mut self,
         req: StepRequest,
         deadline: Option<Instant>,
         mut on: Option<&mut (dyn FnMut(AgentEvent) + Send)>,
+        purpose: &str,
     ) -> Result<Option<Finished>, DriverError> {
+        let prompt_hash = self.session.is_some().then(|| prompt_hash(&req));
+        let started = Instant::now();
         let mut events = self.driver.step(req);
         let mut finished = None;
         loop {
@@ -762,6 +776,9 @@ impl Agent {
         self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
         self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
         self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
+        if let (Some(s), Some(hash)) = (self.session.as_mut(), prompt_hash) {
+            s.generation(purpose, &f, &hash, started.elapsed());
+        }
         Ok(Some(f))
     }
 
@@ -823,7 +840,7 @@ impl Agent {
         let mut messages = self.messages.clone();
         messages.push(ChatMessage::User(compact::SUMMARY_REQUEST.to_owned()));
         let req = self.request(ToolChoice::None, messages);
-        let summary = match self.generate(req, deadline, None).await? {
+        let summary = match self.generate(req, deadline, None, "summary").await? {
             None => return Ok(Some(TurnEnd::TimeLimit)),
             Some(f) => match f.outcome {
                 Outcome::Answer if !f.content.trim().is_empty() => Some(f.content),
@@ -852,7 +869,7 @@ impl Agent {
         // a new cache epoch: the session's next conversation
         let notes = self.notes();
         if let Some(s) = self.session.as_mut() {
-            s.start_conversation(&self.messages, &notes);
+            s.start_conversation(&self.messages, &notes, "compaction");
         }
         self.save();
         self.emit(
@@ -974,7 +991,7 @@ impl Agent {
                 return Ok(end);
             }
             let req = self.request(ToolChoice::Auto, self.messages.clone());
-            let Some(f) = self.generate(req, deadline, Some(&mut *on)).await? else {
+            let Some(f) = self.generate(req, deadline, Some(&mut *on), "step").await? else {
                 return Ok(TurnEnd::TimeLimit);
             };
             if let Some(prompt) = f.usage.prompt_n {
@@ -1129,6 +1146,7 @@ impl Agent {
         self.emit(
             on,
             AgentEvent::ToolStarted {
+                id: call.id.clone(),
                 tool: call.name.clone(),
                 arguments: call.arguments.clone(),
                 call: parsed.as_ref().ok().cloned(),
@@ -1192,6 +1210,7 @@ impl Agent {
         self.emit(
             on,
             AgentEvent::ToolFinished {
+                id: call.id.clone(),
                 tool: call.name.clone(),
                 result: result.clone(),
             },
@@ -2653,10 +2672,13 @@ mod tests {
         assert_eq!(
             event_kinds(&root, id),
             [
+                "conversation",
                 "user",
+                "generation",
                 "tool_started",
                 "file_changed",
                 "tool_finished",
+                "generation",
                 "end"
             ]
         );
@@ -2996,5 +3018,241 @@ mod tests {
             results[2]
         );
         assert_eq!(r.agent.stats.refused, 1);
+    }
+
+    /// What Harbor's ATIF models accept (harbor.models.trajectories, `extra: forbid`).
+    fn atif_shape(v: &serde_json::Value) -> Result<(), String> {
+        let only = |v: &serde_json::Value, keys: &[&str], what: &str| -> Result<(), String> {
+            let m = v.as_object().ok_or(format!("{what} is not an object"))?;
+            match m.keys().find(|k| !keys.contains(&k.as_str())) {
+                Some(k) => Err(format!("{what} has {k}")),
+                None => Ok(()),
+            }
+        };
+        only(
+            v,
+            &[
+                "schema_version",
+                "session_id",
+                "trajectory_id",
+                "agent",
+                "steps",
+                "notes",
+                "final_metrics",
+                "continued_trajectory_ref",
+                "extra",
+                "subagent_trajectories",
+            ],
+            "trajectory",
+        )?;
+        only(
+            &v["agent"],
+            &["name", "version", "model_name", "tool_definitions", "extra"],
+            "agent",
+        )?;
+        let steps = v["steps"].as_array().ok_or("no steps")?;
+        if steps.is_empty() {
+            return Err("no steps".into());
+        }
+        for (i, s) in steps.iter().enumerate() {
+            only(
+                s,
+                &[
+                    "step_id",
+                    "timestamp",
+                    "source",
+                    "model_name",
+                    "reasoning_effort",
+                    "message",
+                    "reasoning_content",
+                    "tool_calls",
+                    "observation",
+                    "metrics",
+                    "is_copied_context",
+                    "llm_call_count",
+                    "extra",
+                ],
+                "step",
+            )?;
+            if s["step_id"] != serde_json::json!(i + 1) {
+                return Err(format!("step {i} has id {}", s["step_id"]));
+            }
+            if !s["message"].is_string()
+                || !s["timestamp"].as_str().is_some_and(|t| t.ends_with('Z'))
+            {
+                return Err(format!("step {i}: {s}"));
+            }
+            match s["source"].as_str() {
+                Some("agent") => {}
+                Some("system" | "user") => {
+                    for f in [
+                        "model_name",
+                        "reasoning_effort",
+                        "reasoning_content",
+                        "tool_calls",
+                        "metrics",
+                    ] {
+                        if !s[f].is_null() {
+                            return Err(format!("step {i} is not the agent's but has {f}"));
+                        }
+                    }
+                }
+                _ => return Err(format!("step {i} has source {}", s["source"])),
+            }
+            let ids: Vec<&serde_json::Value> = s["tool_calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|c| {
+                    only(
+                        c,
+                        &["tool_call_id", "function_name", "arguments", "extra"],
+                        "tool call",
+                    )
+                    .and_then(|()| {
+                        if c["arguments"].is_object() {
+                            Ok(&c["tool_call_id"])
+                        } else {
+                            Err("arguments".into())
+                        }
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            if !s["observation"].is_null() {
+                only(&s["observation"], &["results"], "observation")?;
+                for r in s["observation"]["results"].as_array().ok_or("results")? {
+                    only(
+                        r,
+                        &[
+                            "source_call_id",
+                            "content",
+                            "subagent_trajectory_ref",
+                            "extra",
+                        ],
+                        "result",
+                    )?;
+                    if !r["source_call_id"].is_null() && !ids.contains(&&r["source_call_id"]) {
+                        return Err(format!("step {i}: result for an unknown call"));
+                    }
+                }
+            }
+            if !s["metrics"].is_null() {
+                only(
+                    &s["metrics"],
+                    &[
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "cached_tokens",
+                        "cost_usd",
+                        "prompt_token_ids",
+                        "completion_token_ids",
+                        "logprobs",
+                        "extra",
+                    ],
+                    "metrics",
+                )?;
+            }
+        }
+        only(
+            &v["final_metrics"],
+            &[
+                "total_prompt_tokens",
+                "total_completion_tokens",
+                "total_cached_tokens",
+                "total_cost_usd",
+                "total_steps",
+                "extra",
+            ],
+            "final metrics",
+        )
+    }
+
+    #[tokio::test]
+    async fn a_session_becomes_an_atif_trajectory() {
+        let mut read = calls(
+            &[("read", serde_json::json!({"path": "lib.rs"}))],
+            FinishReason::ToolCalls,
+        );
+        read.reasoning = "look first".into();
+        read.usage.prompt_n = Some(900);
+        read.usage.cache_n = Some(100);
+        read.usage.predicted_n = Some(30);
+        let mut done = answer("done");
+        done.usage.prompt_n = Some(50);
+        done.usage.cache_n = Some(1000);
+        done.usage.predicted_n = Some(5);
+        let mut r = agent(vec![read, edit_lib(), done], WorkspaceState::CLEAN);
+        let id = kept(&mut r);
+        answered(turn(&mut r).await.0);
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        drop(agent);
+        let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
+        let t = crate::trace::atif(&store, id).unwrap();
+        atif_shape(&t).unwrap();
+        assert_eq!(t["schema_version"], "ATIF-v1.7");
+        assert_eq!(t["agent"]["name"], "ognivo");
+        assert_eq!(t["agent"]["model_name"], "gpt-oss-20b");
+        assert!(t["agent"]["tool_definitions"].as_array().unwrap().len() >= 5);
+        let steps = t["steps"].as_array().unwrap();
+        let sources: Vec<&str> = steps
+            .iter()
+            .map(|s| s["source"].as_str().unwrap())
+            .collect();
+        assert_eq!(sources, ["system", "user", "agent", "agent", "agent"]);
+        assert!(
+            steps[0]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("You are ognivo")
+        );
+        assert_eq!(steps[1]["message"], "fix it");
+        // the read: its reasoning, its call and the result, its tokens (cached ones counted)
+        let first = &steps[2];
+        assert_eq!(first["reasoning_content"], "look first");
+        assert_eq!(first["tool_calls"][0]["function_name"], "read");
+        assert_eq!(
+            first["tool_calls"][0]["arguments"],
+            serde_json::json!({"path": "lib.rs"})
+        );
+        let result = &first["observation"]["results"][0];
+        assert_eq!(
+            result["source_call_id"],
+            first["tool_calls"][0]["tool_call_id"]
+        );
+        assert!(
+            result["content"]
+                .as_str()
+                .unwrap()
+                .starts_with("[read: lib.rs")
+        );
+        assert_eq!(
+            first["metrics"],
+            serde_json::json!({"prompt_tokens": 1000, "cached_tokens": 100, "completion_tokens": 30})
+        );
+        assert_eq!(first["llm_call_count"], 1);
+        assert!(
+            first["extra"]["prompt_hash"]
+                .as_str()
+                .unwrap()
+                .starts_with("sha256:")
+        );
+        assert_eq!(first["extra"]["outcome"], "calls");
+        // the edit's change, and the answer
+        assert_eq!(
+            steps[3]["extra"]["changes"],
+            serde_json::json!([{"path": "lib.rs", "created": false, "added": 1, "removed": 1}])
+        );
+        assert_eq!(steps[4]["message"], "done");
+        assert_eq!(t["final_metrics"]["total_prompt_tokens"], 2050);
+        assert_eq!(t["final_metrics"]["total_cached_tokens"], 1100);
+        assert_eq!(t["final_metrics"]["total_steps"], 5);
+        assert_eq!(t["extra"]["ognivo"]["turns"][0]["end"], "answer");
+        // the same request asks for the same hash; another one does not
+        assert_ne!(
+            steps[2]["extra"]["prompt_hash"],
+            steps[3]["extra"]["prompt_hash"]
+        );
     }
 }

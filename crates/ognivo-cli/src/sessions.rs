@@ -1,6 +1,7 @@
 //! `ognivo sessions`: the sessions in the store, the most recent first: those of this
 //! project, of every project with `--all`, or those whose messages and answers hold some
-//! words with `--search`. `ognivo chat --resume ID` goes on with one.
+//! words with `--search`. `ognivo chat --resume ID` goes on with one, and `--atif ID`
+//! prints one's trajectory in ATIF.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -31,10 +32,17 @@ pub struct SessionsArgs {
     /// Sessions to show at most
     #[arg(long, default_value_t = 20)]
     limit: u32,
+    /// Print this session's trajectory in ATIF (Harbor's trajectory.json) instead
+    #[arg(long, value_name = "ID")]
+    atif: Option<i64>,
 }
 
 pub fn sessions(a: SessionsArgs) -> anyhow::Result<ExitCode> {
-    match list(&a) {
+    let out = match a.atif {
+        Some(id) => trajectory(&a, id),
+        None => list(&a),
+    };
+    match out {
         Ok(lines) => {
             for line in lines {
                 println!("{line}");
@@ -46,6 +54,14 @@ pub fn sessions(a: SessionsArgs) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(f.code))
         }
     }
+}
+
+fn trajectory(a: &SessionsArgs, id: i64) -> Result<Vec<String>, Failure> {
+    let store = session::open_store(&session::data_dir(a.data_dir.as_deref())?)?;
+    let t = ognivo_core::trace::atif(&store, id).map_err(Failure::usage)?;
+    Ok(vec![
+        serde_json::to_string_pretty(&t).map_err(Failure::usage)?,
+    ])
 }
 
 fn list(a: &SessionsArgs) -> Result<Vec<String>, Failure> {

@@ -47,6 +47,8 @@ async fn reads_edits_and_answers() {
             .arg(dir.path().join("data"))
             .arg("--cwd")
             .arg(&root)
+            .arg("--atif")
+            .arg(dir.path().join("trajectory.json"))
             .env("HOME", dir.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
@@ -113,6 +115,31 @@ async fn reads_edits_and_answers() {
         (bodies[0]["seed"].clone(), bodies[2]["seed"].clone()),
         (json!(6), json!(8))
     );
+    drop(bodies);
+
+    // the trajectory in ATIF, the same as the store gives it later
+    let text = std::fs::read_to_string(_dir.path().join("trajectory.json")).unwrap();
+    let t: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(t["schema_version"], json!("ATIF-v1.7"));
+    let sources: Vec<&str> = t["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["source"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, ["system", "user", "agent", "agent", "agent"]);
+    assert_eq!(t["steps"][4]["message"], json!("Changed the greeting."));
+    let later = Command::new(env!("CARGO_BIN_EXE_ognivo"))
+        .args(["sessions", "--atif", "1", "--data-dir"])
+        .arg(_dir.path().join("data"))
+        .output()
+        .unwrap();
+    assert!(
+        later.status.success(),
+        "{}",
+        String::from_utf8_lossy(&later.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&later.stdout), text);
 }
 
 #[test]

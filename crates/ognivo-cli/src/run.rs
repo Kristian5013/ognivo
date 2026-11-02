@@ -2,8 +2,8 @@
 //! as the M0 harness passes it; the final answer goes to stdout, followed by ognivo's own
 //! verification status (what the turn's tool calls show, not what the answer claims).
 //!
-//! The run is kept in the session store like a chat (`ognivo sessions` lists it), and the
-//! end event names its session.
+//! The run is kept in the session store like a chat (`ognivo sessions` lists it), the end
+//! event names its session, and `--atif FILE` writes its trajectory in ATIF for Harbor.
 //!
 //! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
 //! 3 the server failed; 124 the time limit ran out (as with `timeout`); 128 + N stopped by
@@ -12,7 +12,7 @@
 //! end event carries the verification status of what was done.
 
 use std::io::{Read as _, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -39,6 +39,9 @@ pub struct RunArgs {
     /// Events as JSON lines on stdout instead of text
     #[arg(long)]
     jsonl: bool,
+    /// Write the run's trajectory in ATIF (Harbor's trajectory.json) to this file at the end
+    #[arg(long, value_name = "FILE")]
+    atif: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -127,6 +130,9 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     if let Some(e) = agent.store_failure() {
         eprintln!("ognivo run: the session store failed: {e}; the session is not saved in full");
     }
+    if let (Some(file), Some(id)) = (&a.atif, session) {
+        write_trajectory(&a.session, id, file);
+    }
     let stats = serde_json::to_value(&agent.stats)?;
     let verification = serde_json::to_value(agent.verification())?;
     let end = match end {
@@ -185,6 +191,21 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         );
     }
     Ok(ExitCode::from(code))
+}
+
+/// Writes the trajectory of session `id`; a failure is reported and changes no exit code.
+fn write_trajectory(args: &SessionArgs, id: ognivo_store::SessionId, file: &Path) {
+    let written = args
+        .store()
+        .map_err(|f| f.message)
+        .and_then(|store| ognivo_core::trace::atif(&store, id).map_err(|e| e.to_string()))
+        .and_then(|t| {
+            let text = serde_json::to_string_pretty(&t).map_err(|e| e.to_string())? + "\n";
+            std::fs::write(file, text).map_err(|e| format!("{}: {e}", file.display()))
+        });
+    if let Err(e) = written {
+        eprintln!("ognivo run: the trajectory is not written: {e}");
+    }
 }
 
 /// Text mode: the model's words on stdout as they stream, tool activity on stderr.
