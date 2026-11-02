@@ -646,7 +646,9 @@ pub fn parse(family: Family, name: &str, arguments: &str) -> Result<Call, ArgErr
         ToolId::Grep => Call::Grep {
             pattern: req("pattern"),
             path: s("path"),
-            glob: s("glob"),
+            // models fill optional fields with "": an empty filter is no filter, not one
+            // that no file matches
+            glob: s("glob").filter(|g| !g.trim().is_empty()),
         },
         ToolId::Glob => Call::Glob {
             pattern: req("pattern"),
@@ -751,6 +753,28 @@ mod tests {
                 timeout: Some(Duration::from_secs(7))
             }
         );
+    }
+
+    #[test]
+    fn an_empty_file_filter_filters_nothing() {
+        // the second three-model run of 2026-11-02: gpt-oss sent `"glob": ""`, grep found
+        // nothing in files that had the name, and the model searched again until the limit
+        for (family, name) in [
+            (Family::Harmony, "grep"),
+            (Family::Gemma4, "grep"),
+            (Family::QwenXml, "Grep"),
+        ] {
+            let g = parse(family, name, r#"{"pattern":"calc_total","glob":" "}"#).unwrap();
+            assert_eq!(
+                g,
+                Call::Grep {
+                    pattern: "calc_total".into(),
+                    path: None,
+                    glob: None
+                },
+                "{family}"
+            );
+        }
     }
 
     #[test]
