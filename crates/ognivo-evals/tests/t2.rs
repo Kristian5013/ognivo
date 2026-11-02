@@ -147,3 +147,39 @@ async fn a_cut_generation_counts_against_parse_ok_and_runs_nothing() {
         (2, 1, 1, 0)
     );
 }
+
+#[tokio::test]
+async fn a_refused_call_is_not_a_tool_that_ran() {
+    let p = profile("gpt-oss-20b");
+    let s = scenario("shell-run-script");
+    let out = tempfile::tempdir().unwrap();
+    let replies = [
+        // the project's script runs headless on a clean project
+        Gen::calls(
+            "",
+            &[("c1", "shell", json!({"command": "bash scripts/info.sh"}))],
+        ),
+        Gen::answer("", "It prints version 3.14.15."),
+        // a command that may change things is refused, and the answer comes from reading
+        Gen::calls(
+            "",
+            &[("c1", "shell", json!({"command": "rm -rf scripts/cache"}))],
+        ),
+        Gen::answer("", "The script would print version 3.14.15."),
+    ];
+    let server = Server::start(replies.into_iter().map(Reply::Stream).collect()).await;
+    let target = Target {
+        url: server.url.clone(),
+        profile: p,
+        n_ctx: None,
+    };
+    let ran = t2::run(&s, &target, 1, out.path()).await.unwrap();
+    assert!(ran.passed, "{:?}", ran.failures);
+    assert_eq!(ran.tools, ["Bash"]);
+    assert!(ran.refused.is_empty());
+
+    let refused = t2::run(&s, &target, 2, out.path()).await.unwrap();
+    assert!(!refused.passed);
+    assert_eq!(refused.refused, ["Bash"]);
+    assert_eq!(refused.failures, [r#"used none of ["Bash"] (used [])"#]);
+}

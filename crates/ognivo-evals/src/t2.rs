@@ -127,7 +127,7 @@ pub struct Expect {
     /// Words the answer must hold, at least one.
     #[serde(default)]
     pub answer_any: Vec<String>,
-    /// One of these tools must be used.
+    /// One of these tools must run (a call refused for want of approval does not count).
     #[serde(default)]
     pub tools: Vec<String>,
     /// The answer comes without any call.
@@ -276,9 +276,12 @@ pub struct RunResult {
     /// `answer`, `step_limit`, `stuck`, `time_limit` or `error`.
     pub end: String,
     pub answer: Option<String>,
-    /// The tools it took, in order: Claude Code's names, or the model's own when a call
+    /// The tools that ran, in order: Claude Code's names, or the model's own when a call
     /// did not parse.
     pub tools: Vec<String>,
+    /// The calls refused for want of a user's approval.
+    #[serde(default)]
+    pub refused: Vec<String>,
     pub counts: Counts,
     pub stats: Stats,
     pub ms: u64,
@@ -357,11 +360,16 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     let mut agent = Agent::new(Box::new(driver), t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);
 
-    let mut tools = Vec::new();
-    let mut on = |e: AgentEvent| {
-        if let AgentEvent::ToolStarted { tool, call, .. } = e {
-            tools.push(call.map_or(tool, |c| c.id().canonical_name()));
+    let mut calls: Vec<(String, String)> = Vec::new();
+    let mut refused_ids: HashSet<String> = HashSet::new();
+    let mut on = |e: AgentEvent| match e {
+        AgentEvent::ToolStarted { id, tool, call, .. } => {
+            calls.push((id, call.map_or(tool, |c| c.id().canonical_name())));
         }
+        AgentEvent::ToolFinished { id, result, .. } if result.starts_with("[refused]") => {
+            refused_ids.insert(id);
+        }
+        _ => {}
     };
     let started = Instant::now();
     let end = agent.turn(&s.prompt, &mut on).await;
@@ -369,7 +377,12 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     let stats = agent.stats.clone();
     let id = agent.close();
 
-    let failures = judge(&s, &root, &fixtures, &end, &tools);
+    let (ran, refused): (Vec<_>, Vec<_>) = calls
+        .into_iter()
+        .partition(|(id, _)| !refused_ids.contains(id));
+    let tools: Vec<String> = ran.into_iter().map(|(_, name)| name).collect();
+    let refused: Vec<String> = refused.into_iter().map(|(_, name)| name).collect();
+    let failures = judge(&s, &root, &fixtures, &end, &tools, &refused);
     let mut counts = Counts::default();
     if matches!(end, Err(DriverError::Format { .. })) {
         counts.attempts += 1;
@@ -406,6 +419,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         end: end.into(),
         answer,
         tools,
+        refused,
         counts,
         stats,
         ms,
@@ -420,6 +434,7 @@ fn judge(
     fixtures: &BTreeMap<String, String>,
     end: &Result<TurnEnd, DriverError>,
     tools: &[String],
+    refused: &[String],
 ) -> Vec<String> {
     let e = &s.expect;
     let mut out = Vec::new();
@@ -492,8 +507,9 @@ fn judge(
     if !e.tools.is_empty() && !tools.iter().any(|t| e.tools.contains(t)) {
         out.push(format!("used none of {:?} (used {tools:?})", e.tools));
     }
-    if e.no_calls && !tools.is_empty() {
-        out.push(format!("called {tools:?} where no call was needed"));
+    if e.no_calls && !(tools.is_empty() && refused.is_empty()) {
+        let all = [tools, refused].concat();
+        out.push(format!("called {all:?} where no call was needed"));
     }
     out
 }

@@ -151,7 +151,15 @@ async fn suite(a: &Args) -> Result<Summary, String> {
                 if r.passed { "pass" } else { "FAIL" },
                 format!("{}.{seed}", s.id),
                 r.ms as f64 / 1000.0,
-                if r.passed { r.tools.join(" ") } else { why }
+                if r.passed {
+                    let mut line = r.tools.join(" ");
+                    if !r.refused.is_empty() {
+                        line.push_str(&format!(" · refused {}", r.refused.join(" ")));
+                    }
+                    line
+                } else {
+                    why
+                }
             );
             let mut f = std::fs::OpenOptions::new()
                 .create(true)

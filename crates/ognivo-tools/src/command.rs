@@ -14,10 +14,13 @@
 //!   they may run in;
 //! - wrappers are seen through: `timeout`, `nice`, `time`, `env` without settings, and
 //!   `bash -c` or `sh -c` with a script that is classified the same way;
-//! - each option is on the tool's allowlist, and each path argument resolves, symlinks
-//!   included, to a location inside the project root;
-//! - for `cat`/`head`/`tail`/`wc`, each path is an existing regular file (no FIFOs, devices
-//!   or links to `/dev/zero`).
+//! - each option is on the tool's allowlist (getopt tools also take short flags together,
+//!   `-la`, `-rn`), and each path argument resolves, symlinks included, to a location inside
+//!   the project root;
+//! - for `cat`/`head`/`tail`/`wc` and the hex dumpers, each path is an existing regular
+//!   file (no FIFOs, devices or links to `/dev/zero`);
+//! - a script of the project (`bash x.sh`, `python3 x.py`, `./x.sh`) is project code when it
+//!   is a regular file inside the root and its arguments that are not options stay inside.
 //!
 //! The classifier only decides whether to ask. The executor must also run commands in a
 //! hermetic form: git with `-c core.fsmonitor=false --no-pager` (plus `--no-ext-diff
@@ -34,6 +37,8 @@ use crate::Effect;
 
 /// `bash -c` inside `bash -c`, at most.
 const MAX_NESTING: usize = 3;
+/// Programs whose first argument is a script for them to run.
+const INTERPRETERS: [&str; 7] = ["bash", "sh", "python", "python3", "node", "ruby", "perl"];
 
 /// Where a command would run.
 #[derive(Debug, Clone)]
@@ -80,6 +85,10 @@ struct Spec {
     numeric_prefixes: &'static [&'static str],
     /// Positional arguments must be existing regular files.
     files_only: bool,
+    /// Short flags may come together (`-la`): the tool parses options with getopt.
+    clusters: bool,
+    /// Positional arguments at most.
+    max_positional: usize,
 }
 
 const NONE: &[&str] = &[];
@@ -95,6 +104,20 @@ fn s(
         with_value,
         numeric_prefixes,
         files_only,
+        clusters: false,
+        max_positional: usize::MAX,
+    }
+}
+
+impl Spec {
+    fn clustered(mut self) -> Self {
+        self.clusters = true;
+        self
+    }
+
+    fn at_most(mut self, n: usize) -> Self {
+        self.max_positional = n;
+        self
     }
 }
 
@@ -193,13 +216,14 @@ fn spec_for(words: &[&str]) -> Option<(Spec, usize)> {
         ["ls", ..] => (
             s(
                 &[
-                    "-l", "-a", "-la", "-al", "-lh", "-lah", "-h", "-1", "-R", "-t", "-S", "-r",
-                    "-d",
+                    "-l", "-a", "-A", "-h", "-1", "-R", "-t", "-S", "-r", "-d", "-F", "-p", "-i",
+                    "-s", "-n",
                 ],
                 NONE,
                 NONE,
                 false,
-            ),
+            )
+            .clustered(),
             1,
         ),
         ["pwd"] => (s(NONE, NONE, NONE, false), 1),
@@ -209,14 +233,61 @@ fn spec_for(words: &[&str]) -> Option<(Spec, usize)> {
                 &["-k", "-t"],
                 NONE,
                 false,
-            ),
+            )
+            .clustered(),
             1,
         ),
-        ["uniq", ..] => (s(&["-c", "-d", "-u", "-i"], NONE, NONE, false), 1),
+        ["uniq", ..] => (
+            s(&["-c", "-d", "-u", "-i"], NONE, NONE, false).clustered(),
+            1,
+        ),
         ["cut", ..] => (s(NONE, &["-d", "-f", "-c", "-b"], NONE, false), 1),
-        ["cat", ..] => (s(&["-n"], NONE, NONE, true), 1),
+        ["cat", ..] => (
+            s(
+                &["-n", "-b", "-A", "-v", "-e", "-E", "-t", "-T", "-s"],
+                NONE,
+                NONE,
+                true,
+            )
+            .clustered(),
+            1,
+        ),
         ["head" | "tail", ..] => (s(NONE, &["-n", "-c"], &["-n", "-c", "-"], true), 1),
-        ["wc", ..] => (s(&["-l", "-w", "-c", "-m"], NONE, NONE, true), 1),
+        ["wc", ..] => (
+            s(&["-l", "-w", "-c", "-m"], NONE, NONE, true).clustered(),
+            1,
+        ),
+        ["hexdump", ..] => (
+            s(
+                &["-C", "-c", "-b", "-d", "-o", "-x", "-v"],
+                &["-n", "-s"],
+                NONE,
+                true,
+            )
+            .clustered(),
+            1,
+        ),
+        ["od", ..] => (
+            s(
+                &["-c", "-a", "-b", "-d", "-o", "-x", "-v"],
+                &["-A", "-t", "-N", "-j"],
+                NONE,
+                true,
+            )
+            .clustered(),
+            1,
+        ),
+        // `xxd IN OUT` writes OUT, and `-r` turns a dump back into a file
+        ["xxd", ..] => (
+            s(
+                &["-p", "-u", "-b", "-e", "-i"],
+                &["-l", "-s", "-c", "-g"],
+                NONE,
+                true,
+            )
+            .at_most(1),
+            1,
+        ),
         ["rg", ..] => (
             s(
                 &[
@@ -259,7 +330,8 @@ fn spec_for(words: &[&str]) -> Option<(Spec, usize)> {
                 ],
                 &["-A", "-B", "-C", "-m"],
                 false,
-            ),
+            )
+            .clustered(),
             1,
         ),
         // -r does not follow symlinks; -R does and is not listed
@@ -272,7 +344,8 @@ fn spec_for(words: &[&str]) -> Option<(Spec, usize)> {
                 &["-e", "-m", "-A", "-B", "-C"],
                 &["-A", "-B", "-C", "-m"],
                 false,
-            ),
+            )
+            .clustered(),
             1,
         ),
         ["find", ..] => (
@@ -787,11 +860,47 @@ fn plain(words: &[&str], root: &Path, cwds: &[PathBuf], depth: usize) -> Effect 
         // `cd` inside a wrapper moves nothing the agent sees
         ["cd", ..] => Effect::SideEffects,
         ["echo", ..] | ["true"] | ["false"] => Effect::ReadOnly,
+        ["python" | "python3", "-m", "pytest", rest @ ..] => {
+            let mut inner = vec!["pytest"];
+            inner.extend_from_slice(rest);
+            plain(&inner, root, cwds, depth)
+        }
+        [interpreter, file, args @ ..]
+            if INTERPRETERS.contains(interpreter) && !file.starts_with('-') =>
+        {
+            script(file, args, root, cwds)
+        }
+        [path, args @ ..] if path.contains('/') => script(path, args, root, cwds),
         _ => cwds
             .iter()
             .map(|cwd| tool(words, root, cwd))
             .fold(Effect::ReadOnly, worse),
     }
+}
+
+/// A script of the project, run from each of `cwds`: project code when it is a regular file
+/// inside the root and its arguments that are not options resolve inside it too.
+fn script(file: &str, args: &[&str], root: &Path, cwds: &[PathBuf]) -> Effect {
+    cwds.iter()
+        .map(|cwd| {
+            let ctx = ExecContext {
+                root: root.to_owned(),
+                cwd: cwd.to_owned(),
+            };
+            let path = ctx.resolve(file);
+            let ours = ctx.inside(&ctx.resolve("."))
+                && ctx.inside(&path)
+                && std::fs::metadata(&path).is_ok_and(|m| m.is_file());
+            let outside = args
+                .iter()
+                .any(|a| a.contains('@') || (!a.starts_with('-') && !ctx.inside(&ctx.resolve(a))));
+            if ours && !outside {
+                Effect::ExecutesProjectCode
+            } else {
+                Effect::SideEffects
+            }
+        })
+        .fold(Effect::ReadOnly, worse)
 }
 
 /// The command `timeout [options] DURATION` runs.
@@ -840,6 +949,7 @@ fn tool(words: &[&str], root: &Path, cwd: &Path) -> Effect {
     };
     let mut args = words[skip..].iter();
     let mut after_dashdash = false;
+    let mut positional = 0;
     while let Some(&arg) = args.next() {
         if !after_dashdash && arg.starts_with('-') && arg.len() > 1 {
             if arg == "--" {
@@ -848,10 +958,17 @@ fn tool(words: &[&str], root: &Path, cwd: &Path) -> Effect {
                 if args.next().is_none() {
                     return Effect::SideEffects;
                 }
-            } else if !spec.flags.contains(&arg) && !numeric_flag(arg, spec.numeric_prefixes) {
+            } else if !spec.flags.contains(&arg)
+                && !numeric_flag(arg, spec.numeric_prefixes)
+                && !(spec.clusters && cluster(arg, spec.flags))
+            {
                 return Effect::SideEffects;
             }
             continue;
+        }
+        positional += 1;
+        if positional > spec.max_positional {
+            return Effect::SideEffects;
         }
         // positional: a path, a ref, a package or a pattern; anything resolving outside is refused
         if arg.contains('@') {
@@ -872,6 +989,19 @@ fn tool(words: &[&str], root: &Path, cwd: &Path) -> Effect {
 fn resolve(cwd: &Path, arg: &str) -> PathBuf {
     let joined = cwd.join(arg);
     std::fs::canonicalize(&joined).unwrap_or_else(|_| normalize(&joined))
+}
+
+/// `-la`, `-rn`: allowed one-letter flags written together.
+fn cluster(arg: &str, flags: &[&str]) -> bool {
+    let Some(letters) = arg.strip_prefix('-') else {
+        return false;
+    };
+    let short = |c: char| {
+        flags
+            .iter()
+            .any(|f| f.len() == 2 && f.starts_with('-') && f.ends_with(c))
+    };
+    letters.len() > 1 && letters.chars().all(|c| c.is_ascii_alphabetic() && short(c))
 }
 
 /// `-n5`, `-U3`, `-20`: an allowed short option with only digits glued on.
@@ -929,6 +1059,73 @@ mod tests {
         assert_eq!(c("rg -n TODO src"), Effect::ReadOnly);
         assert_eq!(c("git branch"), Effect::ReadOnly);
         assert_eq!(c("cargo test -p ognivo-core"), Effect::ExecutesProjectCode);
+    }
+
+    #[test]
+    fn short_flags_together_and_hex_dumps_only_read() {
+        let f = project("clusters");
+        let c = |cmd| classify_command(cmd, &f.ctx);
+        // M1 T2-mini: gpt-oss asked for each of these and was refused
+        for cmd in [
+            "ls -A .",
+            "ls -ltrA src",
+            "grep -rn TODO src",
+            "rg -in todo src",
+            "cat -A src/lib.rs",
+            "cat -An src/lib.rs",
+            "sort -rn src/lib.rs",
+            "wc -lc src/lib.rs",
+            "hexdump -C src/lib.rs",
+            "od -c src/lib.rs",
+            "xxd -l 64 src/lib.rs",
+        ] {
+            assert_eq!(c(cmd), Effect::ReadOnly, "{cmd}");
+        }
+        for cmd in [
+            "sort -rno out.txt src/lib.rs", // -o writes
+            "grep -rR key .",               // -R follows symlinks
+            "rg -iL key",
+            "ls -lL etc-link",
+            "find . -name x -delete",
+            "xxd src/lib.rs src/lib.rs", // the second file is overwritten
+            "xxd -r src/lib.rs",
+            "head -n5x src/lib.rs",
+        ] {
+            assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn the_projects_own_scripts_are_project_code() {
+        let f = project("scripts");
+        std::fs::create_dir_all(f.ctx.root.join("scripts")).unwrap();
+        std::fs::write(f.ctx.root.join("scripts/run.sh"), "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::write(f.ctx.root.join("tool.py"), "print(1)\n").unwrap();
+        let c = |cmd| classify_command(cmd, &f.ctx);
+        for cmd in [
+            "bash scripts/run.sh",
+            "sh scripts/run.sh --verbose release",
+            "./scripts/run.sh",
+            "scripts/run.sh",
+            "python3 tool.py src/lib.rs",
+            "python3 -m pytest -q",
+            "timeout 60 bash scripts/run.sh",
+        ] {
+            assert_eq!(c(cmd), Effect::ExecutesProjectCode, "{cmd}");
+        }
+        for cmd in [
+            "bash scripts/missing.sh",
+            "bash -x scripts/run.sh",
+            "bash scripts/run.sh /etc/passwd",
+            "bash etc-link/profile",
+            "python3 -c 'print(1)'",
+            "python3 -m http.server",
+            "/usr/bin/cat src/lib.rs",
+            "./zero",
+            "node - < tool.py",
+        ] {
+            assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
+        }
     }
 
     #[test]
