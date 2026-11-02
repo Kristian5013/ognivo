@@ -13,6 +13,7 @@ futures.workspace = true
 regex.workspace = true
 rustix.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 ognivo-models.workspace = true
 ognivo-protocol.workspace = true

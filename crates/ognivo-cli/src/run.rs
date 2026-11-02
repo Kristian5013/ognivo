@@ -2,6 +2,9 @@
 //! as the M0 harness passes it; the final answer goes to stdout, followed by ognivo's own
 //! verification status (what the turn's tool calls show, not what the answer claims).
 //!
+//! The run is kept in the session store like a chat (`ognivo sessions` lists it), and the
+//! end event names its session.
+//!
 //! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
 //! 3 the server failed; 124 the time limit ran out (as with `timeout`); 128 + N stopped by
 //! signal N (TERM from `timeout`, INT from ^C): the turn is dropped, which kills the process
@@ -14,7 +17,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, AllowAll, Approver, NoUser, TurnEnd};
+use ognivo_core::agent::{AgentEvent, AllowAll, Approver, NoUser, TurnEnd};
 use ognivo_core::verify;
 use tokio::signal::unix::{SignalKind, signal};
 
@@ -70,16 +73,21 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             "the prompt comes on stdin, and stdin was empty",
         ));
     }
-    let s = match a.session.connect(root).await {
+    let store = match a.session.store() {
+        Ok(store) => store,
+        Err(f) => return fail(f),
+    };
+    let mut s = match a.session.connect(root, None).await {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
     let seed = s.opts.seed;
-    let opts = AgentOptions {
-        time_limit: a.time_limit.map(Duration::from_secs),
-        ..s.opts
+    s.opts.time_limit = a.time_limit.map(Duration::from_secs);
+    let mut agent = match s.new_agent("run", &a.session.url, store, approver) {
+        Ok(agent) => agent,
+        Err(f) => return fail(f),
     };
-    let mut agent = Agent::new(Box::new(s.driver), s.family, approver, opts);
+    let session = agent.session_id();
     let jsonl = a.jsonl;
     let start = agent.instructions();
     if !start.files.is_empty() || !start.skipped.is_empty() {
@@ -101,6 +109,12 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             _ = int.recv() => Err(("SIGINT", 130)),
         }
     };
+    if let Err((name, _)) = &end {
+        agent.abandon_turn(&format!("ognivo was stopped by {name}."));
+    }
+    if let Some(e) = agent.store_failure() {
+        eprintln!("ognivo run: the session store failed: {e}; the session is not saved in full");
+    }
     let stats = serde_json::to_value(&agent.stats)?;
     let verification = serde_json::to_value(agent.verification())?;
     let end = match end {
@@ -108,7 +122,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         Err((name, code)) => {
             eprintln!("ognivo run: stopped by {name}");
             if jsonl {
-                let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "verification": verification, "seed": seed, "stats": stats});
+                let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "verification": verification, "session": session, "seed": seed, "stats": stats});
                 println!("{end}");
             }
             return Ok(ExitCode::from(code));
@@ -137,7 +151,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         }
     };
     if jsonl {
-        let mut end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "seed": seed, "stats": stats});
+        let mut end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "session": session, "seed": seed, "stats": stats});
         if let Some(why) = stopped {
             end["stopped"] = why.into();
             end["verification"] = verification;
@@ -153,7 +167,10 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
                 println!("[ognivo] the answer above claims a check that did not happen");
             }
         }
-        eprintln!("ognivo run: seed {seed}; {stats}");
+        eprintln!(
+            "ognivo run: session {}; seed {seed}; {stats}",
+            session.unwrap_or_default()
+        );
     }
     Ok(ExitCode::from(code))
 }

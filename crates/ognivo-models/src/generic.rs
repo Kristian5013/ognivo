@@ -28,13 +28,16 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::engine::{EngineError, SamplerSpec, Usage};
 use crate::guard::{self, Guard};
 
-/// One message of the conversation, in OpenAI chat shape.
-#[derive(Debug, Clone, PartialEq)]
+/// One message of the conversation, in OpenAI chat shape. The session store keeps it as
+/// `{"role", "content"}` with `reasoning`, `tool_calls` or `tool_call_id` where they apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(into = "StoredMessage", try_from = "StoredMessage")]
 pub enum ChatMessage {
     System(String),
     User(String),
@@ -57,12 +60,87 @@ pub enum ChatMessage {
 }
 
 /// A tool call the model emitted, or one replayed back into history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     /// Raw JSON arguments exactly as the model produced them; not yet validated.
     pub arguments: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Role {
+    System,
+    User,
+    Assistant,
+    Tool,
+}
+
+/// [`ChatMessage`] as the store keeps it.
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredMessage {
+    role: Role,
+    #[serde(default)]
+    content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<ToolCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+}
+
+impl From<ChatMessage> for StoredMessage {
+    fn from(m: ChatMessage) -> Self {
+        let plain = |role, content| StoredMessage {
+            role,
+            content,
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        };
+        match m {
+            ChatMessage::System(content) => plain(Role::System, content),
+            ChatMessage::User(content) => plain(Role::User, content),
+            ChatMessage::Assistant {
+                content,
+                reasoning,
+                tool_calls,
+            } => StoredMessage {
+                reasoning,
+                tool_calls,
+                ..plain(Role::Assistant, content)
+            },
+            ChatMessage::Tool {
+                tool_call_id,
+                content,
+            } => StoredMessage {
+                tool_call_id: Some(tool_call_id),
+                ..plain(Role::Tool, content)
+            },
+        }
+    }
+}
+
+impl TryFrom<StoredMessage> for ChatMessage {
+    type Error = String;
+
+    fn try_from(m: StoredMessage) -> Result<Self, String> {
+        Ok(match m.role {
+            Role::System => ChatMessage::System(m.content),
+            Role::User => ChatMessage::User(m.content),
+            Role::Assistant => ChatMessage::Assistant {
+                content: m.content,
+                reasoning: m.reasoning,
+                tool_calls: m.tool_calls,
+            },
+            Role::Tool => ChatMessage::Tool {
+                tool_call_id: m.tool_call_id.ok_or("a tool result without tool_call_id")?,
+                content: m.content,
+            },
+        })
+    }
 }
 
 /// A tool offered to the model, in OpenAI `tools` shape.
@@ -508,6 +586,54 @@ pub fn is_context_exceeded(e: &EngineError) -> bool {
 mod tests {
     use super::*;
     use crate::engine::EngineError;
+
+    #[test]
+    fn messages_are_stored_as_they_are_and_read_back() {
+        let messages = [
+            ChatMessage::System("be brief".into()),
+            ChatMessage::User("hi".into()),
+            ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: Some(String::new()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: r#"{"path":"a"}"#.into(),
+                }],
+            },
+            ChatMessage::Assistant {
+                content: "done".into(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+            },
+            ChatMessage::Tool {
+                tool_call_id: "c1".into(),
+                content: "[read: a]".into(),
+            },
+        ];
+        let stored: Vec<String> = messages
+            .iter()
+            .map(|m| serde_json::to_string(m).unwrap())
+            .collect();
+        assert_eq!(stored[0], r#"{"role":"system","content":"be brief"}"#);
+        // an empty reasoning is not a missing one
+        assert_eq!(
+            stored[2],
+            r#"{"role":"assistant","content":"","reasoning":"","tool_calls":[{"id":"c1","name":"read","arguments":"{\"path\":\"a\"}"}]}"#
+        );
+        assert_eq!(stored[3], r#"{"role":"assistant","content":"done"}"#);
+        assert_eq!(
+            stored[4],
+            r#"{"role":"tool","content":"[read: a]","tool_call_id":"c1"}"#
+        );
+        let back: Vec<ChatMessage> = stored
+            .iter()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(back, messages);
+        assert!(serde_json::from_str::<ChatMessage>(r#"{"role":"tool","content":"x"}"#).is_err());
+        assert!(serde_json::from_str::<ChatMessage>(r#"{"role":"developer"}"#).is_err());
+    }
 
     fn sampler() -> SamplerSpec {
         SamplerSpec {

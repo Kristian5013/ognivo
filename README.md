@@ -10,11 +10,13 @@ Qwen3.8-27B (XML tool calls).
 **Status:** M1 in progress. The line-mode `ognivo chat` and `ognivo run` (one task, no
 user) work on the Generic path (`/v1/chat/completions`), with the special-token guard, the
 repetition guard and a detector of repeated calls; `run` has an optional `--time-limit`.
-The edit journal (in memory for now) lets `chat` show, accept and revert what the agent
-changed: `/changes`, `/accept`, `/revert`. AGENTS.md and CLAUDE.md files go to the model as
-Codex and Claude Code give them: from the user, from every directory down to the project,
-and from a subdirectory once the agent works there, with `@path` imports. Sessions are not
-stored yet, and there is no compaction: `/clear` starts over.
+The edit journal lets `chat` show, accept and revert what the agent changed: `/changes`,
+`/accept`, `/revert`. AGENTS.md and CLAUDE.md files go to the model as Codex and Claude
+Code give them: from the user, from every directory down to the project, and from a
+subdirectory once the agent works there, with `@path` imports. Sessions are kept in SQLite
+(`~/.ognivo/data/ognivo.db`) as they go: `chat --resume ID` or `--continue` picks one up
+with its conversation and edit journal, and `ognivo sessions` lists them or finds them by
+words. There is no compaction yet: `/clear` starts the session's next conversation.
 
 ## Layout
 

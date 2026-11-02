@@ -30,7 +30,7 @@ use std::ops::Range;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The files a directory may hold, in the order they are given.
 const NAMES: [&str; 4] = [
@@ -68,7 +68,7 @@ impl UserInstructions {
 }
 
 /// A file the model got.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Given {
     /// Relative to the project root inside it, `~/…` under the home directory, absolute
     /// elsewhere.
@@ -80,7 +80,7 @@ pub struct Given {
 }
 
 /// A file the model did not get, and why.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skipped {
     pub path: String,
     pub why: String,
@@ -222,6 +222,16 @@ impl Instructions {
             self.directory(&dir, &place, &mut found);
         }
         found.load(&self.root, true)
+    }
+
+    /// The directories below the root the conversation has looked into.
+    pub fn looked(&self) -> &HashSet<PathBuf> {
+        &self.looked
+    }
+
+    /// Notes directories as looked into: a resumed conversation already got their files.
+    pub fn mark_looked(&mut self, dirs: impl IntoIterator<Item = PathBuf>) {
+        self.looked.extend(dirs);
     }
 
     fn directory(&mut self, dir: &Path, place: &Place, found: &mut Found) {

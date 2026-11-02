@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 ognivo-core.workspace = true
 ognivo-models.workspace = true
+ognivo-store.workspace = true
 ognivo-tools.workspace = true
 anyhow.workspace = true
 clap.workspace = true

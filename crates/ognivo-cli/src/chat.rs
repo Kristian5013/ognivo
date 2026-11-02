@@ -1,9 +1,9 @@
 //! `ognivo chat`: the line-mode REPL of docs/architecture.md §10. A turn streams to the
 //! terminal (`view.rs` shows it), actions that need the user ask y/n/a, and ^C stops a turn
 //! without ending the session. Between turns `/changes`, `/accept` and `/revert` review
-//! what the agent changed (the edit journal, §8). The conversation lives as long as the
-//! process: there is no store yet and no compaction, so `/clear` starts over when the
-//! context fills up.
+//! what the agent changed (the edit journal, §8). The session is kept in the store as it
+//! goes: `--resume ID` or `--continue` picks it up again, edit journal included. There is no
+//! compaction yet, so `/clear` starts over when the context fills up.
 //!
 //! Exit codes: 0 `/exit` or ^D; 2 bad usage; 3 the server failed at the start; 143 SIGTERM.
 
@@ -28,6 +28,8 @@ use rustyline::error::ReadlineError;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 
+use ognivo_store::{SessionRow, Store};
+
 use crate::session::{Failure, SessionArgs};
 use crate::view::{self, Paint, Screen, Style, View, duration, printable};
 
@@ -35,6 +37,12 @@ use crate::view::{self, Paint, Screen, Style, View, duration, printable};
 pub struct ChatArgs {
     #[command(flatten)]
     session: SessionArgs,
+    /// Go on with a stored session (see ognivo sessions)
+    #[arg(long, value_name = "ID", conflicts_with = "go_on")]
+    resume: Option<i64>,
+    /// Go on with the last chat session of this project
+    #[arg(long = "continue", id = "go_on")]
+    go_on: bool,
     /// Stream the model's reasoning too, dimmed
     #[arg(long)]
     show_reasoning: bool,
@@ -59,11 +67,23 @@ fn fail(f: Failure) -> anyhow::Result<ExitCode> {
 }
 
 pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
-    let root = match a.session.root() {
+    let store = match a.session.store() {
+        Ok(store) => store,
+        Err(f) => return fail(f),
+    };
+    let stored = match stored(&a, &store) {
+        Ok(stored) => stored,
+        Err(f) => return fail(f),
+    };
+    let root = match &stored {
+        Some(row) => a.session.root_of(row),
+        None => a.session.root(),
+    };
+    let root = match root {
         Ok(root) => root,
         Err(f) => return fail(f),
     };
-    let s = match a.session.connect(root.clone()).await {
+    let s = match a.session.connect(root.clone(), stored.as_ref()).await {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
@@ -88,27 +108,70 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         ),
         Paint::Plain,
     );
-    let mut agent = Agent::new(Box::new(s.driver), s.family, Box::new(approver), s.opts);
-    screen.line(
-        &format!(
-            "project {}{}",
-            root.display(),
-            if agent.unreviewed_changes() {
-                " · not a clean git tree: builds and tests ask until /accept"
-            } else {
-                ""
+    let agent = match &stored {
+        Some(row) => s.resumed_agent(row, store, Box::new(approver)),
+        None => s.new_agent("chat", &a.session.url, store, Box::new(approver)),
+    };
+    let mut agent = match agent {
+        Ok(agent) => agent,
+        Err(f) => return fail(f),
+    };
+    let id = agent.session_id().unwrap_or_default();
+    match &stored {
+        Some(row) => {
+            screen.line(
+                &format!(
+                    "project {} · session {id}, resumed after {} turn{}",
+                    root.display(),
+                    row.turns,
+                    if row.turns == 1 { "" } else { "s" }
+                ),
+                Paint::Plain,
+            );
+            instructions(&screen, agent.instructions());
+            if let Some(line) = last_message(&agent) {
+                screen.line(&format!("· last message: {line}"), Paint::Dim);
             }
-        ),
-        Paint::Plain,
-    );
-    instructions(&screen, agent.instructions());
+            unreviewed(&mut agent, &screen);
+            if agent.inherited_changes() {
+                screen.line(
+                    "· the project may hold changes ognivo did not make: builds and tests ask until /accept",
+                    Paint::Dim,
+                );
+            }
+        }
+        None => {
+            screen.line(
+                &format!(
+                    "project {} · session {id}{}",
+                    root.display(),
+                    if agent.unreviewed_changes() {
+                        " · not a clean git tree: builds and tests ask until /accept"
+                    } else {
+                        ""
+                    }
+                ),
+                Paint::Plain,
+            );
+            instructions(&screen, agent.instructions());
+        }
+    }
     screen.line("/help · ^C stops a turn · ^D quits", Paint::Dim);
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
     loop {
+        if let Some(e) = agent.store_failure() {
+            screen.line(
+                &format!("· the session store failed: {e}; the session is no longer saved"),
+                Paint::Yellow,
+            );
+        }
         let entry = tokio::select! {
             entry = read_entry(&input, &screen) => entry,
-            _ = term.recv() => return Ok(terminated(terminal.as_ref())),
+            _ = term.recv() => {
+                agent.close();
+                return Ok(terminated(terminal.as_ref()));
+            }
         };
         let text = match entry {
             Entry::Message(text) => text,
@@ -134,7 +197,15 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 revert(&mut agent, &screen, &input, &root, file.as_deref()).await;
                 continue;
             }
-            Entry::Exit => return Ok(ExitCode::SUCCESS),
+            Entry::Exit => {
+                if let Some(id) = agent.close() {
+                    screen.line(
+                        &format!("· session {id} is kept: ognivo chat --resume {id}"),
+                        Paint::Dim,
+                    );
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
         };
         // a ^C or a stop left from before must not end this turn
         while int.recv().now_or_never().is_some() {}
@@ -158,7 +229,11 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         };
         view.finish();
         let unanswered = match outcome {
-            Outcome::Terminated => return Ok(terminated(terminal.as_ref())),
+            Outcome::Terminated => {
+                agent.abandon_turn("ognivo was stopped by SIGTERM.");
+                agent.close();
+                return Ok(terminated(terminal.as_ref()));
+            }
             Outcome::Stopped => {
                 agent.abandon_turn("The user stopped this turn.");
                 screen.line("· stopped", Paint::Dim);
@@ -191,10 +266,11 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             verification(&screen, &agent.verification());
         }
         unreviewed(&mut agent, &screen);
+        let taken = agent.stats.steps - steps;
         screen.line(
             &format!(
-                "({} steps · {} · {} generated · context {}{})",
-                agent.stats.steps - steps,
+                "({taken} step{} · {} · {} generated · context {}{})",
+                if taken == 1 { "" } else { "s" },
                 duration(started.elapsed()),
                 kilo(agent.stats.completion_tokens - generated),
                 kilo(agent.context_tokens()),
@@ -214,6 +290,33 @@ enum Outcome {
     /// By ^C, here or at a question.
     Stopped,
     Terminated,
+}
+
+/// The session `--resume` or `--continue` asks for.
+fn stored(a: &ChatArgs, store: &Store) -> Result<Option<SessionRow>, Failure> {
+    let row = if let Some(id) = a.resume {
+        store.session(id).map_err(Failure::usage)?.ok_or_else(|| {
+            Failure::usage(format!("there is no session {id}; see ognivo sessions"))
+        })?
+    } else if a.go_on {
+        store
+            .latest(&a.session.root()?, "chat")
+            .map_err(Failure::usage)?
+            .ok_or_else(|| Failure::usage("this project has no chat session to go on with"))?
+    } else {
+        return Ok(None);
+    };
+    Ok(Some(row))
+}
+
+/// The first line of the user's last message, for a resumed session.
+fn last_message(agent: &Agent) -> Option<String> {
+    agent.messages().iter().rev().find_map(|m| match m {
+        ognivo_models::ChatMessage::User(text) if !text.starts_with("[ognivo]") => {
+            text.lines().next().map(printable)
+        }
+        _ => None,
+    })
 }
 
 /// The instruction files of the system prompt, and those it could not take.

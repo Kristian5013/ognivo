@@ -194,9 +194,10 @@ async fn sigterm_ends_the_run_with_an_end_event() {
         (
             end["type"].as_str(),
             end["stopped"].as_str(),
-            end["exit"].as_i64()
+            end["exit"].as_i64(),
+            end["session"].as_i64()
         ),
-        (Some("end"), Some("SIGTERM"), Some(143))
+        (Some("end"), Some("SIGTERM"), Some(143), Some(1))
     );
 }
 

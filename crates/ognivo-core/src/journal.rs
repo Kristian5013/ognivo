@@ -2,7 +2,8 @@
 //! once; for every file they changed since the user last reviewed it, the journal keeps the
 //! bytes it had before and the bytes of the agent's last write, so the user can see the
 //! change, accept it or revert it. Commands with side effects are listed, never undone.
-//! Until the session store lands (M1) the journal lives in memory with the session.
+//! The session store keeps the journal ([`Journal::unsaved`], [`Journal::restore`]), so a
+//! resumed session can still revert what an earlier run of ognivo changed.
 
 use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,8 +11,9 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+use ognivo_store::{JournalChanges, JournalFile, JournalRest, SavedJournal};
 use ognivo_tools::diff::{self, Hunk};
-use ognivo_tools::files::{self, FileError};
+use ognivo_tools::files::{self, FileError, Target};
 
 #[derive(Debug, Default)]
 pub struct Journal {
@@ -22,6 +24,10 @@ pub struct Journal {
     side_effects: Vec<String>,
     /// The project may have had changes before the session, which the journal cannot show.
     inherited: bool,
+    /// Files whose entry changed since the last [`Journal::unsaved`].
+    unsaved_files: BTreeSet<PathBuf>,
+    /// The directories, the commands or `inherited` changed since then.
+    unsaved_rest: bool,
 }
 
 #[derive(Debug)]
@@ -89,8 +95,67 @@ impl Journal {
     pub fn new(inherited: bool) -> Self {
         Self {
             inherited,
+            unsaved_rest: true,
             ..Self::default()
         }
+    }
+
+    /// The journal a stored session left; `root` is the project's.
+    pub fn restore(saved: SavedJournal, root: &Path) -> Self {
+        let files = saved
+            .files
+            .into_iter()
+            .map(|f| {
+                let entry = Entry {
+                    shown: Target::new(f.path.clone(), root).shown,
+                    base: f.base,
+                    current: f.current,
+                    drifted: f.drifted,
+                };
+                (f.path, entry)
+            })
+            .collect();
+        Self {
+            files,
+            created_dirs: saved.rest.created_dirs.into_iter().collect(),
+            side_effects: saved.rest.side_effects,
+            inherited: saved.rest.inherited,
+            unsaved_files: BTreeSet::new(),
+            unsaved_rest: false,
+        }
+    }
+
+    /// Notes that the project may hold changes from outside the journal, such as those a
+    /// resumed session finds in the git tree.
+    pub fn inherit(&mut self) {
+        if !self.inherited {
+            self.inherited = true;
+            self.unsaved_rest = true;
+        }
+    }
+
+    /// What changed since the last call, for the session store.
+    pub fn unsaved(&mut self) -> JournalChanges {
+        let mut changes = JournalChanges::default();
+        for path in std::mem::take(&mut self.unsaved_files) {
+            match self.files.get(&path) {
+                Some(e) => changes.put.push(JournalFile {
+                    path,
+                    base: e.base.clone(),
+                    current: e.current.clone(),
+                    drifted: e.drifted,
+                }),
+                None => changes.removed.push(path),
+            }
+        }
+        if std::mem::take(&mut self.unsaved_rest) {
+            changes.rest = Some(JournalRest {
+                created_dirs: self.created_dirs.iter().cloned().collect(),
+                side_effects: self.side_effects.clone(),
+                inherited: self.inherited,
+            });
+        }
+        changes
     }
 
     /// Reads what a write to `path` is about to replace. An error means the write must not
@@ -120,7 +185,9 @@ impl Journal {
 
     /// Notes a write that happened; `after` is what it wrote.
     pub fn record(&mut self, path: PathBuf, shown: PathBuf, before: Before, after: Vec<u8>) {
+        self.unsaved_rest |= !before.missing_dirs.is_empty();
         self.created_dirs.extend(before.missing_dirs);
+        self.unsaved_files.insert(path.clone());
         match self.files.entry(path) {
             Slot::Occupied(mut slot) => {
                 let e = slot.get_mut();
@@ -145,6 +212,7 @@ impl Journal {
 
     pub fn side_effect(&mut self, command: &str) {
         self.side_effects.push(command.to_owned());
+        self.unsaved_rest = true;
     }
 
     /// Nothing is unreviewed: every file the agent changed is as it was, no command with
@@ -214,6 +282,8 @@ impl Journal {
             self.side_effects.clear();
             self.inherited = false;
             self.created_dirs.clear();
+            self.unsaved_files.extend(files.keys().cloned());
+            self.unsaved_rest = true;
             return Ok(files
                 .into_values()
                 .map(|e| e.shown.display().to_string())
@@ -223,6 +293,7 @@ impl Journal {
             .files
             .remove(path)
             .ok_or_else(|| JournalError::NotChanged(path.display().to_string()))?;
+        self.unsaved_files.insert(path.to_owned());
         Ok(vec![e.shown.display().to_string()])
     }
 
@@ -258,11 +329,13 @@ impl Journal {
             }
         };
         self.files.remove(path);
+        self.unsaved_files.insert(path.to_owned());
         // deepest first; a directory with anything in it stays
         let dirs: Vec<PathBuf> = self.created_dirs.iter().rev().cloned().collect();
         for dir in dirs {
             if fs::remove_dir(&dir).is_ok() || !dir.exists() {
                 self.created_dirs.remove(&dir);
+                self.unsaved_rest = true;
             }
         }
         Ok(how)
@@ -271,7 +344,14 @@ impl Journal {
     /// Forgets the files that are back to what they were, by a `git checkout` or the
     /// agent's own undo.
     fn prune(&mut self) {
-        self.files.retain(|path, e| !settled(path, e));
+        let unsaved = &mut self.unsaved_files;
+        self.files.retain(|path, e| {
+            let keep = !settled(path, e);
+            if !keep {
+                unsaved.insert(path.clone());
+            }
+            keep
+        });
     }
 }
 
@@ -431,5 +511,41 @@ mod tests {
             p.journal.accept(Some(&a)),
             Err(JournalError::NotChanged(_))
         ));
+    }
+
+    #[test]
+    fn what_changed_is_saved_once_and_a_restored_journal_reverts_it() {
+        let mut p = Project::new();
+        p.write("a.txt", "one\nTWO\n");
+        p.write("d/new.txt", "made\n");
+        let first = p.journal.unsaved();
+        assert_eq!(first.put.len(), 2);
+        assert!(first.removed.is_empty());
+        let rest = first.rest.clone().unwrap();
+        assert_eq!(rest.created_dirs, [p.root.join("d")]);
+        assert!(p.journal.unsaved().is_empty());
+        // a later run of ognivo gets it back from the store
+        let saved = SavedJournal {
+            files: first.put,
+            rest,
+        };
+        let mut back = Journal::restore(saved, &p.root);
+        assert!(back.unsaved().is_empty());
+        assert_eq!(back.changes()[1].shown, "d/new.txt");
+        assert_eq!(
+            back.revert(&p.root.join("d/new.txt"), false).unwrap(),
+            Reverted::Removed
+        );
+        assert!(!p.root.join("d").exists());
+        assert_eq!(
+            back.revert(&p.root.join("a.txt"), false).unwrap(),
+            Reverted::Restored
+        );
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo\n");
+        let after = back.unsaved();
+        assert_eq!(after.removed.len(), 2);
+        assert!(after.rest.unwrap().created_dirs.is_empty());
+        back.inherit();
+        assert!(back.unsaved().rest.unwrap().inherited);
     }
 }

@@ -1,9 +1,10 @@
-//! The `ognivo` binary: `doctor`, the headless `run` and the line-mode `chat`
+//! The `ognivo` binary: `doctor`, the headless `run`, the line-mode `chat` and `sessions`
 //! (docs/architecture.md §10).
 
 mod chat;
 mod run;
 mod session;
+mod sessions;
 mod view;
 
 use std::process::ExitCode;
@@ -49,6 +50,8 @@ enum Command {
     Run(run::RunArgs),
     /// Chat in the terminal, line by line
     Chat(chat::ChatArgs),
+    /// List the stored sessions of this project, or find them by words
+    Sessions(sessions::SessionsArgs),
 }
 
 #[tokio::main]
@@ -99,6 +102,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::chat(args).await,
+        Command::Sessions(args) => sessions::sessions(args),
     }
 }
 

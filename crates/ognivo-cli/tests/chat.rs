@@ -14,17 +14,14 @@ use common::{HANG, answer_stream, call_stream, fake_server};
 use serde_json::json;
 
 fn spawn(url: &str, root: &Path, data: &Path, stdin: &str) -> Child {
+    spawn_with(url, root, data, stdin, &["--seed", "3"])
+}
+
+fn spawn_with(url: &str, root: &Path, data: &Path, stdin: &str, args: &[&str]) -> Child {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ognivo"))
-        .args([
-            "chat",
-            "--url",
-            url,
-            "--profile",
-            "gpt-oss-20b",
-            "--seed",
-            "3",
-            "--data-dir",
-        ])
+        .args(["chat", "--url", url, "--profile", "gpt-oss-20b"])
+        .args(args)
+        .arg("--data-dir")
         .arg(data)
         .arg("--cwd")
         .arg(root)
@@ -437,5 +434,188 @@ async fn instruction_files_are_named_and_reach_the_model() {
             "<instructions file=\"sub/AGENTS.md\">\nTests live in tests/.\n</instructions>"
         ),
         "{read}"
+    );
+}
+
+/// `ognivo sessions` with these arguments: its stdout, or its stderr when it failed.
+fn sessions(data: &Path, root: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_ognivo"))
+        .arg("sessions")
+        .args(args)
+        .arg("--data-dir")
+        .arg(data)
+        .arg("--cwd")
+        .arg(root)
+        .env("HOME", root.parent().unwrap())
+        .output()
+        .unwrap();
+    let text = if out.status.success() {
+        out.stdout
+    } else {
+        out.stderr
+    };
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&text).into_owned(),
+    )
+}
+
+#[tokio::test]
+async fn a_session_is_kept_and_goes_on_with_its_changes() {
+    let (url, _) = fake_server(vec![
+        call_stream(
+            "c1",
+            "edit",
+            r#"{"path":"notes.txt","old_string":"two","new_string":"TWO"}"#,
+        ),
+        answer_stream("Changed the second line."),
+        answer_stream("Changed the second line."),
+    ])
+    .await;
+    let (dir, root) = project();
+    std::fs::write(root.join("notes.txt"), "one\ntwo\n").unwrap();
+    // a git tree with nothing to review when the session begins
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(&root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    git(&["add", "notes.txt"]);
+    git(&["commit", "-qm", "start"]);
+    let data = dir.path().join("data");
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "make two loud\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    assert!(stdout.contains(" · session 1"), "{stdout}");
+    assert!(
+        stdout.ends_with("· session 1 is kept: ognivo chat --resume 1\n"),
+        "{stdout}"
+    );
+
+    // a later chat goes on with it: the conversation, the journal, the seed
+    let (url, bodies) = fake_server(vec![answer_stream("Still here.")]).await;
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn_with(
+            &url,
+            &r,
+            &d,
+            "/changes\nare you there?\n/exit\n",
+            &["--continue"],
+        )
+        .wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "{:?}\n{stdout}\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let at = |s: &str| stdout.find(s).unwrap_or_else(|| panic!("{s}: {stdout}"));
+    assert!(at(" · session 1, resumed after 1 turn\n") < at("· last message: make two loud\n"));
+    assert!(at("· unreviewed: notes.txt (+1 -1) · /changes /accept /revert\n") < at("/help"));
+    // what git shows is the journal's own change, nothing else
+    assert!(!stdout.contains("ognivo did not make"), "{stdout}");
+    assert!(at("→ notes.txt · +1 -1\n  2 - two\n  2 + TWO\n") < at("Still here."));
+    {
+        let bodies = bodies.lock().unwrap();
+        let messages = bodies[0]["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1],
+            json!({"role": "user", "content": "make two loud"})
+        );
+        assert_eq!(
+            messages.last().unwrap(),
+            &json!({"role": "user", "content": "are you there?"})
+        );
+        assert_eq!(bodies[0]["seed"], json!(3 + 3 + 1));
+    }
+
+    let (ok, list) = sessions(&data, &root, &[]);
+    assert!(ok, "{list}");
+    assert!(
+        list.starts_with("   1  ")
+            && list.contains("  chat  gpt-oss-20b  2 turns  make two loud · 1 file unreviewed\n"),
+        "{list}"
+    );
+    let (ok, found) = sessions(&data, &root, &["--search", "still"]);
+    assert!(ok, "{found}");
+    assert!(
+        found.contains("make two loud") && found.contains("[Still] here."),
+        "{found}"
+    );
+    let (_, none) = sessions(&data, &root, &["--search", "nowhere"]);
+    assert_eq!(none, "nothing found\n");
+
+    // a change ognivo did not make keeps builds and tests asking
+    std::fs::write(root.join("mine.txt"), "by hand\n").unwrap();
+    let (url, _) = fake_server(vec![]).await;
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn_with(&url, &r, &d, "/exit\n", &["--resume", "1"]).wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(
+            "· the project may hold changes ognivo did not make: builds and tests ask until /accept\n"
+        ),
+        "{stdout}"
+    );
+    // the session had turns, so it stays
+    assert!(stdout.contains("· session 1 is kept"), "{stdout}");
+}
+
+#[tokio::test]
+async fn a_session_without_a_turn_leaves_nothing_and_a_missing_one_is_named() {
+    let (url, _) = fake_server(vec![]).await;
+    let (dir, root) = project();
+    let data = dir.path().join("data");
+    let (r, d, u) = (root.clone(), data.clone(), url.clone());
+    let out = tokio::task::spawn_blocking(move || spawn(&u, &r, &d, "/exit\n").wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(!stdout.contains("is kept"), "{stdout}");
+    assert_eq!(
+        sessions(&data, &root, &[]),
+        (true, "no sessions in this project yet\n".to_owned())
+    );
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn_with(&url, &r, &d, "", &["--resume", "7"]).wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("there is no session 7; see ognivo sessions"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

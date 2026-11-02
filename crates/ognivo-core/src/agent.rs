@@ -35,13 +35,15 @@ use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
 use ognivo_tools::projection::{self, Call};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
 use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
 use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
+use crate::session::{Notes, Resumed, Session};
 use crate::verify::{self, Ledger, Run, Verification};
 
 /// How many generations in a row may end without usable calls before the turn stops.
@@ -157,7 +159,8 @@ pub enum AgentEvent {
 }
 
 /// Counters behind the M1 exit metrics.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Stats {
     pub steps: u32,
     pub calls: u32,
@@ -302,6 +305,10 @@ pub struct Agent {
     running: Option<String>,
     /// Tokens the server held after the last step.
     context: u64,
+    /// Where the session is kept, if it is.
+    session: Option<Session>,
+    /// A turn is running: it began and has not ended.
+    in_turn: bool,
     pub stats: Stats,
 }
 
@@ -367,9 +374,86 @@ impl Agent {
             stuck: None,
             running: None,
             context: 0,
+            session: None,
+            in_turn: false,
             stats: Stats::default(),
             opts,
         }
+    }
+
+    /// Keeps this new agent's session in `session` from now on.
+    pub fn keep_in(&mut self, mut session: Session) {
+        session.start_conversation(&self.messages, &self.notes());
+        self.session = Some(session);
+        self.save();
+    }
+
+    /// Picks up a stored session where it ended: its last conversation as the model saw
+    /// it, its edit journal and its counters. A turn that ognivo stopped in is closed the
+    /// way a stopped turn is; changes found in the project now count as unreviewed.
+    pub fn resume(
+        driver: Box<dyn ModelDriver>,
+        family: Family,
+        approver: Box<dyn Approver>,
+        opts: AgentOptions,
+        mut session: Session,
+        resumed: Resumed,
+    ) -> Self {
+        let mut agent = Self::new(driver, family, approver, opts);
+        let Resumed {
+            messages,
+            notes,
+            seen,
+            looked,
+            journal,
+            stats,
+        } = resumed;
+        agent.journal = Journal::restore(journal, &agent.opts.root);
+        if agent.opts.workspace.unreviewed_changes {
+            agent.journal.inherit();
+        }
+        agent.stats = stats;
+        if messages.is_empty() {
+            session.start_conversation(&agent.messages, &agent.notes());
+        } else {
+            agent.messages = messages;
+            agent.prompt_instructions = Load {
+                text: String::new(),
+                files: notes.instructions,
+                skipped: notes.skipped,
+            };
+            agent.instructions.mark_looked(looked);
+            agent.seen = seen.into_iter().collect();
+            agent.reverted = notes.reverted;
+        }
+        agent.session = Some(session);
+        if notes.in_turn {
+            agent.in_turn = true;
+            agent.abandon_turn("ognivo stopped before this turn ended; the session goes on now");
+        } else {
+            agent.save();
+        }
+        agent
+    }
+
+    /// The session's id in the store, if it is kept there.
+    pub fn session_id(&self) -> Option<ognivo_store::SessionId> {
+        self.session.as_ref().map(Session::id)
+    }
+
+    /// Why the store stopped saving the session, once: the session goes on in memory.
+    pub fn store_failure(&mut self) -> Option<String> {
+        self.session.as_mut().and_then(Session::failure)
+    }
+
+    /// Stops keeping the session: one without a turn is removed from the store. Returns
+    /// the id of a session that stays there.
+    pub fn close(&mut self) -> Option<ognivo_store::SessionId> {
+        self.save();
+        let s = self.session.take()?;
+        let kept = (s.turns() > 0).then(|| s.id());
+        s.close();
+        kept
     }
 
     pub fn messages(&self) -> &[ChatMessage] {
@@ -407,7 +491,9 @@ impl Agent {
 
     /// The files the session changed and nobody reviewed yet, as they are now (§8).
     pub fn changes(&mut self) -> Vec<FileChange> {
-        self.journal.changes()
+        let changes = self.journal.changes();
+        self.save();
+        changes
     }
 
     /// Commands with side effects since the last accept: listed, never undone.
@@ -423,13 +509,20 @@ impl Agent {
     /// Marks one file's change as reviewed, or everything with `None`; once nothing is
     /// left, builds and tests run without a question again. Returns the files it covered.
     pub fn accept(&mut self, path: Option<&Path>) -> Result<Vec<String>, JournalError> {
-        self.journal.accept(path)
+        let accepted = self.journal.accept(path);
+        self.save();
+        accepted
     }
 
     /// Puts a file back as it was before the session's unreviewed changes (`force`: also
     /// when something else changed it too). The model learns of it with the next message.
     pub fn revert(&mut self, path: &Path, force: bool) -> Result<Reverted, JournalError> {
-        let how = self.journal.revert(path, force)?;
+        let how = self.journal.revert(path, force);
+        if how.is_err() {
+            // a revert that failed may still have pruned the journal
+            self.save();
+        }
+        let how = how?;
         self.seen.remove(path);
         let name = Target::new(path.to_owned(), &self.opts.root).shown;
         let item = match how {
@@ -439,6 +532,7 @@ impl Agent {
         if !self.reverted.contains(&item) {
             self.reverted.push(item);
         }
+        self.save();
         Ok(how)
     }
 
@@ -479,6 +573,11 @@ impl Agent {
         self.append_to_last(&format!("[ognivo] {why}"));
         self.running = None;
         self.stuck = None;
+        let open = std::mem::take(&mut self.in_turn);
+        self.save();
+        if open && let Some(s) = self.session.as_mut() {
+            s.end_turn(json!({"end": "stopped", "why": why}), None, &self.stats);
+        }
     }
 
     /// Starts a new conversation, with the instruction files read again. What the session
@@ -491,10 +590,74 @@ impl Agent {
         ))];
         self.seen.clear();
         self.context = 0;
+        let notes = self.notes();
+        if let Some(s) = self.session.as_mut() {
+            s.start_conversation(&self.messages, &notes);
+        }
+        self.save();
     }
 
     /// Runs one user turn to its end.
     pub async fn turn(
+        &mut self,
+        user: &str,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> Result<TurnEnd, DriverError> {
+        self.in_turn = true;
+        if let Some(s) = self.session.as_mut() {
+            s.user(user);
+        }
+        let end = self.steps(user, on).await;
+        self.in_turn = false;
+        let (end_data, answer) = match &end {
+            Ok(TurnEnd::Answer(a)) => (
+                json!({"end": "answer", "verification": a.verification, "unsupported_claim": a.unsupported_claim}),
+                Some(a.text.as_str()),
+            ),
+            Ok(TurnEnd::StepLimit) => (json!({"end": "step_limit"}), None),
+            Ok(TurnEnd::Stuck(why)) => (json!({"end": "stuck", "why": why}), None),
+            Ok(TurnEnd::TimeLimit) => (json!({"end": "time_limit"}), None),
+            Err(e) => (json!({"end": "error", "why": e.to_string()}), None),
+        };
+        self.save();
+        if let Some(s) = self.session.as_mut() {
+            s.end_turn(end_data, answer, &self.stats);
+        }
+        end
+    }
+
+    /// What the agent keeps about the conversation besides its messages.
+    fn notes(&self) -> Notes {
+        Notes {
+            instructions: self.prompt_instructions.files.clone(),
+            skipped: self.prompt_instructions.skipped.clone(),
+            reverted: self.reverted.clone(),
+            in_turn: self.in_turn,
+        }
+    }
+
+    /// Saves what changed since the last save, if the session is kept in the store.
+    fn save(&mut self) {
+        let notes = self.notes();
+        let Some(s) = self.session.as_mut() else {
+            return;
+        };
+        s.save_messages(&self.messages);
+        s.save_journal(&self.journal.unsaved());
+        s.save_paths(&self.seen, self.instructions.looked());
+        s.save_notes(&notes);
+    }
+
+    /// Shows an event and keeps it in the session's log.
+    fn emit(&mut self, on: &mut (dyn FnMut(AgentEvent) + Send), e: AgentEvent) {
+        if let Some(s) = self.session.as_mut() {
+            s.event(&e);
+        }
+        on(e);
+    }
+
+    /// The steps of a turn, until it ends.
+    async fn steps(
         &mut self,
         user: &str,
         on: &mut (dyn FnMut(AgentEvent) + Send),
@@ -519,6 +682,7 @@ impl Agent {
             self.reverted.clear();
         }
         self.messages.push(ChatMessage::User(user));
+        self.save();
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
         self.ledger = Ledger::default();
@@ -527,7 +691,7 @@ impl Agent {
         let mut unusable = 0;
         for _ in 0..self.opts.max_steps {
             if let Some(note) = self.clock.as_mut().and_then(Clock::note) {
-                on(AgentEvent::Notice { text: note.clone() });
+                self.emit(on, AgentEvent::Notice { text: note.clone() });
                 self.append_to_last(&note);
             }
             let deadline = self.clock.map(|c| c.deadline());
@@ -555,12 +719,12 @@ impl Agent {
                 };
                 let Some(ev) = next else { break };
                 match ev? {
-                    DriverEvent::Reasoning(text) => on(AgentEvent::Reasoning { text }),
-                    DriverEvent::Text(text) => on(AgentEvent::Text { text }),
+                    DriverEvent::Reasoning(text) => self.emit(on, AgentEvent::Reasoning { text }),
+                    DriverEvent::Text(text) => self.emit(on, AgentEvent::Text { text }),
                     DriverEvent::ToolCallDelta { .. } => {}
                     DriverEvent::Restarted { reason, .. } => {
                         self.stats.restarts += 1;
-                        on(AgentEvent::Restarted { reason });
+                        self.emit(on, AgentEvent::Restarted { reason });
                     }
                     DriverEvent::Finished(f) => finished = Some(*f),
                 }
@@ -584,7 +748,7 @@ impl Agent {
                     self.stats.empty_answers += 1;
                     unusable += 1;
                     let note = "[ognivo] Your last output ended with neither a tool call nor an answer: it stopped inside your reasoning, so nothing was run. Make the call you were planning directly, or give the final answer.".to_owned();
-                    on(AgentEvent::Notice { text: note.clone() });
+                    self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
                 }
                 Outcome::Answer => {
@@ -617,7 +781,7 @@ impl Agent {
                     };
                     if let Some(note) = back {
                         self.stats.answers_sent_back += 1;
-                        on(AgentEvent::Notice { text: note.clone() });
+                        self.emit(on, AgentEvent::Notice { text: note.clone() });
                         self.messages.push(ChatMessage::User(note));
                         continue;
                     }
@@ -652,6 +816,7 @@ impl Agent {
                             tool_call_id: call.id.clone(),
                             content: result,
                         });
+                        self.save();
                     }
                     if let Some(why) = self.stuck.take() {
                         return Ok(TurnEnd::Stuck(why));
@@ -669,7 +834,7 @@ impl Agent {
                         "[ognivo] Your last output reached the {} token limit {what}, so nothing was run and it was discarded. Think less, then call the tool directly with complete arguments.",
                         self.opts.max_tokens
                     );
-                    on(AgentEvent::Notice { text: note.clone() });
+                    self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
                 }
                 Outcome::Malformed { reason, .. } => {
@@ -678,7 +843,7 @@ impl Agent {
                     let note = format!(
                         "[ognivo] Your last tool call could not be used ({reason}), so nothing was run. Call the tool again with a JSON object of arguments."
                     );
-                    on(AgentEvent::Notice { text: note.clone() });
+                    self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
                 }
                 Outcome::Repeating {
@@ -698,10 +863,11 @@ impl Agent {
                     let note = format!(
                         "[ognivo] Your last output was stopped because {channel} kept repeating {sample:?}; nothing was run and it was discarded. {advice}"
                     );
-                    on(AgentEvent::Notice { text: note.clone() });
+                    self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::User(note));
                 }
             }
+            self.save();
             if unusable >= MAX_UNUSABLE_IN_A_ROW {
                 return Ok(TurnEnd::Stuck(format!(
                     "{unusable} generations in a row ended without a usable tool call"
@@ -719,11 +885,14 @@ impl Agent {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
         let parsed = projection::parse(self.family, &call.name, &call.arguments);
-        on(AgentEvent::ToolStarted {
-            tool: call.name.clone(),
-            arguments: call.arguments.clone(),
-            call: parsed.as_ref().ok().cloned(),
-        });
+        self.emit(
+            on,
+            AgentEvent::ToolStarted {
+                tool: call.name.clone(),
+                arguments: call.arguments.clone(),
+                call: parsed.as_ref().ok().cloned(),
+            },
+        );
         let key = match &parsed {
             Ok(c) => Fingerprint::of(&self.cwd, c),
             Err(_) => Fingerprint::Unparsed {
@@ -779,15 +948,21 @@ impl Agent {
             }
         };
         self.running = None;
-        on(AgentEvent::ToolFinished {
-            tool: call.name.clone(),
-            result: result.clone(),
-        });
+        self.emit(
+            on,
+            AgentEvent::ToolFinished {
+                tool: call.name.clone(),
+                result: result.clone(),
+            },
+        );
         if !near.files.is_empty() || !near.skipped.is_empty() {
-            on(AgentEvent::Instructions {
-                files: near.files,
-                skipped: near.skipped,
-            });
+            self.emit(
+                on,
+                AgentEvent::Instructions {
+                    files: near.files,
+                    skipped: near.skipped,
+                },
+            );
         }
         result
     }
@@ -1078,10 +1253,12 @@ impl Agent {
             Ok(text) => {
                 self.stats.edits_applied += u32::from(text.starts_with("[edit:"));
                 self.journal.record(path.clone(), shown, before, after);
+                // the old content is the one thing a crash must not lose
+                self.save();
                 self.repeats.changed();
                 self.ledger.changed(path.clone());
                 self.seen.insert(path);
-                on(changed);
+                self.emit(on, changed);
                 text
             }
             Err(e) => error_text(&e),
@@ -1114,14 +1291,21 @@ impl Agent {
             reason: reason.to_owned(),
             unreviewed,
         };
-        match self.approver.approve(&req).await {
+        let verdict = self.approver.approve(&req).await;
+        if let Some(s) = self.session.as_mut() {
+            s.approval(&req, verdict == Verdict::Allow);
+        }
+        match verdict {
             Verdict::Allow => None,
             Verdict::Refuse(text) => {
                 self.stats.refused += 1;
-                on(AgentEvent::Refused {
-                    tool: tool.to_owned(),
-                    reason: text.clone(),
-                });
+                self.emit(
+                    on,
+                    AgentEvent::Refused {
+                        tool: tool.to_owned(),
+                        reason: text.clone(),
+                    },
+                );
                 Some(format!("[refused] {text}"))
             }
         }
@@ -1235,13 +1419,36 @@ mod tests {
         let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
+        let (driver, seen) = played(steps);
+        Run {
+            agent: Agent::new(
+                Box::new(driver),
+                Family::Harmony,
+                approver,
+                options(&root, workspace, time_limit),
+            ),
+            seen,
+            root,
+            _dir: dir,
+        }
+    }
+
+    fn played(steps: Vec<Step>) -> (Script, Arc<Mutex<Vec<StepRequest>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let driver = Script {
             steps: Mutex::new(steps),
             seen: seen.clone(),
         };
-        let opts = AgentOptions {
-            root: root.clone(),
+        (driver, seen)
+    }
+
+    fn options(
+        root: &Path,
+        workspace: WorkspaceState,
+        time_limit: Option<Duration>,
+    ) -> AgentOptions {
+        AgentOptions {
+            root: root.to_owned(),
             data_dir: root.parent().unwrap().join("data"),
             max_steps: 10,
             max_tokens: 16384,
@@ -1249,12 +1456,6 @@ mod tests {
             workspace,
             time_limit,
             user_instructions: UserInstructions::default(),
-        };
-        Run {
-            agent: Agent::new(Box::new(driver), Family::Harmony, approver, opts),
-            seen,
-            root,
-            _dir: dir,
         }
     }
 
@@ -2099,5 +2300,167 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn store_path(root: &Path) -> PathBuf {
+        root.parent().unwrap().join("data/ognivo.db")
+    }
+
+    /// Keeps the run's session in a store file next to its project.
+    fn kept(r: &mut Run) -> ognivo_store::SessionId {
+        let store = ognivo_store::Store::open(&store_path(&r.root)).unwrap();
+        let new = ognivo_store::NewSession {
+            kind: "chat".into(),
+            root: r.root.clone(),
+            profile: "gpt-oss-20b".into(),
+            level: None,
+            server: "http://127.0.0.1:1".into(),
+            seed: 1,
+        };
+        let session = Session::create(store, &new).unwrap();
+        let id = session.id();
+        r.agent.keep_in(session);
+        id
+    }
+
+    /// The session picked up again from its store, as a later run of ognivo does.
+    fn resumed(
+        root: &Path,
+        id: ognivo_store::SessionId,
+        steps: Vec<ChatCompletion>,
+    ) -> (Agent, Arc<Mutex<Vec<StepRequest>>>) {
+        let store = ognivo_store::Store::open(&store_path(root)).unwrap();
+        let (session, left) = Session::open(store, id).unwrap();
+        let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
+        let agent = Agent::resume(
+            Box::new(driver),
+            Family::Harmony,
+            Box::new(NoUser),
+            options(root, WorkspaceState::DIRTY, None),
+            session,
+            left,
+        );
+        (agent, seen)
+    }
+
+    fn event_kinds(root: &Path, id: ognivo_store::SessionId) -> Vec<String> {
+        let store = ognivo_store::Store::open(&store_path(root)).unwrap();
+        store
+            .events(id)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.kind)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_session_is_kept_as_it_goes_and_picked_up_where_it_ended() {
+        let mut r = agent(vec![edit_lib(), answer("done")], WorkspaceState::CLEAN);
+        let id = kept(&mut r);
+        answered(turn(&mut r).await.0);
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        let (before, stats) = (agent.messages().to_vec(), agent.stats.clone());
+        drop(agent);
+        assert_eq!(
+            event_kinds(&root, id),
+            [
+                "user",
+                "tool_started",
+                "file_changed",
+                "tool_finished",
+                "end"
+            ]
+        );
+
+        let (mut agent, seen) = resumed(&root, id, vec![answer("still done")]);
+        assert_eq!(agent.messages(), before.as_slice());
+        assert_eq!(agent.stats, stats);
+        // the journal came through: the change can still be reverted
+        assert_eq!(agent.changes().len(), 1);
+        assert_eq!(
+            agent.revert(&root.join("lib.rs"), false).unwrap(),
+            Reverted::Restored
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    1\n}\n"
+        );
+        agent.turn("and now?", &mut |_| {}).await.unwrap();
+        let sent = seen.lock().unwrap()[0].messages.clone();
+        assert_eq!(&sent[..before.len()], before.as_slice());
+        let ChatMessage::User(next) = &sent[before.len()] else {
+            panic!("{sent:?}");
+        };
+        assert!(next.starts_with("and now?"), "{next}");
+        assert!(next.contains("reverted your changes to lib.rs"), "{next}");
+        // the seed goes on from the steps before
+        assert_eq!(seen.lock().unwrap()[0].seed, 1 + stats.steps + 1);
+        drop(agent);
+        let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
+        let row = store.session(id).unwrap().unwrap();
+        assert_eq!((row.turns, row.title.as_str()), (2, "fix it"));
+        assert_eq!(row.unreviewed_files, 0);
+    }
+
+    #[tokio::test]
+    async fn a_turn_ognivo_stopped_in_is_closed_when_the_session_goes_on() {
+        // the edit is applied, then the generation after it never ends: ognivo dies there
+        let mut r = script(
+            vec![Step::from(edit_lib()), Step::Hang],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
+        );
+        let id = kept(&mut r);
+        let mut on = |_: AgentEvent| {};
+        let turn = r.agent.turn("fix it", &mut on);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), turn)
+                .await
+                .is_err()
+        );
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        drop(agent);
+
+        let (mut agent, _) = resumed(&root, id, vec![]);
+        assert_eq!(agent.changes().len(), 1);
+        let Some(ChatMessage::Tool { content, .. }) = agent.messages().last() else {
+            panic!("{:?}", agent.messages());
+        };
+        assert!(
+            content.starts_with("[edit: applied")
+                && content.ends_with(
+                    "\n\n[ognivo] ognivo stopped before this turn ended; the session goes on now"
+                ),
+            "{content}"
+        );
+        drop(agent);
+        let kinds = event_kinds(&root, id);
+        assert_eq!(kinds.last().map(String::as_str), Some("end"));
+        let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
+        let end = store.events(id).unwrap().pop().unwrap();
+        assert!(end.data.contains(r#""end":"stopped""#), "{}", end.data);
+    }
+
+    #[tokio::test]
+    async fn clear_keeps_the_session_and_starts_its_next_conversation() {
+        let mut r = agent(vec![answer("one"), answer("two")], WorkspaceState::CLEAN);
+        let id = kept(&mut r);
+        turn(&mut r).await;
+        r.agent.clear();
+        r.agent.turn("again", &mut |_| {}).await.unwrap();
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        let now = agent.messages().to_vec();
+        drop(agent);
+        let (agent, _) = resumed(&root, id, vec![]);
+        // the last conversation is the one that goes on
+        assert_eq!(agent.messages(), now.as_slice());
+        assert_eq!(now.len(), 3);
     }
 }
