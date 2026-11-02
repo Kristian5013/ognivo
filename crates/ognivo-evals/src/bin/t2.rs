@@ -140,6 +140,7 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         n_ctx: props.n_ctx,
     };
     let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
+    let ambiguous = t2::ambiguous(&scenarios);
     for s in &scenarios {
         for &seed in &a.seeds {
             if done.contains(&(s.id.clone(), seed)) {
@@ -172,7 +173,8 @@ async fn suite(a: &Args) -> Result<Summary, String> {
             results.push(r);
             // a suite stopped at the end of a night window keeps the summary of what ran
             let now = selected(&results, &wanted, &a.seeds);
-            write_summary(&a.out, &t2::summarize(&p.id, info.clone(), &a.seeds, &now))?;
+            let s = t2::summarize(&p.id, info.clone(), &a.seeds, &now, &ambiguous);
+            write_summary(&a.out, &s)?;
         }
     }
     let s = t2::summarize(
@@ -180,6 +182,7 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         info,
         &a.seeds,
         &selected(&results, &wanted, &a.seeds),
+        &ambiguous,
     );
     write_summary(&a.out, &s)?;
     print_summary(&s);
@@ -219,6 +222,7 @@ fn print_summary(s: &Summary) {
     println!("  parse_ok        {}", pct(&s.parse_ok));
     println!("  schema_ok       {}", pct(&s.schema_ok));
     println!("  edit first try  {}", pct(&s.edit_first_try));
+    println!("    ambiguous     {}", pct(&s.edit_first_try_ambiguous));
     println!("  cache hit       {}", pct(&s.cache_hit));
     let c = &s.counts;
     println!(

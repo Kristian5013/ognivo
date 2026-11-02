@@ -8,7 +8,7 @@
 //! commands while nothing is unreviewed go ahead without asking, and anything else is
 //! refused, so the model never runs code it wrote.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -88,6 +88,11 @@ pub struct Scenario {
     /// Seconds.
     #[serde(default)]
     pub time_limit: Option<u64>,
+    /// The text to change is in the file more than once on purpose: the scenario is about
+    /// recovering from an edit that is not unique, so its edits count apart from the
+    /// first-try rate of the M1 exit gate.
+    #[serde(default)]
+    pub ambiguous: bool,
     pub expect: Expect,
 }
 
@@ -626,7 +631,11 @@ pub struct Summary {
     pub categories: BTreeMap<String, [usize; 2]>,
     pub parse_ok: Rate,
     pub schema_ok: Rate,
+    /// Edits applied by their first call, outside the ambiguous scenarios: the M1 exit gate.
     pub edit_first_try: Rate,
+    /// The same in the scenarios whose text to change is there twice on purpose
+    /// ([`Scenario::ambiguous`]): how often the model makes an edit unique at once.
+    pub edit_first_try_ambiguous: Rate,
     /// Prompt tokens taken from the cache, of all prompt tokens.
     pub cache_hit: Rate,
     pub counts: Counts,
@@ -639,10 +648,28 @@ pub struct Summary {
     pub failed: Vec<String>,
 }
 
-pub fn summarize(profile: &str, server: Value, seeds: &[u32], results: &[RunResult]) -> Summary {
+/// The ids of the scenarios whose edits count apart ([`Scenario::ambiguous`]).
+pub fn ambiguous(scenarios: &[Scenario]) -> BTreeSet<String> {
+    scenarios
+        .iter()
+        .filter(|s| s.ambiguous)
+        .map(|s| s.id.clone())
+        .collect()
+}
+
+/// The summary of `results`; the edits of the scenarios in `ambiguous` count apart.
+pub fn summarize(
+    profile: &str,
+    server: Value,
+    seeds: &[u32],
+    results: &[RunResult],
+    ambiguous: &BTreeSet<String>,
+) -> Summary {
     let mut counts = Counts::default();
     let mut categories: BTreeMap<String, [usize; 2]> = BTreeMap::new();
-    let (mut calls, mut bad, mut applied, mut failed_edits) = (0u64, 0u64, 0u64, 0u64);
+    let (mut calls, mut bad) = (0u64, 0u64);
+    // [plain, ambiguous]
+    let (mut applied, mut failed_edits) = ([0u64; 2], [0u64; 2]);
     let (mut processed, mut cached, mut completion, mut ms) = (0u64, 0u64, 0u64, 0u64);
     let (mut repeated, mut skipped) = (0u64, 0u64);
     for r in results {
@@ -652,8 +679,9 @@ pub fn summarize(profile: &str, server: Value, seeds: &[u32], results: &[RunResu
         c[1] += 1;
         calls += u64::from(r.stats.calls);
         bad += u64::from(r.stats.bad_arguments);
-        applied += u64::from(r.stats.edits_applied);
-        failed_edits += u64::from(r.stats.edits_failed);
+        let kind = usize::from(ambiguous.contains(&r.scenario));
+        applied[kind] += u64::from(r.stats.edits_applied);
+        failed_edits[kind] += u64::from(r.stats.edits_failed);
         processed += r.stats.prompt_tokens_processed;
         cached += r.stats.prompt_tokens_cached;
         completion += r.stats.completion_tokens;
@@ -670,7 +698,8 @@ pub fn summarize(profile: &str, server: Value, seeds: &[u32], results: &[RunResu
         categories,
         parse_ok: Rate::new(counts.usable.into(), counts.attempts.into()),
         schema_ok: Rate::new(calls - bad.min(calls), calls),
-        edit_first_try: Rate::new(applied, applied + failed_edits),
+        edit_first_try: Rate::new(applied[0], applied[0] + failed_edits[0]),
+        edit_first_try_ambiguous: Rate::new(applied[1], applied[1] + failed_edits[1]),
         cache_hit: Rate::new(cached, cached + processed),
         counts,
         repeated,

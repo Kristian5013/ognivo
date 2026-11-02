@@ -19,7 +19,9 @@
 # stays in the report.
 #
 # Results: ~/.local/share/ognivo/night/<date of the window>/ (OGNIVO_NIGHT_DIR), with night.log,
-# night.json, report.md, and one T2 directory per model.
+# night.json, report.md, and one T2 directory per model. A run with --now is named by its
+# start, <date>-<HHMM>: T2 resumes what a directory holds, so a second run of the day must
+# not land in the first one's.
 #
 # Options:
 #   --window HH:MM-HH:MM  the GPU window (default 03:00-06:00)
@@ -78,7 +80,7 @@ W_START=${BASH_REMATCH[1]} W_END=${BASH_REMATCH[2]}
 # --- the window: the next one that has not ended ----------------------------------------------
 NOW=$(date +%s)
 if [[ -n $NOW_MIN ]]; then
-    DATE=$(date +%F) START=$NOW END=$((NOW + NOW_MIN * 60))
+    DATE=$(date -d "@$NOW" +%F-%H%M) START=$NOW END=$((NOW + NOW_MIN * 60))
 else
     window_on() {   # window_on DAY -> START END
         local s e
@@ -335,7 +337,7 @@ lock_release
 # --- the report ----------------------------------------------------------------------------
 write_night
 prev=
-for d in "$OUT_ROOT"/20??-??-??; do
+for d in "$OUT_ROOT"/20??-??-??*; do
     [[ -d $d && $(basename "$d") < $DATE ]] && compgen -G "$d/*/summary.json" > /dev/null && prev=$d
 done
 if "$REPORT" "$NIGHT" ${prev:+--previous "$prev"} > "$NIGHT/report.md" 2>> "$LOG"; then

@@ -4,6 +4,8 @@
 
 mod common;
 
+use std::collections::BTreeSet;
+
 use common::{Gen, Reply, Server, profile};
 use ognivo_evals::t2::{self, Target};
 use ognivo_models::profile as profiles;
@@ -113,13 +115,38 @@ async fn a_scripted_model_passes_and_fails_and_is_counted() {
             .exists()
     );
 
-    let sum = t2::summarize(&p.id, json!({}), &[1, 2], &[good, bad]);
+    let results = [good, bad];
+    let sum = t2::summarize(&p.id, json!({}), &[1, 2], &results, &BTreeSet::new());
     assert_eq!((sum.runs, sum.passed), (2, 1));
     assert_eq!((sum.parse_ok.ok, sum.parse_ok.of), (5, 5));
     assert_eq!((sum.edit_first_try.ok, sum.edit_first_try.of), (1, 2));
+    assert_eq!(sum.edit_first_try_ambiguous.of, 0);
     assert_eq!((sum.schema_ok.ok, sum.schema_ok.of), (3, 3));
     assert_eq!(sum.categories["recovery"], [1, 2]);
     assert_eq!(sum.failed, ["recovery-stale-description.2"]);
+
+    // the edits of an ambiguous scenario count apart from the exit gate
+    let apart = BTreeSet::from(["recovery-stale-description".to_owned()]);
+    let sum = t2::summarize(&p.id, json!({}), &[1, 2], &results, &apart);
+    assert_eq!(sum.edit_first_try.of, 0);
+    let a = &sum.edit_first_try_ambiguous;
+    assert_eq!((a.ok, a.of), (1, 2));
+}
+
+#[test]
+fn the_scenarios_with_a_duplicate_on_purpose_are_ambiguous() {
+    let all = t2::load(&t2::scenarios_dir()).unwrap();
+    assert_eq!(
+        t2::ambiguous(&all),
+        BTreeSet::from(
+            [
+                "edit-fix-operator",
+                "edit-python-indent",
+                "recovery-ambiguous-line"
+            ]
+            .map(str::to_owned)
+        )
+    );
 }
 
 #[tokio::test]

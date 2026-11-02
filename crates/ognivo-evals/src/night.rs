@@ -2,15 +2,17 @@
 //! its own directory of the night (`<night>/<model>/summary.json` and `results.jsonl`),
 //! next to `night.json`, what the script ran and how it went. The report puts the models
 //! side by side, says how each moved since the night before, and lists the scenarios that
-//! failed at least once.
+//! failed at least once. The rates are counted again from each model's results, so two
+//! nights compare by the same definitions even when an older ognivo wrote the summaries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Deserialize;
+use serde_json::Value;
 
-use crate::t2::{Rate, RunResult, Summary};
+use crate::t2::{Rate, RunResult, Summary, summarize};
 
 /// What `scripts/night.sh` writes about the night.
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -32,7 +34,21 @@ struct Model {
     results: Vec<RunResult>,
 }
 
-fn load(dir: &Path) -> Result<(Night, BTreeMap<String, Model>), String> {
+/// What a model's `summary.json` says about the run itself; the rest is counted again.
+#[derive(Deserialize)]
+struct Header {
+    profile: String,
+    #[serde(default)]
+    server: Value,
+    #[serde(default)]
+    seeds: Vec<u32>,
+}
+
+/// The night in `dir`; the edits of the scenarios in `ambiguous` count apart.
+fn load(
+    dir: &Path,
+    ambiguous: &BTreeSet<String>,
+) -> Result<(Night, BTreeMap<String, Model>), String> {
     let night: Night = match std::fs::read_to_string(dir.join("night.json")) {
         Ok(t) => {
             serde_json::from_str(&t).map_err(|e| format!("{}/night.json: {e}", dir.display()))?
@@ -46,14 +62,16 @@ fn load(dir: &Path) -> Result<(Night, BTreeMap<String, Model>), String> {
         let Ok(text) = std::fs::read_to_string(path.join("summary.json")) else {
             continue;
         };
-        let summary: Summary = serde_json::from_str(&text)
+        let h: Header = serde_json::from_str(&text)
             .map_err(|e| format!("{}/summary.json: {e}", path.display()))?;
-        let results = std::fs::read_to_string(path.join("results.jsonl"))
+        let results: Vec<RunResult> = std::fs::read_to_string(path.join("results.jsonl"))
             .unwrap_or_default()
             .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter_map(|l| serde_json::from_str::<RunResult>(l).ok())
+            .filter(|r| h.seeds.is_empty() || h.seeds.contains(&r.seed))
             .collect();
-        models.insert(summary.profile.clone(), Model { summary, results });
+        let summary = summarize(&h.profile, h.server, &h.seeds, &results, ambiguous);
+        models.insert(h.profile, Model { summary, results });
     }
     Ok((night, models))
 }
@@ -84,9 +102,14 @@ fn moved(before: Option<f64>, now: Option<f64>) -> String {
     }
 }
 
-/// The report of the night in `dir` as Markdown, compared with the night in `previous`.
-pub fn report(dir: &Path, previous: Option<&Path>) -> Result<String, String> {
-    let (night, models) = load(dir)?;
+/// The report of the night in `dir` as Markdown, compared with the night in `previous`; the
+/// edits of the scenarios in `ambiguous` count apart.
+pub fn report(
+    dir: &Path,
+    previous: Option<&Path>,
+    ambiguous: &BTreeSet<String>,
+) -> Result<String, String> {
+    let (night, models) = load(dir, ambiguous)?;
     let mut out = String::new();
     let date = if night.date.is_empty() {
         dir.file_name()
@@ -138,27 +161,31 @@ pub fn report(dir: &Path, previous: Option<&Path>) -> Result<String, String> {
         out.push_str("Nothing ran.\n");
         return Ok(out);
     }
-    out.push_str("| model | runs | passed | parse_ok | schema_ok | edit first try | truncated calls run | cache hit | min |\n");
-    out.push_str("|---|---|---|---|---|---|---|---|---|\n");
+    out.push_str("| model | runs | passed | parse_ok | schema_ok | edit first try | ambiguous edits | truncated calls run | cache hit | min |\n");
+    out.push_str("|---|---|---|---|---|---|---|---|---|---|\n");
     for (id, m) in &models {
         let s = &m.summary;
         let _ = writeln!(
             out,
-            "| {id} | {} | {} ({}) | {} | {} | {} | {} | {} | {:.0} |",
+            "| {id} | {} | {} ({}) | {} | {} | {} | {} | {} | {} | {:.0} |",
             s.runs,
             s.passed,
             passed(s).map_or("—".into(), |p| format!("{p:.0}%")),
             pct(&s.parse_ok),
             pct(&s.schema_ok),
             pct(&s.edit_first_try),
+            pct(&s.edit_first_try_ambiguous),
             s.counts.truncated_executed,
             pct(&s.cache_hit),
             s.minutes
         );
     }
+    out.push_str(
+        "\n`edit first try` leaves out the scenarios whose text to change is there twice on purpose; their first tries are `ambiguous edits`.\n",
+    );
 
     if let Some(prev) = previous
-        && let Ok((before_night, before)) = load(prev)
+        && let Ok((before_night, before)) = load(prev, ambiguous)
         && !before.is_empty()
     {
         let when = if before_night.date.is_empty() {
@@ -257,11 +284,13 @@ mod tests {
     fn write(dir: &Path, model: &str, results: &[RunResult]) {
         let d = dir.join(model);
         std::fs::create_dir_all(&d).unwrap();
+        // written as by an ognivo that counted every edit together
         let s = summarize(
             model,
             json!({"build": "b11924-12cc59ba4"}),
             &[1, 2],
             results,
+            &BTreeSet::new(),
         );
         std::fs::write(d.join("summary.json"), serde_json::to_string(&s).unwrap()).unwrap();
         let lines: String = results
@@ -286,7 +315,7 @@ mod tests {
         write(
             &now,
             "gpt-oss-20b",
-            &[result("a", 1, true, (1, 0)), result("b", 1, true, (0, 0))],
+            &[result("a", 1, true, (1, 0)), result("b", 1, true, (1, 1))],
         );
         write(
             &now,
@@ -298,15 +327,16 @@ mod tests {
             "notes": ["gemma-4-26b-a4b: llama-server did not start"]});
         std::fs::write(now.join("night.json"), night.to_string()).unwrap();
 
-        let r = report(&now, Some(&before)).unwrap();
+        let r = report(&now, Some(&before), &BTreeSet::from(["b".to_owned()])).unwrap();
         assert!(r.starts_with("# ognivo night 2026-11-04\n\nognivo 66b1de5aabbc · window 03:00-06:00 · seeds 1,2 · llama.cpp b11924-12cc59ba4\n"), "{r}");
         assert!(
             r.contains("- gemma-4-26b-a4b: llama-server did not start\n"),
             "{r}"
         );
         assert!(r.contains("No results for gemma-4-26b-a4b."), "{r}");
+        // the summary counted b's edits with a's; the report counts them apart again
         assert!(
-            r.contains("| gpt-oss-20b | 2 | 2 (100%) | 100.0% [67.6–100.0] |"),
+            r.contains("| gpt-oss-20b | 2 | 2 (100%) | 100.0% [67.6–100.0] | 100.0% [61.0–100.0] | 100.0% [20.7–100.0] | 50.0% [9.5–90.5] | 0 |"),
             "{r}"
         );
         assert!(r.contains("| gpt-oss-20b | 50.0% → 100.0% (+50.0) | 100.0% → 100.0% (+0.0) | 50.0% → 100.0% (+50.0) |"), "{r}");

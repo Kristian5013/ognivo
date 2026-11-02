@@ -2,10 +2,13 @@
 //!
 //!   night-report NIGHT_DIR [--previous NIGHT_DIR]
 //!
-//! prints it as Markdown.
+//! prints it as Markdown. Which scenarios are ambiguous comes from the scenarios of this
+//! checkout.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use ognivo_evals::t2;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -19,7 +22,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match ognivo_evals::night::report(&night, previous.as_deref()) {
+    let ambiguous = match t2::load(&t2::scenarios_dir()) {
+        Ok(scenarios) => t2::ambiguous(&scenarios),
+        Err(e) => {
+            eprintln!("night-report: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match ognivo_evals::night::report(&night, previous.as_deref(), &ambiguous) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
