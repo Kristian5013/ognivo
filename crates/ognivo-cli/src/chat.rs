@@ -1,7 +1,9 @@
 //! `ognivo chat`: the line-mode REPL of docs/architecture.md §10. A turn streams to the
 //! terminal (`view.rs` shows it), actions that need the user ask y/n/a, and ^C stops a turn
-//! without ending the session. The conversation lives as long as the process: there is no store yet and no
-//! compaction, so `/clear` starts over when the context fills up.
+//! without ending the session. Between turns `/changes`, `/accept` and `/revert` review
+//! what the agent changed (the edit journal, §8). The conversation lives as long as the
+//! process: there is no store yet and no compaction, so `/clear` starts over when the
+//! context fills up.
 //!
 //! Exit codes: 0 `/exit` or ^D; 2 bad usage; 3 the server failed at the start; 143 SIGTERM.
 
@@ -15,8 +17,10 @@ use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
+use ognivo_tools::files;
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
@@ -24,7 +28,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::session::{Failure, SessionArgs};
-use crate::view::{Paint, Screen, Style, View, duration, printable};
+use crate::view::{self, Paint, Screen, Style, View, duration, printable};
 
 #[derive(Debug, Args)]
 pub struct ChatArgs {
@@ -36,11 +40,17 @@ pub struct ChatArgs {
 }
 
 const HELP: &str = "\
-/help   this help
-/clear  start a new conversation; what the session changed stays unreviewed
-/exit   quit; so does ^D
+/help            this help
+/changes [file]  what the agent changed and nobody reviewed yet; with a file, all its diff
+/accept [file]   mark it reviewed; with nothing left, builds and tests run without asking
+/revert [file]   put the files back as they were; commands with side effects stay done
+/clear           start a new conversation; what the session changed stays unreviewed
+/exit            quit; so does ^D
 A line that ends in \\ goes on in the next one; \"\"\" on a line of its own starts and ends a block.
 ^C stops the running turn, and the conversation goes on.";
+
+/// Items named in a list of what is unreviewed; the rest are counted.
+const SUMMARY_FILES: usize = 3;
 
 fn fail(f: Failure) -> anyhow::Result<ExitCode> {
     eprintln!("ognivo chat: {}", f.message);
@@ -83,7 +93,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             "project {}{}",
             root.display(),
             if agent.unreviewed_changes() {
-                " · has unreviewed changes"
+                " · not a clean git tree: builds and tests ask until /accept"
             } else {
                 ""
             }
@@ -107,6 +117,18 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Entry::Clear => {
                 agent.clear();
                 screen.line("· new conversation", Paint::Dim);
+                continue;
+            }
+            Entry::Changes(file) => {
+                changes(&mut agent, &screen, &root, file.as_deref());
+                continue;
+            }
+            Entry::Accept(file) => {
+                accept(&mut agent, &screen, &root, file.as_deref());
+                continue;
+            }
+            Entry::Revert(file) => {
+                revert(&mut agent, &screen, &input, &root, file.as_deref()).await;
                 continue;
             }
             Entry::Exit => return Ok(ExitCode::SUCCESS),
@@ -165,6 +187,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         if unanswered {
             verification(&screen, &agent.verification());
         }
+        unreviewed(&mut agent, &screen);
         screen.line(
             &format!(
                 "({} steps · {} · {} generated · context {}{})",
@@ -202,6 +225,193 @@ fn verification(screen: &Screen, v: &Verification) {
     }
 }
 
+/// The line under a turn that lists what waits for review, if anything does.
+fn unreviewed(agent: &mut Agent, screen: &Screen) {
+    let files: Vec<String> = agent
+        .changes()
+        .iter()
+        .map(|c| format!("{} ({})", c.shown, view::counts(c.created, &c.hunks)))
+        .collect();
+    let mut what = Vec::new();
+    if !files.is_empty() {
+        what.push(listed(&files));
+    }
+    match agent.side_effects().len() {
+        0 => {}
+        1 => what.push("1 command with side effects".to_owned()),
+        n => what.push(format!("{n} commands with side effects")),
+    }
+    if !what.is_empty() {
+        let line = format!(
+            "· unreviewed: {} · /changes /accept /revert",
+            what.join(", ")
+        );
+        screen.line(&printable(&line), Paint::Dim);
+    }
+}
+
+/// `a, b, c and 2 more`.
+fn listed(items: &[String]) -> String {
+    let mut out = items[..items.len().min(SUMMARY_FILES)].join(", ");
+    if items.len() > SUMMARY_FILES {
+        out.push_str(&format!(" and {} more", items.len() - SUMMARY_FILES));
+    }
+    out
+}
+
+/// `/changes`: every unreviewed file with a short diff, or one file's whole diff.
+fn changes(agent: &mut Agent, screen: &Screen, root: &Path, file: Option<&str>) {
+    let all = agent.changes();
+    let Some(file) = file else {
+        if all.is_empty() && agent.side_effects().is_empty() && !agent.inherited_changes() {
+            screen.line("· nothing unreviewed", Paint::Dim);
+            return;
+        }
+        for c in &all {
+            show_change(screen, c, false);
+        }
+        for command in agent.side_effects() {
+            let line = format!(
+                "· ran `{}`: its side effects are not in the journal",
+                printable(command)
+            );
+            screen.line(&line, Paint::Yellow);
+        }
+        if agent.inherited_changes() {
+            screen.line(
+                "· and what the project had before this session (git status shows it)",
+                Paint::Dim,
+            );
+        }
+        screen.line(
+            "· /accept or /revert all of it, or one file: /revert <file>",
+            Paint::Dim,
+        );
+        return;
+    };
+    match find(&all, root, file) {
+        Some(c) => show_change(screen, c, true),
+        None => screen.line(
+            &format!("· {file}: no unreviewed change by ognivo"),
+            Paint::Dim,
+        ),
+    }
+}
+
+fn show_change(screen: &Screen, c: &FileChange, whole: bool) {
+    for (line, paint) in view::change_lines(c, whole) {
+        screen.line(&line, paint);
+    }
+}
+
+/// The change of the file the user named, relative to the project root or absolute.
+fn find<'a>(all: &'a [FileChange], root: &Path, file: &str) -> Option<&'a FileChange> {
+    let path = files::resolve(root, file);
+    all.iter().find(|c| c.path == path)
+}
+
+/// `/accept`: everything, or one file.
+fn accept(agent: &mut Agent, screen: &Screen, root: &Path, file: Option<&str>) {
+    let path = file.map(|f| files::resolve(root, f));
+    let commands = agent.side_effects().len();
+    let inherited = agent.inherited_changes();
+    match agent.accept(path.as_deref()) {
+        Ok(mut what) => {
+            if file.is_none() {
+                match commands {
+                    0 => {}
+                    1 => what.push("1 command with side effects".to_owned()),
+                    n => what.push(format!("{n} commands with side effects")),
+                }
+                if inherited {
+                    what.push("what the project had before this session".to_owned());
+                }
+            }
+            if what.is_empty() {
+                screen.line("· nothing to accept", Paint::Dim);
+            } else {
+                let line = format!("· accepted: {}", what.join(", "));
+                screen.line(&printable(&line), Paint::Dim);
+            }
+            if !agent.unreviewed_changes() {
+                screen.line(
+                    "· nothing unreviewed: builds and tests run without asking",
+                    Paint::Dim,
+                );
+            }
+        }
+        Err(JournalError::NotChanged(_)) => {
+            let line = format!(
+                "· {}: no unreviewed change by ognivo",
+                file.unwrap_or_default()
+            );
+            screen.line(&line, Paint::Dim);
+        }
+        Err(e) => screen.line(&printable(&format!("· {e}")), Paint::Yellow),
+    }
+}
+
+/// `/revert`: every unreviewed file, or one. A file that changed otherwise too is reverted
+/// only after a yes; commands with side effects stay done.
+async fn revert(
+    agent: &mut Agent,
+    screen: &Screen,
+    input: &Input,
+    root: &Path,
+    file: Option<&str>,
+) {
+    let all = agent.changes();
+    let targets: Vec<&FileChange> = match file {
+        Some(f) => match find(&all, root, f) {
+            Some(c) => vec![c],
+            None => {
+                screen.line(
+                    &format!("· {f}: no unreviewed change by ognivo"),
+                    Paint::Dim,
+                );
+                return;
+            }
+        },
+        None => all.iter().collect(),
+    };
+    if targets.is_empty() {
+        screen.line("· no file to revert", Paint::Dim);
+    }
+    for c in targets {
+        let name = printable(&c.shown);
+        if c.drifted && !confirmed(screen, input, &name).await {
+            screen.line(&format!("· kept {name}"), Paint::Dim);
+            continue;
+        }
+        match agent.revert(&c.path, c.drifted) {
+            Ok(Reverted::Restored) => screen.line(&format!("· reverted {name}"), Paint::Dim),
+            Ok(Reverted::Removed) => screen.line(
+                &format!("· removed {name}: ognivo had created it"),
+                Paint::Dim,
+            ),
+            Err(e) => screen.line(&printable(&format!("· {e}")), Paint::Yellow),
+        }
+    }
+    if file.is_none() && !agent.side_effects().is_empty() {
+        screen.line(
+            "· commands with side effects are not undone; /accept once you have checked them",
+            Paint::Yellow,
+        );
+    }
+}
+
+/// Asks before a revert that would lose what something else changed in the file.
+async fn confirmed(screen: &Screen, input: &Input, name: &str) -> bool {
+    let question = format!(
+        "? {name} also changed by a command or outside ognivo since its edits; a revert loses that"
+    );
+    screen.line(&question, Paint::Bold);
+    matches!(
+        input.read("  revert it anyway? [y]es [n]o > ").await,
+        Read::Line(line) if answer(&line) == Some(Answer::Yes)
+    )
+}
+
 fn why(end: &TurnEnd, max_steps: u32) -> String {
     match end {
         TurnEnd::StepLimit => format!("the step limit ({max_steps}) was reached"),
@@ -226,6 +436,10 @@ enum Entry {
     Message(String),
     Help,
     Clear,
+    /// A file, if one was named.
+    Changes(Option<String>),
+    Accept(Option<String>),
+    Revert(Option<String>),
     Exit,
 }
 
@@ -260,12 +474,24 @@ async fn read_entry(input: &Input, screen: &Screen) -> Entry {
     }
 }
 
-/// A command is a whole entry: a message may start with a path like `/etc/hosts`.
+/// A command is a whole entry of one line: a message may start with a path like
+/// `/etc/hosts`.
 fn command(text: &str) -> Option<Entry> {
-    match text.trim() {
-        "/help" | "/?" => Some(Entry::Help),
-        "/clear" | "/new" => Some(Entry::Clear),
-        "/exit" | "/quit" => Some(Entry::Exit),
+    let text = text.trim();
+    if text.contains('\n') {
+        return None;
+    }
+    let (word, arg) = match text.split_once(char::is_whitespace) {
+        Some((word, arg)) => (word, Some(arg.trim().to_owned())),
+        None => (text, None),
+    };
+    match (word, arg) {
+        ("/help" | "/?", None) => Some(Entry::Help),
+        ("/clear" | "/new", None) => Some(Entry::Clear),
+        ("/exit" | "/quit", None) => Some(Entry::Exit),
+        ("/changes" | "/diff", arg) => Some(Entry::Changes(arg)),
+        ("/accept", arg) => Some(Entry::Accept(arg)),
+        ("/revert", arg) => Some(Entry::Revert(arg)),
         _ => None,
     }
 }
@@ -333,6 +559,10 @@ impl Approver for Ask {
             let question = format!("? {} {}", req.tool, printable(&req.action));
             self.screen.line(&question, Paint::Bold);
             self.screen.line(&format!("  {}", req.reason), Paint::Plain);
+            if !req.unreviewed.is_empty() {
+                let line = format!("  unreviewed: {}", listed(&req.unreviewed));
+                self.screen.line(&printable(&line), Paint::Plain);
+            }
             loop {
                 match self.input.read("  allow? [y]es [n]o [a]lways > ").await {
                     Read::Line(line) => match answer(&line) {
@@ -515,6 +745,12 @@ mod tests {
         assert_eq!(command("/clear"), Some(Entry::Clear));
         assert_eq!(command("/etc/hosts is wrong"), None);
         assert_eq!(command("/exit now"), None);
+        assert_eq!(command("/changes"), Some(Entry::Changes(None)));
+        assert_eq!(
+            command("/revert  src/lib.rs "),
+            Some(Entry::Revert(Some("src/lib.rs".into())))
+        );
+        assert_eq!(command("/accept\nand more"), None);
     }
 
     #[test]

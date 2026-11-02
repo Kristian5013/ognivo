@@ -334,6 +334,12 @@ pub fn plan_edit(
     }
 }
 
+/// Writes back content a file had, the way changes are written: atomically, keeping the
+/// permissions of the file it replaces. For the edit journal's revert.
+pub fn restore(path: &Path, shown: &Path, bytes: &[u8]) -> Result<(), FileError> {
+    atomic_write(path, shown, bytes)
+}
+
 fn read_bytes(t: &Target) -> Result<Vec<u8>, FileError> {
     match fs::metadata(&t.path) {
         Ok(m) if m.is_dir() => Err(FileError::IsDirectory(t.shown.clone())),

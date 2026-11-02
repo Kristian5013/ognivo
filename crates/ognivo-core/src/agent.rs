@@ -39,6 +39,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
 use crate::verify::{self, Ledger, Run, Verification};
 
@@ -56,6 +57,8 @@ pub struct ApprovalRequest {
     /// What would happen, e.g. the command line or the file path.
     pub action: String,
     pub reason: String,
+    /// For running project code: what is unreviewed, one item each (§8); otherwise empty.
+    pub unreviewed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,7 +213,7 @@ pub struct AgentOptions {
     /// Seed of the first step; each step adds one, so a run is reproducible.
     pub seed: u32,
     /// Review state at the start: clean only when nothing unreviewed is known to exist
-    /// (for now: a clean git tree; the edit journal takes over with the store).
+    /// (for now: a clean git tree). The edit journal follows the session's own changes.
     pub workspace: WorkspaceState,
     /// Wall-clock limit of each turn.
     pub time_limit: Option<Duration>,
@@ -273,7 +276,9 @@ pub struct Agent {
     /// Files this session has read or written: only those may be overwritten whole.
     seen: HashSet<PathBuf>,
     clock: Option<Clock>,
-    workspace: WorkspaceState,
+    journal: Journal,
+    /// Files the user reverted since the model's last turn, for its next message.
+    reverted: Vec<String>,
     /// What this turn changed, ran and was refused.
     ledger: Ledger,
     /// This turn's calls and results, for the repeat detector.
@@ -329,7 +334,8 @@ impl Agent {
             cwd,
             seen: HashSet::new(),
             clock: None,
-            workspace: opts.workspace,
+            journal: Journal::new(opts.workspace.unreviewed_changes),
+            reverted: Vec::new(),
             ledger: Ledger::default(),
             repeats: Repeats::default(),
             stuck: None,
@@ -357,7 +363,52 @@ impl Agent {
 
     /// Whether the project has changes nobody has reviewed yet (§8).
     pub fn unreviewed_changes(&self) -> bool {
-        self.workspace.unreviewed_changes
+        !self.journal.is_clean()
+    }
+
+    fn workspace(&self) -> WorkspaceState {
+        if self.journal.is_clean() {
+            WorkspaceState::CLEAN
+        } else {
+            WorkspaceState::DIRTY
+        }
+    }
+
+    /// The files the session changed and nobody reviewed yet, as they are now (§8).
+    pub fn changes(&mut self) -> Vec<FileChange> {
+        self.journal.changes()
+    }
+
+    /// Commands with side effects since the last accept: listed, never undone.
+    pub fn side_effects(&self) -> &[String] {
+        self.journal.side_effects()
+    }
+
+    /// Whether changes from before the session still wait for an accept.
+    pub fn inherited_changes(&self) -> bool {
+        self.journal.inherited()
+    }
+
+    /// Marks one file's change as reviewed, or everything with `None`; once nothing is
+    /// left, builds and tests run without a question again. Returns the files it covered.
+    pub fn accept(&mut self, path: Option<&Path>) -> Result<Vec<String>, JournalError> {
+        self.journal.accept(path)
+    }
+
+    /// Puts a file back as it was before the session's unreviewed changes (`force`: also
+    /// when something else changed it too). The model learns of it with the next message.
+    pub fn revert(&mut self, path: &Path, force: bool) -> Result<Reverted, JournalError> {
+        let how = self.journal.revert(path, force)?;
+        self.seen.remove(path);
+        let name = Target::new(path.to_owned(), &self.opts.root).shown;
+        let item = match how {
+            Reverted::Restored => name.display().to_string(),
+            Reverted::Removed => format!("{} (removed: you had created it)", name.display()),
+        };
+        if !self.reverted.contains(&item) {
+            self.reverted.push(item);
+        }
+        Ok(how)
     }
 
     /// Ends a turn that was dropped before its end (the user stopped it, or the server
@@ -418,13 +469,20 @@ impl Agent {
             limit,
             told: 0,
         });
-        let user = match self.opts.time_limit {
+        let mut user = match self.opts.time_limit {
             Some(limit) => format!(
                 "{user}\n\n[ognivo] Time limit: {}. ognivo stops the turn when it runs out.",
                 about(limit)
             ),
             None => user.to_owned(),
         };
+        if !self.reverted.is_empty() {
+            user.push_str(&format!(
+                "\n\n[ognivo] Since your last turn the user reverted your changes to {}: they are as they were before your edits. Read them again before you edit them.",
+                self.reverted.join(", ")
+            ));
+            self.reverted.clear();
+        }
         self.messages.push(ChatMessage::User(user));
         // §9: every turn starts in the project root
         self.cwd = self.opts.root.clone();
@@ -702,6 +760,7 @@ impl Agent {
                         approval::decide_read(&p, &root),
                         &p.display().to_string(),
                         "outside the project",
+                        Vec::new(),
                         on,
                     )
                     .await
@@ -728,6 +787,7 @@ impl Agent {
                         approval::decide_read(&base, &root),
                         &base.display().to_string(),
                         "outside the project",
+                        Vec::new(),
                         on,
                     )
                     .await
@@ -745,6 +805,7 @@ impl Agent {
                         approval::decide_read(&base, &root),
                         &base.display().to_string(),
                         "outside the project",
+                        Vec::new(),
                         on,
                     )
                     .await
@@ -786,6 +847,7 @@ impl Agent {
                                 decision,
                                 &p.display().to_string(),
                                 "a protected path or outside the project",
+                                Vec::new(),
                                 on,
                             )
                             .await
@@ -824,6 +886,7 @@ impl Agent {
                                 decision,
                                 &p.display().to_string(),
                                 "a protected path or outside the project",
+                                Vec::new(),
                                 on,
                             )
                             .await
@@ -853,14 +916,15 @@ impl Agent {
                 if let Err(e) = self.room() {
                     return e;
                 }
+                let decision = approval::decide(effect, self.workspace());
+                let unreviewed =
+                    if effect == Effect::ExecutesProjectCode && decision == Decision::Ask {
+                        self.journal.summary()
+                    } else {
+                        Vec::new()
+                    };
                 if let Some(refusal) = self
-                    .permit(
-                        tool,
-                        approval::decide(effect, self.workspace),
-                        &command,
-                        reason,
-                        on,
-                    )
+                    .permit(tool, decision, &command, reason, unreviewed, on)
                     .await
                 {
                     if checks {
@@ -900,7 +964,7 @@ impl Agent {
                             self.ledger.side_effect(&command);
                         }
                         if effect == Effect::SideEffects {
-                            self.workspace = WorkspaceState::DIRTY;
+                            self.journal.side_effect(&command);
                         }
                         if effect != Effect::ReadOnly {
                             self.repeats.changed();
@@ -943,15 +1007,21 @@ impl Agent {
         path: PathBuf,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> String {
+        // what the write replaces, for the journal; without it the write must not happen
+        let before = match Journal::before_write(&path) {
+            Ok(b) => b,
+            Err(e) => return format!("[error] not written: {e}"),
+        };
         let changed = AgentEvent::FileChanged {
             path: change.shown.display().to_string(),
             created: change.before.is_none(),
             hunks: change.hunks(),
         };
+        let (shown, after) = (change.shown.clone(), change.after.clone().into_bytes());
         match change.commit() {
             Ok(text) => {
                 self.stats.edits_applied += u32::from(text.starts_with("[edit:"));
-                self.workspace = WorkspaceState::DIRTY;
+                self.journal.record(path.clone(), shown, before, after);
                 self.repeats.changed();
                 self.ledger.changed(path.clone());
                 self.seen.insert(path);
@@ -965,7 +1035,7 @@ impl Agent {
     /// Whether a build or test could run now: silently, or after a question someone can
     /// answer.
     fn can_run_project_code(&self) -> bool {
-        approval::decide(Effect::ExecutesProjectCode, self.workspace) == Decision::Allow
+        approval::decide(Effect::ExecutesProjectCode, self.workspace()) == Decision::Allow
             || self.approver.can_ask()
     }
 
@@ -976,6 +1046,7 @@ impl Agent {
         decision: Decision,
         action: &str,
         reason: &str,
+        unreviewed: Vec<String>,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Option<String> {
         if decision == Decision::Allow {
@@ -985,6 +1056,7 @@ impl Agent {
             tool: tool.to_owned(),
             action: action.to_owned(),
             reason: reason.to_owned(),
+            unreviewed,
         };
         match self.approver.approve(&req).await {
             Verdict::Allow => None,
@@ -1805,6 +1877,106 @@ mod tests {
         assert!(
             results.iter().all(|t| !t.contains("[ognivo]")),
             "{results:?}"
+        );
+    }
+
+    /// Refuses every question and keeps it.
+    #[derive(Debug, Default)]
+    struct Asked(Arc<Mutex<Vec<ApprovalRequest>>>);
+
+    impl Approver for Asked {
+        fn approve<'a>(&'a mut self, req: &'a ApprovalRequest) -> BoxFuture<'a, Verdict> {
+            self.0.lock().unwrap().push(req.clone());
+            Box::pin(async { Verdict::Refuse("not now".into()) })
+        }
+
+        fn can_ask(&self) -> bool {
+            true
+        }
+    }
+
+    fn edit_lib() -> ChatCompletion {
+        calls(
+            &[(
+                "edit",
+                serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"}),
+            )],
+            FinishReason::ToolCalls,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_question_about_project_code_lists_what_is_unreviewed() {
+        let steps = vec![
+            edit_lib(),
+            calls(
+                &[("shell", serde_json::json!({"command": "touch made"}))],
+                FinishReason::ToolCalls,
+            ),
+            calls(
+                &[("shell", serde_json::json!({"command": "cargo test"}))],
+                FinishReason::ToolCalls,
+            ),
+            answer("done"),
+            answer("done"),
+        ];
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut r = agent_with(steps, WorkspaceState::CLEAN, Box::new(Asked(asked.clone())));
+        turn(&mut r).await;
+        let asked = asked.lock().unwrap();
+        // `touch` asks for itself; `cargo test` asks because of what is unreviewed
+        assert_eq!(asked.len(), 2, "{asked:?}");
+        assert!(asked[0].unreviewed.is_empty());
+        assert_eq!(asked[1].action, "cargo test");
+        assert_eq!(asked[1].unreviewed, ["lib.rs"]);
+    }
+
+    #[tokio::test]
+    async fn a_reverted_change_is_undone_and_the_model_hears_of_it() {
+        let mut r = agent(
+            vec![edit_lib(), answer("done"), answer("ok")],
+            WorkspaceState::CLEAN,
+        );
+        turn(&mut r).await;
+        assert!(r.agent.unreviewed_changes());
+        let lib = r.root.join("lib.rs");
+        let changes = r.agent.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            (changes[0].shown.as_str(), changes[0].hunks.len()),
+            ("lib.rs", 1)
+        );
+        assert_eq!(r.agent.revert(&lib, false).unwrap(), Reverted::Restored);
+        assert_eq!(
+            std::fs::read_to_string(&lib).unwrap(),
+            "fn a() -> u32 {\n    1\n}\n"
+        );
+        assert!(!r.agent.unreviewed_changes());
+        turn(&mut r).await;
+        let seen = r.seen.lock().unwrap();
+        let last = seen.last().unwrap().messages.last().unwrap().clone();
+        assert_eq!(
+            last,
+            ChatMessage::User(
+                "fix it\n\n[ognivo] Since your last turn the user reverted your changes to lib.rs: they are as they were before your edits. Read them again before you edit them.".into()
+            )
+        );
+        // told once
+        drop(seen);
+        assert!(r.agent.reverted.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepted_changes_leave_nothing_unreviewed() {
+        let mut r = agent(vec![edit_lib(), answer("done")], WorkspaceState::DIRTY);
+        turn(&mut r).await;
+        assert!(r.agent.inherited_changes());
+        assert_eq!(r.agent.accept(None).unwrap(), ["lib.rs"]);
+        assert!(!r.agent.unreviewed_changes());
+        assert!(r.agent.changes().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    2\n}\n"
         );
     }
 }

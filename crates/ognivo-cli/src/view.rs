@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use ognivo_core::agent::AgentEvent;
+use ognivo_core::journal::FileChange;
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::projection::Call;
 
@@ -197,20 +198,11 @@ impl View {
     }
 
     fn changed(&mut self, path: &str, created: bool, hunks: &[Hunk]) {
-        let removed: usize = hunks.iter().map(|h| h.removed.len()).sum();
-        let added: usize = hunks.iter().map(|h| h.added.len()).sum();
-        let counts = if created {
-            format!("new, {added} lines")
-        } else if hunks.is_empty() {
-            "unchanged".to_owned()
-        } else {
-            format!("+{added} -{removed}")
-        };
         if self.call.is_none() {
             self.screen
                 .line(&format!("→ {}", short(path, LINE_CHARS)), Paint::Plain);
         }
-        self.after(&counts, Paint::Dim);
+        self.after(&counts(created, hunks), Paint::Dim);
         for (line, paint) in diff_lines(hunks, DIFF_LINES) {
             self.screen.line(&line, paint);
         }
@@ -339,6 +331,42 @@ fn tail(result: &str, n: usize) -> Vec<&str> {
         .collect();
     lines.drain(..lines.len().saturating_sub(n));
     lines
+}
+
+/// `+3 -1`, or `new, 25 lines` for a file that did not exist.
+pub fn counts(created: bool, hunks: &[Hunk]) -> String {
+    let removed: usize = hunks.iter().map(|h| h.removed.len()).sum();
+    let added: usize = hunks.iter().map(|h| h.added.len()).sum();
+    if created {
+        format!("new, {added} line{}", if added == 1 { "" } else { "s" })
+    } else if hunks.is_empty() {
+        "unchanged".to_owned()
+    } else {
+        format!("+{added} -{removed}")
+    }
+}
+
+/// A file's unreviewed change for `/changes`: a line with its counts, then its diff, all
+/// of it when `whole`.
+pub fn change_lines(c: &FileChange, whole: bool) -> Vec<(String, Paint)> {
+    let mut head = format!(
+        "→ {} · {}",
+        short(&c.shown, LINE_CHARS),
+        counts(c.created, &c.hunks)
+    );
+    if c.deleted {
+        head.push_str(", deleted");
+    }
+    let mut out = vec![(head, Paint::Plain)];
+    if c.drifted {
+        let note = "  also changed by a command or outside ognivo since its edits";
+        out.push((note.to_owned(), Paint::Yellow));
+    }
+    out.extend(diff_lines(
+        &c.hunks,
+        if whole { usize::MAX } else { DIFF_LINES },
+    ));
+    out
 }
 
 /// A change as numbered `-` and `+` lines, at most `max` of them and a count of the rest.

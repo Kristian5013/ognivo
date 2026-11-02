@@ -12,6 +12,7 @@ publish.workspace = true
 futures.workspace = true
 regex.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 ognivo-models.workspace = true
 ognivo-protocol.workspace = true
 ognivo-store.workspace = true

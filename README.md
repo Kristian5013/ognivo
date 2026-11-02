@@ -10,7 +10,9 @@ Qwen3.8-27B (XML tool calls).
 **Status:** M1 in progress. The line-mode `ognivo chat` and `ognivo run` (one task, no
 user) work on the Generic path (`/v1/chat/completions`), with the special-token guard, the
 repetition guard and a detector of repeated calls; `run` has an optional `--time-limit`.
-Sessions are not stored yet, and there is no compaction: `/clear` starts over.
+The edit journal (in memory for now) lets `chat` show, accept and revert what the agent
+changed: `/changes`, `/accept`, `/revert`. Sessions are not stored yet, and there is no
+compaction: `/clear` starts over.
 
 ## Layout
 

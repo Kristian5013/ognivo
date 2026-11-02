@@ -182,6 +182,123 @@ async fn reads_show_as_one_line_edits_as_a_diff_failures_with_their_end() {
 }
 
 #[tokio::test]
+async fn changes_are_shown_reverted_and_accepted_between_turns() {
+    let (url, bodies) = fake_server(vec![
+        call_stream(
+            "c1",
+            "edit",
+            r#"{"path":"notes.txt","old_string":"two","new_string":"TWO"}"#,
+        ),
+        call_stream("c2", "write", r#"{"path":"new.txt","content":"fresh\n"}"#),
+        answer_stream("Done."),
+        answer_stream("Done."),
+        answer_stream("Noted."),
+    ])
+    .await;
+    let (dir, root) = project();
+    std::fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    let data = dir.path().join("data");
+    let stdin = "fix\n/changes\n/revert new.txt\nnext\n/accept\n/changes\n/exit\n";
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || spawn(&url, &r, &d, stdin).wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    // not a git tree: what it had before the session waits for an accept too
+    assert!(
+        stdout.contains(" · not a clean git tree: builds and tests ask until /accept\n"),
+        "{stdout}"
+    );
+    let expected = [
+        "→ write new.txt · new, 1 line\n  1 + fresh\n",
+        "· unreviewed: new.txt (new, 1 line), notes.txt (+1 -1) · /changes /accept /revert\n",
+        // /changes
+        "→ new.txt · new, 1 line\n  1 + fresh\n→ notes.txt · +1 -1\n  2 - two\n  2 + TWO\n",
+        "· and what the project had before this session (git status shows it)\n",
+        "· removed new.txt: ognivo had created it\n",
+        "Noted.",
+        "· accepted: notes.txt, what the project had before this session\n",
+        "· nothing unreviewed: builds and tests run without asking\n· nothing unreviewed\n",
+    ];
+    let mut at = 0;
+    for text in expected {
+        let found = stdout[at..].find(text);
+        assert!(found.is_some(), "{text:?} after {at}:\n{stdout}");
+        at += found.unwrap() + text.len();
+    }
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+    // the model hears of the revert with the next message
+    let bodies = bodies.lock().unwrap();
+    let last = bodies.last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        last["content"],
+        json!(
+            "next\n\n[ognivo] Since your last turn the user reverted your changes to new.txt (removed: you had created it): they are as they were before your edits. Read them again before you edit them."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_revert_asks_when_something_else_changed_the_file_too() {
+    let (url, _) = fake_server(vec![
+        call_stream(
+            "c1",
+            "edit",
+            r#"{"path":"notes.txt","old_string":"two","new_string":"TWO"}"#,
+        ),
+        call_stream("c2", "shell", r#"{"command":"cargo test"}"#),
+        call_stream("c3", "shell", r#"{"command":"echo extra >> notes.txt"}"#),
+        answer_stream("Done."),
+        answer_stream("Done."),
+    ])
+    .await;
+    let (dir, root) = project();
+    std::fs::write(root.join("notes.txt"), "one\ntwo\nthree\n").unwrap();
+    let data = dir.path().join("data");
+    // all of it: the file, and the command that stays done
+    let stdin = "fix\nn\ny\n/revert\ny\n/exit\n";
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || spawn(&url, &r, &d, stdin).wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    // the question before running project code says what is unreviewed
+    assert!(
+        stdout.contains(
+            "? shell cargo test\n  it runs project code while there are unreviewed changes\n  unreviewed: notes.txt, changes from before this session\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "? notes.txt also changed by a command or outside ognivo since its edits; a revert loses that\n· reverted notes.txt\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("· commands with side effects are not undone"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+}
+
+#[tokio::test]
 async fn a_declined_command_tells_the_model_why() {
     let (url, bodies) = fake_server(vec![
         call_stream("c1", "shell", r#"{"command":"touch nope.txt"}"#),
