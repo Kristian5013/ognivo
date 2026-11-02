@@ -17,6 +17,7 @@ use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::compact;
 use ognivo_core::instructions::Load;
 use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::verify::{self, Verification};
@@ -88,6 +89,10 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         Err(f) => return fail(f),
     };
     let n_ctx = s.opts.n_ctx;
+    let (limit, planned) = (
+        compact::limit(&s.opts.context, n_ctx),
+        compact::limit(&s.opts.context, None),
+    );
     let screen = Screen::new(Style::detect());
     let terminal = tcgetattr(std::io::stdin()).ok();
     let input = Input::spawn(s.opts.data_dir.join("chat_history"));
@@ -155,6 +160,16 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             );
             instructions(&screen, agent.instructions());
         }
+    }
+    if limit < planned {
+        screen.line(
+            &format!(
+                "· the server's context leaves about {} tokens for the conversation where the profile plans for {}: expect frequent compaction",
+                kilo(limit),
+                kilo(planned)
+            ),
+            Paint::Yellow,
+        );
     }
     screen.line("/help · ^C stops a turn · ^D quits", Paint::Dim);
     let mut int = signal(SignalKind::interrupt())?;

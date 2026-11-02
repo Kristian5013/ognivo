@@ -13,7 +13,9 @@
 //!
 //! The model writes the summary in a request with the same prefix and slot, so the server
 //! takes the history from its cache. Without a summary the note says so, and the facts and
-//! the steps remain. Compaction is skipped when it would free too little to matter.
+//! the steps remain. Compaction is skipped when it would free too little to matter, and the
+//! turn stops after [`MAX_IDLE`] compactions in a row with nothing new read or changed
+//! between them: then the files the work needs do not fit the context together.
 
 use ognivo_models::ChatMessage;
 use ognivo_models::profile::ContextBudget;
@@ -33,6 +35,9 @@ const MAX_KEPT_STEPS: usize = 4;
 const MAX_REQUESTS: usize = 8;
 /// Characters of one request in the note.
 const REQUEST_CHARS: usize = 2000;
+/// Idle compactions in a row (nothing new read, nothing changed since the one before)
+/// that end the turn: the work does not fit the context.
+pub const MAX_IDLE: u32 = 2;
 
 /// The last message of a summary request.
 pub const SUMMARY_REQUEST: &str = "[ognivo] The context is nearly full, so the conversation will now be compacted. Write a summary from which you can go on with the work with nothing else: the user's requests and your latest steps are kept, and ognivo adds the changed files and the results of builds and tests itself. Do not call tools; answer with the summary only, in this form:\n\

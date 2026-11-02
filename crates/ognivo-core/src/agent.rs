@@ -292,6 +292,11 @@ impl Clock {
     }
 }
 
+/// `15.9K` tokens.
+fn about_tokens(n: u64) -> String {
+    format!("{:.1}K", n as f64 / 1000.0)
+}
+
 /// `3 min` or `40 s`.
 fn about(d: Duration) -> String {
     match d.as_secs() {
@@ -333,6 +338,12 @@ pub struct Agent {
     requests: Vec<String>,
     /// Where the running turn's request is in the history.
     turn_start: usize,
+    /// Files the turn has read, and whether, since the last compaction, the agent read one
+    /// it had not or changed anything: a compaction without that is idle.
+    turn_reads: HashSet<PathBuf>,
+    news: bool,
+    /// Idle compactions in a row.
+    idle_compactions: u32,
     /// Where the session is kept, if it is.
     session: Option<Session>,
     /// A turn is running: it began and has not ended.
@@ -405,6 +416,9 @@ impl Agent {
             counted: 0,
             requests: Vec::new(),
             turn_start: 0,
+            turn_reads: HashSet::new(),
+            news: true,
+            idle_compactions: 0,
             session: None,
             in_turn: false,
             stats: Stats::default(),
@@ -777,6 +791,31 @@ impl Agent {
         if compact::estimate(&self.messages[1..from]) < tokens / 4 {
             return Ok(None);
         }
+        // M1 live run (gpt-oss, 15.9K): seven compactions, each followed by reading the same
+        // files again, and not one edit
+        let idle = if self.news {
+            0
+        } else {
+            self.idle_compactions + 1
+        };
+        if idle >= compact::MAX_IDLE {
+            let planned = compact::limit(&self.opts.context, None);
+            let mut why = format!(
+                "the work does not fit the context: twice in a row the history had to be compacted with nothing new read and nothing changed since the compaction before; the limit is about {} tokens",
+                about_tokens(limit)
+            );
+            if limit < planned {
+                why.push_str(&format!(
+                    " where the profile plans for {}, so give the server more context (llama-server -c) or narrow the task",
+                    about_tokens(planned)
+                ));
+            } else {
+                why.push_str(", so narrow the task");
+            }
+            return Ok(Some(TurnEnd::Stuck(why)));
+        }
+        self.idle_compactions = idle;
+        self.news = false;
         self.emit(on, AgentEvent::Compacting { tokens, limit });
         let mut messages = self.messages.clone();
         messages.push(ChatMessage::User(compact::SUMMARY_REQUEST.to_owned()));
@@ -822,6 +861,12 @@ impl Agent {
             },
         );
         Ok(None)
+    }
+
+    /// Something in the project changed: repeats are no longer repeats, and the turn moves.
+    fn changed(&mut self) {
+        self.repeats.changed();
+        self.news = true;
     }
 
     /// What ognivo knows for certain, for a compaction's note.
@@ -908,6 +953,9 @@ impl Agent {
         self.cwd = self.opts.root.clone();
         self.ledger = Ledger::default();
         self.repeats = Repeats::default();
+        self.turn_reads.clear();
+        self.news = true;
+        self.idle_compactions = 0;
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
         for _ in 0..self.opts.max_steps {
@@ -1190,6 +1238,9 @@ impl Agent {
                 }
                 match files::read(&Target::new(p.clone(), &root), offset, limit, style) {
                     Ok(text) => {
+                        if self.turn_reads.insert(p.clone()) {
+                            self.news = true;
+                        }
                         self.seen.insert(p);
                         text
                     }
@@ -1388,7 +1439,7 @@ impl Agent {
                             self.journal.side_effect(&command);
                         }
                         if effect != Effect::ReadOnly {
-                            self.repeats.changed();
+                            self.changed();
                         }
                         self.cwd = r.cwd;
                         r.text
@@ -1445,7 +1496,7 @@ impl Agent {
                 self.journal.record(path.clone(), shown, before, after);
                 // the old content is the one thing a crash must not lose
                 self.save();
-                self.repeats.changed();
+                self.changed();
                 self.ledger.changed(path.clone());
                 self.seen.insert(path);
                 self.emit(on, changed);
@@ -2781,5 +2832,56 @@ mod tests {
             note.contains("There is no summary: writing it failed."),
             "{note}"
         );
+    }
+
+    #[tokio::test]
+    async fn compacting_again_with_nothing_new_read_or_changed_ends_the_turn() {
+        let read = |path: &str, held: Option<u32>| {
+            let mut c = calls(
+                &[("read", serde_json::json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            );
+            c.usage.prompt_n = held;
+            c
+        };
+        // the same three files each time, the last read leaving the context full
+        let round = || {
+            vec![
+                read("big1.txt", None),
+                read("big2.txt", None),
+                read("lib.rs", Some(30_000)),
+            ]
+        };
+        let mut steps = round();
+        steps.push(answer("Task: one."));
+        steps.extend(round());
+        steps.push(answer("Task: two."));
+        steps.extend(round());
+        let mut r = agent(steps, WorkspaceState::CLEAN);
+        let line = format!("{}\n", "x".repeat(59));
+        for name in ["big1.txt", "big2.txt"] {
+            std::fs::write(r.root.join(name), line.repeat(340)).unwrap();
+        }
+        r.agent.opts.n_ctx = Some(40_000);
+        r.agent.opts.max_steps = 20;
+        let (end, events) = turn(&mut r).await;
+        let TurnEnd::Stuck(why) = end else {
+            panic!("{end:?}");
+        };
+        assert!(
+            why.starts_with("the work does not fit the context: twice in a row the history had to be compacted with nothing new read and nothing changed"),
+            "{why}"
+        );
+        assert!(
+            why.ends_with("the limit is about 23.1K tokens where the profile plans for 68.8K, so give the server more context (llama-server -c) or narrow the task"),
+            "{why}"
+        );
+        // the first compaction followed new reads, the second did not, a third would not help
+        let compactions = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Compacted { .. }))
+            .count();
+        assert_eq!(compactions, 2);
+        assert_eq!(r.seen.lock().unwrap().len(), 11);
     }
 }
