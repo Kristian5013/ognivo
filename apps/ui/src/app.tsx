@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
+import { type Panel, SidePanel } from "./components/panels.tsx";
 import { ThreadView } from "./components/thread.tsx";
 import { count, ending, percent } from "./format.ts";
 import type { Thread } from "./model.ts";
@@ -8,12 +9,16 @@ import { play, timeline } from "./replay.ts";
 import { type Session, bench, sessions, shifted } from "./sessions.ts";
 import { ThreadStore } from "./store.ts";
 
-// `?session=qwen.long-file` opens that one and `?open=all` opens everything (screenshots);
+// `?session=qwen.long-file` opens that one, `?open=all` opens everything and
+// `?panel=changes` or `approvals` the side panel (screenshots);
 // `?bench=10000&stream=qwen.probing&speed=1` measures the perf budgets of §10 on a thread
 // of that many items with that session streaming at its end.
 const params = new URLSearchParams(location.search);
 const OPEN_ALL = params.get("open") === "all";
 const BENCH = Number(params.get("bench")) || undefined;
+const PANEL = ["changes", "approvals"].includes(params.get("panel") ?? "")
+  ? (params.get("panel") as Panel)
+  : undefined;
 const SPEEDS = [1, 4, 16];
 
 /** Endpoint, model and what the session cost so far: the start of the Runtime HUD (§10). */
@@ -23,12 +28,16 @@ function Hud({
   speed,
   onReplay,
   onSpeed,
+  panel,
+  onPanel,
 }: {
   store: ThreadStore;
   replaying: boolean;
   speed: number;
   onReplay: () => void;
   onSpeed: (speed: number) => void;
+  panel?: Panel;
+  onPanel: (panel?: Panel) => void;
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   useSyncExternalStore(subscribe, () => store.listVersion);
@@ -43,37 +52,53 @@ function Hud({
   );
   const rate = t.ms ? Math.round(t.completion / (t.ms / 1000)) : undefined;
   return (
-    <header className="flex items-center gap-4 border-b border-border px-6 py-2 text-[12px]">
-      <span className="font-medium">{store.info.model}</span>
-      <span className="truncate text-muted-foreground">{store.info.server}</span>
-      <span className="ml-auto flex shrink-0 items-center gap-4 text-muted-foreground">
-        <span>{store.generations.length} generations</span>
-        <span>
-          prompt {count(t.prompt)} · cached {percent(t.cached, t.prompt)}
+    // the side panel narrows it: what it costs gives way first, the model and the controls stay
+    <header className="@container border-b border-border">
+      <div className="flex items-center gap-4 px-6 py-2 text-[12px]">
+        <span className="shrink-0 font-medium whitespace-nowrap">{store.info.model}</span>
+        <span className="min-w-0 truncate text-muted-foreground">{store.info.server}</span>
+        <span className="ml-auto hidden shrink-0 gap-4 text-muted-foreground @4xl:flex">
+          <span>{store.generations.length} generations</span>
+          <span>
+            prompt {count(t.prompt)} · cached {percent(t.cached, t.prompt)}
+          </span>
+          <span>
+            {count(t.completion)} generated{rate ? ` · ${rate} tok/s` : ""}
+          </span>
         </span>
-        <span>
-          {count(t.completion)} generated{rate ? ` · ${rate} tok/s` : ""}
-        </span>
-        <select
-          aria-label="Replay speed"
-          value={speed}
-          onChange={(e) => onSpeed(Number(e.target.value))}
-          className="rounded border border-border bg-panel px-1 py-0.5"
-        >
-          {SPEEDS.map((s) => (
-            <option key={s} value={s}>
-              {s}×
-            </option>
+        <span className="ml-auto flex shrink-0 items-center gap-2 text-muted-foreground @4xl:ml-0">
+          <select
+            aria-label="Replay speed"
+            value={speed}
+            onChange={(e) => onSpeed(Number(e.target.value))}
+            className="rounded border border-border bg-panel px-1 py-0.5"
+          >
+            {SPEEDS.map((s) => (
+              <option key={s} value={s}>
+                {s}×
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={onReplay}
+            className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised"
+          >
+            {replaying ? "Stop" : "Replay"}
+          </button>
+          {(["changes", "approvals"] as const).map((p) => (
+            <button
+              key={p}
+              type="button"
+              aria-pressed={panel === p}
+              onClick={() => onPanel(panel === p ? undefined : p)}
+              className={`rounded border px-2 py-0.5 hover:bg-raised ${panel === p ? "border-spark/60 text-foreground" : "border-border"}`}
+            >
+              {p === "changes" ? "Changes" : "Approvals"}
+            </button>
           ))}
-        </select>
-        <button
-          type="button"
-          onClick={onReplay}
-          className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised"
-        >
-          {replaying ? "Stop" : "Replay"}
-        </button>
-      </span>
+        </span>
+      </div>
     </header>
   );
 }
@@ -149,6 +174,7 @@ export function App() {
   );
   const [replay, setReplay] = useState<{ store: ThreadStore; stop: () => void }>();
   const [speed, setSpeed] = useState(() => Number(params.get("speed")) || 1);
+  const [panel, setPanel] = useState<Panel | undefined>(PANEL);
 
   // the bench streams a recorded session at the end of its long thread
   useEffect(() => {
@@ -194,6 +220,8 @@ export function App() {
               speed={speed}
               onReplay={toggleReplay}
               onSpeed={setSpeed}
+              panel={panel}
+              onPanel={setPanel}
             />
             <ThreadView
               key={store.info.id + (replay ? ".replay" : "")}
@@ -206,6 +234,7 @@ export function App() {
           <p className="m-auto text-muted-foreground">No sessions.</p>
         )}
       </main>
+      {store && panel && <SidePanel store={store} panel={panel} onPanel={setPanel} />}
     </div>
   );
 }

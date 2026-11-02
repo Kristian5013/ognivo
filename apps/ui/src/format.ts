@@ -65,3 +65,30 @@ export function ending(end: string | undefined): string {
       return end ?? "running";
   }
 }
+
+/** Lines a change adds and removes, by a longest common subsequence of its lines; plain
+ * counts when the two sides are too long for one. */
+export function lineDelta(before: string, after: string): { added: number; removed: number } {
+  const a = before ? before.split("\n") : [];
+  const b = after ? after.split("\n") : [];
+  if (a.length * b.length > 250_000) return { added: b.length, removed: a.length };
+  let prev = new Array<number>(b.length + 1).fill(0);
+  for (const line of a) {
+    const row = new Array<number>(b.length + 1).fill(0);
+    for (let j = 0; j < b.length; j++) {
+      row[j + 1] = line === b[j] ? prev[j]! + 1 : Math.max(prev[j + 1]!, row[j]!);
+    }
+    prev = row;
+  }
+  const common = prev[b.length]!;
+  return { added: b.length - common, removed: a.length - common };
+}
+
+/** Why a call waited for an approval, from ognivo's refusal: the reason it asked for one,
+ * or the rule that denied it. */
+export function refusalReason(text: string): string {
+  const asked = /needs the user's approval \(([^)]*)\)/.exec(text);
+  if (asked) return asked[1]!;
+  const rule = /is denied by the rule (.+?)\. Do not/.exec(text);
+  return rule ? `denied by the rule ${rule[1]}` : text.replace(/^\[refused\]\s*/, "");
+}

@@ -6,7 +6,7 @@
 // The events mirror the draft protocol of ognivo-protocol (an item starts, gets deltas,
 // completes); the core's frozen events will come in through the same `apply`.
 
-import type { Generation, Item, Thread, ToolResult } from "./model.ts";
+import type { Generation, Item, Thread, ToolItem, ToolResult } from "./model.ts";
 
 export type LiveEvent =
   | { type: "turn_started"; index: number; user: string }
@@ -45,6 +45,13 @@ export class ThreadStore {
   private changed = false;
   private scheduled = false;
   private version = 0;
+  // the files the session changed, with the calls that did it, and the calls that waited
+  // for an approval: kept as calls complete, so the side panels never walk the thread
+  private files = new Map<string, string[]>();
+  private refusals: string[] = [];
+  private indexListeners = new Set<() => void>();
+  private indexChanged = false;
+  private indexVersion = 0;
 
   constructor(info: Info, opts: { openAll?: boolean; schedule?: Schedule } = {}) {
     this.info = info;
@@ -94,6 +101,7 @@ export class ThreadStore {
         return;
       case "item_started":
         this.at.set(e.item.id, this.rows.length);
+        this.index(e.item);
         this.add({
           kind: "item",
           key: e.item.id,
@@ -116,6 +124,7 @@ export class ThreadStore {
           (item) => (result && item.kind === "tool" ? { ...item, result } : item),
           false,
         );
+        if (result) this.index(this.item(e.id));
         return;
       }
       case "generation":
@@ -146,9 +155,60 @@ export class ThreadStore {
     };
   }
 
+  /** Changes when a file changes or a call waits for an approval. */
+  get changesVersion(): number {
+    return this.indexVersion;
+  }
+
+  /** The files the session changed, in the order it first changed them, each with the
+   * calls that did. Paths inside the project are relative to it. */
+  changedFiles(): { path: string; calls: ToolItem[] }[] {
+    return [...this.files].map(([path, ids]) => ({
+      path,
+      calls: ids.map((id) => this.item(id)).filter((i): i is ToolItem => i?.kind === "tool"),
+    }));
+  }
+
+  /** The calls that needed an approval and did not get it. */
+  refusedCalls(): ToolItem[] {
+    return this.refusals.map((id) => this.item(id)).filter((i): i is ToolItem => i?.kind === "tool");
+  }
+
+  subscribeChanges(listener: () => void): () => void {
+    this.indexListeners.add(listener);
+    return () => this.indexListeners.delete(listener);
+  }
+
   subscribeList(listener: () => void): () => void {
     this.listListeners.add(listener);
     return () => this.listListeners.delete(listener);
+  }
+
+  private item(id: string): Item | undefined {
+    const i = this.at.get(id);
+    const row = i === undefined ? undefined : this.rows[i];
+    return row?.kind === "item" ? row.item : undefined;
+  }
+
+  /** A finished call into the side panels' indexes: a change that applied, or a refusal. */
+  private index(item: Item | undefined): void {
+    if (item?.kind !== "tool" || !item.result) return;
+    const { call, result } = item;
+    if (result.outcome === "refused") {
+      this.refusals.push(item.id);
+    } else if (
+      (call?.name === "Edit" && result.text.startsWith("[edit: applied")) ||
+      (call?.name === "Write" && result.text.startsWith("[write: "))
+    ) {
+      const project = this.info.project;
+      const path =
+        project && call.path.startsWith(`${project}/`) ? call.path.slice(project.length + 1) : call.path;
+      this.files.set(path, [...(this.files.get(path) ?? []), item.id]);
+    } else {
+      return;
+    }
+    this.indexChanged = true;
+    this.later();
   }
 
   private add(row: Row): void {
@@ -192,6 +252,11 @@ export class ThreadStore {
       this.changed = false;
       this.version++;
       for (const l of this.listListeners) l();
+    }
+    if (this.indexChanged) {
+      this.indexChanged = false;
+      this.indexVersion++;
+      for (const l of this.indexListeners) l();
     }
   }
 }

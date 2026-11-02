@@ -66,14 +66,16 @@ test("a stream at the end of 10k items keeps 60 fps, and typing answers within a
     await page.waitForFunction(() => window.__ognivoPerf?.streaming === true, null, {
       timeout: 60_000,
     });
-    // load and the first layout are not the budget: measure from a running stream
+    // the budget is the stream and the typing, measured once they run: not the load, and
+    // not the click that activates the window, when Wayland sends no frame for some 50 ms
+    // (a trace shows the renderer and the GPU idle then, and no BeginFrame)
+    await page.click("textarea");
     await page.waitForTimeout(1000);
     await page.evaluate(() => {
       window.__ognivoPerf!.frames.length = 0;
       window.__ognivoPerf!.keys.length = 0;
       window.__ognivoPerf!.slow.length = 0;
     });
-    await page.click("textarea");
     await page.keyboard.type("does the window keep up while the model streams?", { delay: 60 });
     await page.waitForTimeout(2000);
     const probe = await page.evaluate(() => ({ ...window.__ognivoPerf! }));

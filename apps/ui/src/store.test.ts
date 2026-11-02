@@ -64,6 +64,28 @@ describe("ThreadStore", () => {
   });
 });
 
+describe("the side panels' indexes", () => {
+  it("know the files a session changed and the calls that waited for an approval", () => {
+    const [, thread] = threads.find(([f]) => f === "gpt-oss.edit-refused.json")!;
+    const store = ThreadStore.of(thread, { schedule: manual().schedule });
+    const files = store.changedFiles();
+    expect(files.map((f) => f.path)).toEqual(["src/lib.rs"]);
+    expect(files[0]!.calls.map((c) => c.call?.name)).toEqual(["Edit"]);
+    expect(store.refusedCalls().map((c) => c.call)).toMatchObject([
+      { name: "Bash", command: "cargo test --quiet" },
+    ]);
+  });
+
+  it("leave out edits that did not apply", () => {
+    const [, thread] = threads.find(([f]) => f === "gemma.ambiguous-edit.json")!;
+    const store = ThreadStore.of(thread, { schedule: manual().schedule });
+    const edits = thread.turns.flatMap((t) => t.items).filter((i) => i.kind === "tool" && i.call?.name === "Edit");
+    const applied = store.changedFiles().flatMap((f) => f.calls);
+    expect(edits.length).toBeGreaterThan(applied.length);
+    expect(applied.every((c) => c.result?.text.startsWith("[edit: applied"))).toBe(true);
+  });
+});
+
 describe("timeline", () => {
   it.each(threads)("%s played back makes the same rows as the thread", (_, thread) => {
     const whole = ThreadStore.of(thread, { schedule: manual().schedule });
@@ -72,6 +94,8 @@ describe("timeline", () => {
     for (const { event } of events) played.apply(event);
     expect(rows(played)).toEqual(rows(whole));
     expect(played.generations).toEqual(whole.generations);
+    expect(played.changedFiles()).toEqual(whole.changedFiles());
+    expect(played.refusedCalls()).toEqual(whole.refusedCalls());
     // and in order of time
     expect(events.every((e, i) => i === 0 || e.at >= events[i - 1]!.at)).toBe(true);
   });

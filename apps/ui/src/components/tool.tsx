@@ -1,16 +1,8 @@
-import { MultiFileDiff } from "@pierre/diffs/react";
 import * as Collapsible from "@radix-ui/react-collapsible";
 
 import { body, header, summary } from "../format.ts";
 import type { ToolItem } from "../model.ts";
-
-const DIFF_OPTIONS = {
-  diffStyle: "unified",
-  theme: { dark: "github-dark", light: "github-light" },
-  themeType: "system",
-  disableFileHeader: true,
-  overflow: "wrap",
-} as const;
+import { EditDiff } from "./diff.tsx";
 
 function Status({ item }: { item: ToolItem }) {
   const r = item.result;
@@ -49,19 +41,7 @@ function Text({ text }: { text: string }) {
 function Body({ item }: { item: ToolItem }) {
   const call = item.call;
   if (item.result && item.result.outcome !== "ok") return <Text text={item.result.text} />;
-  if (call?.name === "Edit") {
-    // fragments, not files: without a last newline both sides would say they have none
-    const ended = (s: string) => (s.endsWith("\n") || !s ? s : `${s}\n`);
-    return (
-      <div className="overflow-hidden">
-        <MultiFileDiff
-          oldFile={{ name: call.path, contents: ended(call.old) }}
-          newFile={{ name: call.path, contents: ended(call.new) }}
-          options={DIFF_OPTIONS}
-        />
-      </div>
-    );
-  }
+  if (call?.name === "Edit") return <EditDiff path={call.path} before={call.old} after={call.new} />;
   if (call?.name === "Write") return <Text text={call.content} />;
   if (!call) return <Text text={JSON.stringify(item.raw, null, 2)} />;
   return <Text text={body(item)} />;
