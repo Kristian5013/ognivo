@@ -1,0 +1,34 @@
+{
+  "name": "@ognivo/ui",
+  "private": true,
+  "version": "0.0.1",
+  "description": "The React UI of ognivo, shared by the Electron GUI and the VS Code webview",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "check": "tsc --noEmit",
+    "test": "vitest run",
+    "fixtures": "node scripts/fixtures.mjs"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.5.2",
+    "@radix-ui/react-collapsible": "1.2.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-virtuoso": "4.18.19",
+    "streamdown": "2.7.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
+  }
+}

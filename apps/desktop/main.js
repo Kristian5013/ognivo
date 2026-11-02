@@ -1,0 +1,170 @@
+// The Electron main process of the ognivo GUI: one window around the UI of apps/ui. It
+// talks to no core yet; the JSON-RPC connection over the core's Unix socket (§3) comes
+// once the event model is frozen (M2).
+//
+// Security (docs/architecture.md §10): the renderer is sandboxed and isolated and has no
+// Node; it may neither navigate away nor open windows, and a link out of the app opens in
+// the browser after a confirmation; the UI is served from the app:// scheme with a CSP
+// that allows local code only and images from the app, data: and blob:; every permission
+// request is refused.
+//
+//   OGNIVO_UI_DEV=http://127.0.0.1:5180   the UI's dev server instead of apps/ui/dist
+//   OGNIVO_UI_QUERY='session=qwen.long-file&open=all'
+//   OGNIVO_SCREENSHOT=out.png             render without showing a window, save, quit
+
+import { readFile, writeFile } from "node:fs/promises";
+import { dirname, extname, join, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { BrowserWindow, app, dialog, protocol, session, shell } from "electron";
+
+const SCHEME = "app";
+const UI = join(dirname(fileURLToPath(import.meta.url)), "../ui/dist");
+const DEV = process.env.OGNIVO_UI_DEV;
+const QUERY = process.env.OGNIVO_UI_QUERY;
+const SHOT = process.env.OGNIVO_SCREENSHOT;
+
+const CSP = [
+  "default-src 'self'",
+  // Shiki's regular expressions run in WebAssembly
+  "script-src 'self' 'wasm-unsafe-eval'",
+  // the diff view styles its shadow roots; Radix sets inline styles
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "worker-src 'self' blob:",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join("; ");
+
+const TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".woff2": "font/woff2",
+  ".wasm": "application/wasm",
+};
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, codeCache: true },
+  },
+]);
+
+/** A file of apps/ui/dist, and nothing outside it. */
+async function serve(request) {
+  const url = new URL(request.url);
+  const rel = decodeURIComponent(url.pathname).replace(/^\/+/, "") || "index.html";
+  const path = normalize(join(UI, rel));
+  if (url.host !== "ui" || !path.startsWith(UI + sep)) {
+    return new Response("not found", { status: 404 });
+  }
+  try {
+    const body = await readFile(path);
+    return new Response(body, {
+      headers: {
+        "content-type": TYPES[extname(path)] ?? "application/octet-stream",
+        "content-security-policy": CSP,
+      },
+    });
+  } catch {
+    return new Response("not found", { status: 404 });
+  }
+}
+
+/** A link out of the app: in the browser, if the user says so; only http and https. */
+async function openOutside(win, href) {
+  let url;
+  try {
+    url = new URL(href);
+  } catch {
+    return;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return;
+  const { response } = await dialog.showMessageBox(win, {
+    type: "question",
+    buttons: ["Open", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    message: "Open this link in the browser?",
+    detail: url.href,
+  });
+  if (response === 0) await shell.openExternal(url.href);
+}
+
+function createWindow() {
+  const start = `${DEV ?? `${SCHEME}://ui/index.html`}${QUERY ? `?${QUERY}` : ""}`;
+  const win = new BrowserWindow({
+    width: 1400,
+    height: 900,
+    minWidth: 800,
+    minHeight: 500,
+    title: "ognivo",
+    backgroundColor: "#0f1012",
+    show: !SHOT,
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+      spellcheck: false,
+      // a hidden window gets no frames on Wayland; offscreen rendering needs no surface
+      offscreen: Boolean(SHOT),
+    },
+  });
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void openOutside(win, url);
+    return { action: "deny" };
+  });
+  win.webContents.on("will-navigate", (event, url) => {
+    if (new URL(url).origin !== new URL(start).origin) {
+      event.preventDefault();
+      void openOutside(win, url);
+    }
+  });
+  if (SHOT) {
+    win.webContents.once("did-fail-load", (_event, code, reason, url) => {
+      console.error(`ognivo: ${url} did not load: ${reason} (${code})`);
+      app.exit(1);
+    });
+    win.webContents.once("did-finish-load", async () => {
+      // the diff view highlights after the first paint
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      const image = await win.webContents.capturePage();
+      await writeFile(SHOT, image.toPNG());
+      app.quit();
+    });
+  }
+  void win.loadURL(start);
+}
+
+if (SHOT) {
+  // a screenshot needs no GPU, and the GPU belongs to the model
+  app.disableHardwareAcceleration();
+} else if (!app.requestSingleInstanceLock()) {
+  app.quit();
+}
+
+app.on("second-instance", () => {
+  const [win] = BrowserWindow.getAllWindows();
+  if (win?.isMinimized()) win.restore();
+  win?.focus();
+});
+
+app.whenReady().then(() => {
+  protocol.handle(SCHEME, serve);
+  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) =>
+    callback(false),
+  );
+  session.defaultSession.setPermissionCheckHandler(() => false);
+  createWindow();
+});
+
+app.on("window-all-closed", () => app.quit());

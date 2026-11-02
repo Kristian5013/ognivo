@@ -35,6 +35,8 @@ the `trajectory.json` Harbor reads.
 | `crates/ognivo-protocol` | core ⇄ client event types |
 | `crates/ognivo-store` | event log |
 | `crates/ognivo-evals` | evaluation harness: T0 (the recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (`t2`: scenarios on fixture projects against a live server) |
+| `apps/ui` | the React UI of the GUI (React 19, Vite, Tailwind): so far the thread view of recorded sessions (`fixtures/`) |
+| `apps/desktop` | the Electron main process around it |
 | `profiles/` | per-model profiles (TOML) |
 | `scripts/` | `check.sh` (lints, tests and T0 before each commit), `night.sh` (T2-mini for each model in the night GPU window), pinned llama.cpp build, benchmarks, server probes |
 | `docs/` | architecture (Russian for now), M0 measurements, research |
@@ -54,6 +56,18 @@ short diff, an action that needs approval asks `y`, `n` (or `n` and what to do i
 `a` (that exact action again without asking, for the rest of the session), and ^C stops a
 turn; `/help` lists the rest. `run` takes the prompt on stdin;
 actions that would need approval are refused and explained to the model.
+
+The GUI is at its start: it shows recorded sessions and talks to no core yet.
+
+```sh
+npm ci                                          # runs no install scripts (.npmrc)
+npm run install-electron -w @ognivo/desktop     # so Electron's binary comes here
+npm run build -w @ognivo/ui
+npm start -w @ognivo/desktop
+```
+
+`npm run dev -w @ognivo/ui` serves the UI with hot reload at http://127.0.0.1:5180; start the
+window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it.
 
 ## License
 

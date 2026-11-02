@@ -1,0 +1,73 @@
+@import "tailwindcss";
+/* streamdown's classes, from the hoisted node_modules of the workspace */
+@source "../../../node_modules/streamdown/dist/*.js";
+
+/* Dark by default, next to a terminal; light when the system asks for it. The names
+   streamdown uses (background, muted, border, primary, sidebar) map onto the same set. */
+:root {
+  color-scheme: dark;
+  --bg: #0f1012;
+  --panel: #15161a;
+  --raised: #1c1e23;
+  --fg: #e4e5e7;
+  --muted-fg: #9a9ca4;
+  --border: #2a2d33;
+  --spark: #f0883e;
+  --warn: #d6a031;
+  --err: #f2685f;
+  --ok: #4cc263;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #ffffff;
+    --panel: #f6f7f8;
+    --raised: #eceef1;
+    --fg: #1f2328;
+    --muted-fg: #59636e;
+    --border: #d5dbe1;
+    --spark: #bc4c00;
+    --warn: #9a6700;
+    --err: #cf222e;
+    --ok: #1a7f37;
+  }
+}
+
+@theme inline {
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-panel: var(--panel);
+  --color-raised: var(--raised);
+  --color-muted: var(--raised);
+  --color-muted-foreground: var(--muted-fg);
+  --color-border: var(--border);
+  --color-primary: var(--spark);
+  --color-primary-foreground: var(--bg);
+  --color-sidebar: var(--panel);
+  --color-spark: var(--spark);
+  --color-warn: var(--warn);
+  --color-err: var(--err);
+  --color-ok: var(--ok);
+  --font-sans: ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "DejaVu Sans Mono", monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}

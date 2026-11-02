@@ -1,0 +1,313 @@
+{
+ "schema_version": "ATIF-v1.7",
+ "session_id": "91",
+ "agent": {
+  "name": "ognivo",
+  "version": "0.0.1",
+  "model_name": "qwen3.8-27b",
+  "tool_definitions": [
+   {
+    "type": "function",
+    "function": {
+     "name": "Read",
+     "description": "Read a text file with line numbers; the first line gives its size. Pages of up to 2000 lines: continue with offset.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "file_path": {
+        "type": "string",
+        "description": "File path, relative to the project root or absolute."
+       },
+       "offset": {
+        "type": "integer",
+        "description": "First line to show, 1-based."
+       },
+       "limit": {
+        "type": "integer",
+        "description": "Number of lines to show."
+       }
+      },
+      "required": [
+       "file_path"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "Edit",
+     "description": "Replace one exact, unique occurrence of a text in a file with new text. Copy the text from read output without the line numbers.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "file_path": {
+        "type": "string",
+        "description": "File to change."
+       },
+       "old_string": {
+        "type": "string",
+        "description": "Exact text to replace; must be unique in the file."
+       },
+       "new_string": {
+        "type": "string",
+        "description": "Replacement text."
+       },
+       "replace_all": {
+        "type": "boolean",
+        "description": "Replace every occurrence."
+       }
+      },
+      "required": [
+       "file_path",
+       "old_string",
+       "new_string"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "Write",
+     "description": "Create a file, or replace a whole file you have read, with the given content.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "file_path": {
+        "type": "string",
+        "description": "File to write."
+       },
+       "content": {
+        "type": "string",
+        "description": "The complete file content."
+       }
+      },
+      "required": [
+       "file_path",
+       "content"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "Bash",
+     "description": "Run a bash command in the project and return its exit code and output. The working directory persists between calls.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "command": {
+        "type": "string",
+        "description": "The bash command line."
+       },
+       "timeout": {
+        "type": "integer",
+        "description": "Time limit in milliseconds, at most 600000."
+       }
+      },
+      "required": [
+       "command"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "Grep",
+     "description": "Search file contents line by line with a regular expression (Rust syntax: escape [ ] ( ) { } . * + ? | \\ to match them literally); returns path:line:text for each match.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string",
+        "description": "Regular expression (Rust syntax)."
+       },
+       "path": {
+        "type": "string",
+        "description": "Directory or file to search; default the project root."
+       },
+       "glob": {
+        "type": "string",
+        "description": "Only files matching this glob, e.g. *.rs."
+       }
+      },
+      "required": [
+       "pattern"
+      ],
+      "additionalProperties": false
+     }
+    }
+   },
+   {
+    "type": "function",
+    "function": {
+     "name": "Glob",
+     "description": "List files whose path matches a glob pattern such as **/*.rs, newest first.",
+     "parameters": {
+      "type": "object",
+      "properties": {
+       "pattern": {
+        "type": "string",
+        "description": "Glob pattern, e.g. src/**/*.rs."
+       },
+       "path": {
+        "type": "string",
+        "description": "Directory to search; default the project root."
+       }
+      },
+      "required": [
+       "pattern"
+      ],
+      "additionalProperties": false
+     }
+    }
+   }
+  ]
+ },
+ "steps": [
+  {
+   "source": "system",
+   "message": "You are ognivo, a coding agent. You work in the project at /home/dev/demo through tools: read and search files, edit them, run shell commands.\n- Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n- Change only what the task needs.\n- After changing code, run the project's build or tests with the shell tool.\n- In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n- Commands run without a terminal; do not start interactive programs.",
+   "extra": {
+    "conversation": 1,
+    "reason": "start"
+   },
+   "step_id": 1,
+   "timestamp": "2026-11-02T12:22:11.650Z"
+  },
+  {
+   "source": "user",
+   "message": "Run scripts/info.sh and tell me the version it prints.",
+   "step_id": 2,
+   "timestamp": "2026-11-02T12:22:11.650Z"
+  },
+  {
+   "source": "agent",
+   "message": "",
+   "llm_call_count": 1,
+   "reasoning_content": "Let me take a look at the script and run it.\n",
+   "tool_calls": [
+    {
+     "tool_call_id": "ZJjum7wTc8wUEpAwiQd0pmScy6RrTPvq",
+     "function_name": "Bash",
+     "arguments": {
+      "command": "bash scripts/info.sh"
+     }
+    }
+   ],
+   "metrics": {
+    "prompt_tokens": 1235,
+    "cached_tokens": 228,
+    "completion_tokens": 44,
+    "extra": {
+     "prompt_ms": 798.148,
+     "generation_ms": 1011.351
+    }
+   },
+   "extra": {
+    "purpose": "step",
+    "outcome": "calls",
+    "finish": "tool_calls",
+    "seed": 2,
+    "prompt_hash": "sha256:80e73566c2e83ccee5eb7ff8d54d2a50351c3155db534b4befd76fabece631a2",
+    "ms": 1814,
+    "turn": 1
+   },
+   "step_id": 3,
+   "timestamp": "2026-11-02T12:22:13.465Z",
+   "observation": {
+    "results": [
+     {
+      "source_call_id": "ZJjum7wTc8wUEpAwiQd0pmScy6RrTPvq",
+      "content": "[shell: exit 0, 0.0 s]\ntool version 3.14.15 (build 77)\n"
+     }
+    ]
+   }
+  },
+  {
+   "source": "agent",
+   "message": "The script printed: **tool version 3.14.15 (build 77)**",
+   "llm_call_count": 1,
+   "reasoning_content": "The script output the version.\n",
+   "metrics": {
+    "prompt_tokens": 1324,
+    "cached_tokens": 1278,
+    "completion_tokens": 31,
+    "extra": {
+     "prompt_ms": 186.648,
+     "generation_ms": 674.702
+    }
+   },
+   "extra": {
+    "purpose": "step",
+    "outcome": "answer",
+    "finish": "stop",
+    "seed": 3,
+    "prompt_hash": "sha256:a3147b029b2da0df40f78bcd333f27c76d21cde1d9c6ae8d99832f261b90ac4c",
+    "ms": 867,
+    "turn": 1
+   },
+   "step_id": 4,
+   "timestamp": "2026-11-02T12:22:14.335Z"
+  }
+ ],
+ "final_metrics": {
+  "total_prompt_tokens": 2559,
+  "total_completion_tokens": 75,
+  "total_cached_tokens": 1506,
+  "total_steps": 4,
+  "extra": {
+   "generations": 2
+  }
+ },
+ "extra": {
+  "ognivo": {
+   "session": 91,
+   "kind": "run",
+   "project": "/home/dev/demo",
+   "profile": "qwen3.8-27b",
+   "level": null,
+   "server": "http://127.0.0.1:8090",
+   "seed": 1,
+   "title": "Run scripts/info.sh and tell me the version it prints.",
+   "turns": [
+    {
+     "end": "answer",
+     "verification": {
+      "status": "no_changes"
+     },
+     "unsupported_claim": false,
+     "turn": 1
+    }
+   ],
+   "stats": {
+    "steps": 2,
+    "calls": 1,
+    "malformed": 0,
+    "truncated": 0,
+    "repeating": 0,
+    "empty_answers": 0,
+    "restarts": 0,
+    "bad_arguments": 0,
+    "edits_applied": 0,
+    "edits_already_applied": 0,
+    "edits_failed": 0,
+    "refused": 0,
+    "repeated": 0,
+    "repeats_skipped": 0,
+    "answers_sent_back": 0,
+    "compactions": 0,
+    "prompt_tokens_processed": 1053,
+    "prompt_tokens_cached": 1506,
+    "completion_tokens": 75
+   }
+  }
+ }
+}

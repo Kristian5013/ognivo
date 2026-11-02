@@ -1,0 +1,13 @@
+{
+  "name": "ognivo-workspace",
+  "private": true,
+  "description": "The TypeScript clients of ognivo: the Electron GUI and its React UI",
+  "license": "MIT",
+  "workspaces": [
+    "apps/ui",
+    "apps/desktop"
+  ],
+  "engines": {
+    "node": ">=24"
+  }
+}

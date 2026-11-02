@@ -1,0 +1,16 @@
+{
+  "name": "@ognivo/desktop",
+  "private": true,
+  "version": "0.0.1",
+  "description": "The Electron GUI of ognivo: a thin main process around the UI of apps/ui",
+  "license": "MIT",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "env -u ELECTRON_RUN_AS_NODE electron .",
+    "install-electron": "node ../../node_modules/electron/install.js"
+  },
+  "devDependencies": {
+    "electron": "45.1.0"
+  }
+}
