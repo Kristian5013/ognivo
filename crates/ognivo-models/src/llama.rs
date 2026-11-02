@@ -86,6 +86,11 @@ fn http_err(e: reqwest::Error) -> EngineError {
     EngineError::Http(e.to_string())
 }
 
+/// A chat stream that ended without `[DONE]`: cut off, so nothing in it may run.
+pub(crate) fn no_done() -> EngineError {
+    EngineError::Protocol("stream ended without [DONE]".into())
+}
+
 fn status_err(status: u16, body: &Value) -> EngineError {
     EngineError::Status {
         status,
@@ -269,10 +274,7 @@ impl LlamaServer {
                     Some(Ok(SseEvent::Data(v))) => Some((Ok(v), (events, false))),
                     Some(Ok(SseEvent::Done)) => None,
                     Some(Err(e)) => Some((Err(e), (events, true))),
-                    None => {
-                        let err = EngineError::Protocol("stream ended without [DONE]".into());
-                        Some((Err(err), (events, true)))
-                    }
+                    None => Some((Err(no_done()), (events, true))),
                 }
             })
             .boxed(),

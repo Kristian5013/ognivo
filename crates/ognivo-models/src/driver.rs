@@ -21,9 +21,10 @@ use crate::generic::{
     ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
 };
 use crate::guard::{Guard, unescape};
-use crate::llama::LlamaServer;
+use crate::llama::{LlamaServer, no_done};
 use crate::profile::ModelProfile;
 use crate::repeat::{Loop, Repeats};
+use crate::sse::{self, SseEvent};
 
 /// Attempts per step: the first try and one retry after a format error (§5.2).
 const MAX_ATTEMPTS: u8 = 2;
@@ -372,14 +373,7 @@ fn steps(
                         Ok(events) => {
                             let mut batch: Batch =
                                 events.iter().filter_map(shown).map(Ok).collect();
-                            let mut looped = None;
-                            for ev in events {
-                                if looped.is_none() {
-                                    looped = watch.push(&ev);
-                                }
-                                acc.apply(ev);
-                            }
-                            match looped {
+                            match fold(&mut acc, &mut watch, events) {
                                 // returning without `chunks` drops the connection, and
                                 // llama-server cancels the generation
                                 Some((channel, l)) => {
@@ -403,14 +397,7 @@ fn steps(
                     },
                     Some(Err(e)) => failed(e, attempt, seed),
                     None => {
-                        let done = Finished {
-                            outcome: acc.outcome(&ctx.guard),
-                            content: unescape(&acc.content).into_owned(),
-                            reasoning: unescape(&acc.reasoning).into_owned(),
-                            finish: acc.finish,
-                            usage: acc.usage,
-                            seed,
-                        };
+                        let done = finished(acc, &ctx.guard, seed);
                         (vec![Ok(DriverEvent::Finished(Box::new(done)))], State::End)
                     }
                 },
@@ -420,6 +407,62 @@ fn steps(
     )
     .flat_map(stream::iter)
     .boxed()
+}
+
+/// Folds one chunk's events into the attempt while the repetition guard watches each
+/// channel; the first loop it sees, if any.
+fn fold(
+    acc: &mut ChatCompletion,
+    watch: &mut Watch,
+    events: Vec<ChatEvent>,
+) -> Option<(Channel, Loop)> {
+    let mut looped = None;
+    for ev in events {
+        if looped.is_none() {
+            looped = watch.push(&ev);
+        }
+        acc.apply(ev);
+    }
+    looped
+}
+
+/// The result of an attempt whose stream ended with `[DONE]`.
+fn finished(acc: ChatCompletion, guard: &Guard, seed: u32) -> Finished {
+    Finished {
+        outcome: acc.outcome(guard),
+        content: unescape(&acc.content).into_owned(),
+        reasoning: unescape(&acc.reasoning).into_owned(),
+        finish: acc.finish,
+        usage: acc.usage,
+        seed,
+    }
+}
+
+/// A recorded `/v1/chat/completions` response read the way an attempt reads the live one:
+/// the status, the SSE lines, the chunks, the repetition guard and the end of the stream,
+/// so recorded generations can be judged again by today's code (T0, docs/architecture.md
+/// §11). An error is the one the attempt would have failed with.
+pub fn read_recorded(
+    status: u16,
+    body: &[u8],
+    guard: &Guard,
+    seed: u32,
+) -> Result<Finished, EngineError> {
+    if status != 200 {
+        let body = String::from_utf8_lossy(body).into_owned();
+        return Err(EngineError::Status { status, body });
+    }
+    let mut acc = ChatCompletion::default();
+    let mut watch = Watch::default();
+    for event in sse::decode(body) {
+        let SseEvent::Data(v) = event? else {
+            return Ok(finished(acc, guard, seed));
+        };
+        if let Some((channel, l)) = fold(&mut acc, &mut watch, chat_events(&v)?) {
+            return Ok(stopped(acc, channel, &l, seed));
+        }
+    }
+    Err(no_done())
 }
 
 /// The result of an attempt the repetition guard stopped: nothing in it may run.
@@ -733,6 +776,62 @@ mod tests {
             !events
                 .iter()
                 .any(|e| matches!(e, Ok(DriverEvent::Finished(_))))
+        );
+    }
+
+    /// What `llm_tap.py` keeps of a response: the body without the HTTP head.
+    fn recorded(events: &[Value], done: bool) -> String {
+        let r = sse("200 OK", events, done);
+        r[r.find("\r\n\r\n").unwrap() + 4..].to_owned()
+    }
+
+    #[test]
+    fn a_recorded_stream_reads_like_a_live_one() {
+        let guard = Guard::default();
+        let body = recorded(&tool_call_stream(), true);
+        let f = read_recorded(200, body.as_bytes(), &guard, 7).unwrap();
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{f:?}");
+        };
+        assert_eq!(calls.calls()[0].arguments, r#"{"path":"a.rs"}"#);
+        assert_eq!((f.reasoning.as_str(), f.seed), ("read it", 7));
+        assert_eq!(f.usage.cache_n, Some(9));
+
+        // cut anywhere before the end of `[DONE]`, the stream allows nothing
+        let end = body.find("data: [DONE]").unwrap() + "data: [DONE]".len();
+        for cut in 0..=end {
+            let r = read_recorded(200, &body.as_bytes()[..cut], &guard, 7);
+            assert!(
+                matches!(r, Err(EngineError::Protocol(_))),
+                "cut at {cut}: {r:?}"
+            );
+        }
+
+        let error = recorded(
+            &[chunk(json!({"role": "assistant"}), None), format_error()],
+            false,
+        );
+        let e = read_recorded(200, error.as_bytes(), &guard, 7).unwrap_err();
+        assert!(is_format_error(&e), "{e:?}");
+        let full = br#"{"error":{"code":400,"type":"exceed_context_size_error"}}"#;
+        let e = read_recorded(400, full, &guard, 7).unwrap_err();
+        assert!(is_context_exceeded(&e), "{e:?}");
+
+        // the driver dropped this stream once it looped, so it has no `[DONE]`
+        let looping: Vec<Value> = (0..300)
+            .map(|_| chunk(json!({"reasoning_content": "over and over. "}), None))
+            .collect();
+        let f = read_recorded(200, recorded(&looping, false).as_bytes(), &guard, 7).unwrap();
+        assert!(
+            matches!(
+                &f.outcome,
+                Outcome::Repeating {
+                    channel: Channel::Reasoning,
+                    ..
+                }
+            ),
+            "{:?}",
+            f.outcome
         );
     }
 

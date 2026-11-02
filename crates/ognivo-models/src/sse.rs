@@ -29,13 +29,9 @@ pub(crate) fn events(resp: reqwest::Response) -> BoxStream<'static, Result<SseEv
                 match next_payload(&mut buf) {
                     Some(Payload::Done) => return Some((Ok(SseEvent::Done), (bytes, buf, true))),
                     Some(Payload::Data(data)) => {
-                        return match serde_json::from_slice::<Value>(&data) {
-                            Ok(v) => Some((Ok(SseEvent::Data(v)), (bytes, buf, false))),
-                            Err(e) => {
-                                let err = EngineError::Protocol(format!("bad SSE payload: {e}"));
-                                Some((Err(err), (bytes, buf, true)))
-                            }
-                        };
+                        let event = parse(&data);
+                        let failed = event.is_err();
+                        return Some((event, (bytes, buf, failed)));
                     }
                     None => match bytes.next().await {
                         Some(Ok(chunk)) => buf.extend_from_slice(&chunk),
@@ -44,17 +40,49 @@ pub(crate) fn events(resp: reqwest::Response) -> BoxStream<'static, Result<SseEv
                             return Some((Err(err), (bytes, buf, true)));
                         }
                         None if buf.trim_ascii().is_empty() => return None,
-                        None => {
-                            let err =
-                                EngineError::Protocol("stream ended inside an SSE line".into());
-                            return Some((Err(err), (bytes, buf, true)));
-                        }
+                        None => return Some((Err(cut_line()), (bytes, buf, true))),
                     },
                 }
             }
         },
     )
     .boxed()
+}
+
+/// A whole response body as SSE events, the way [`events`] reads a live one: for replaying
+/// recorded streams. The events come in order, an error last where the live stream would
+/// end with one, and nothing after `[DONE]`.
+pub(crate) fn decode(body: &[u8]) -> Vec<Result<SseEvent, EngineError>> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(pos) = rest.iter().position(|&b| b == b'\n') {
+        let (line, tail) = rest.split_at(pos + 1);
+        rest = tail;
+        let event = match payload(line) {
+            None => continue,
+            Some(Payload::Done) => Ok(SseEvent::Done),
+            Some(Payload::Data(data)) => parse(&data),
+        };
+        let last = !matches!(event, Ok(SseEvent::Data(_)));
+        out.push(event);
+        if last {
+            return out;
+        }
+    }
+    if !rest.trim_ascii().is_empty() {
+        out.push(Err(cut_line()));
+    }
+    out
+}
+
+fn parse(data: &[u8]) -> Result<SseEvent, EngineError> {
+    serde_json::from_slice::<Value>(data)
+        .map(SseEvent::Data)
+        .map_err(|e| EngineError::Protocol(format!("bad SSE payload: {e}")))
+}
+
+fn cut_line() -> EngineError {
+    EngineError::Protocol("stream ended inside an SSE line".into())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,18 +95,24 @@ enum Payload {
 fn next_payload(buf: &mut Vec<u8>) -> Option<Payload> {
     while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
         let line: Vec<u8> = buf.drain(..=pos).collect();
-        let Some(data) = line.trim_ascii().strip_prefix(b"data:") else {
-            continue;
-        };
-        let data = data.trim_ascii();
-        if data == b"[DONE]" {
-            return Some(Payload::Done);
-        }
-        if !data.is_empty() {
-            return Some(Payload::Data(data.to_vec()));
+        if let Some(p) = payload(&line) {
+            return Some(p);
         }
     }
     None
+}
+
+/// What one SSE line carries: a `data:` payload, `[DONE]`, or nothing (a comment, another
+/// field, empty data).
+fn payload(line: &[u8]) -> Option<Payload> {
+    let data = line.trim_ascii().strip_prefix(b"data:")?.trim_ascii();
+    if data == b"[DONE]" {
+        Some(Payload::Done)
+    } else if data.is_empty() {
+        None
+    } else {
+        Some(Payload::Data(data.to_vec()))
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +133,26 @@ mod tests {
             Some(Payload::Data(b"{\"b\":2}".to_vec()))
         );
         assert_eq!(next_payload(&mut buf), Some(Payload::Done));
+    }
+
+    #[test]
+    fn a_whole_body_decodes_like_a_stream() {
+        let body = b"data: {\"a\":1}\n\n: ping\ndata: [DONE]\n\ndata: {\"late\":1}\n";
+        let events = decode(body);
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].as_ref().unwrap(),
+            &SseEvent::Data(serde_json::json!({"a": 1}))
+        );
+        assert_eq!(events[1].as_ref().unwrap(), &SseEvent::Done);
+        // the events before a cut line or a bad payload come first, as from a live stream
+        let cut = decode(b"data: {\"a\":1}\ndata: {\"b\"");
+        assert!(
+            matches!(cut.as_slice(), [Ok(SseEvent::Data(_)), Err(_)]),
+            "{cut:?}"
+        );
+        let bad = decode(b"data: nope\ndata: {\"a\":1}\n");
+        assert!(matches!(bad.as_slice(), [Err(_)]), "{bad:?}");
+        assert!(decode(b"").is_empty());
     }
 }

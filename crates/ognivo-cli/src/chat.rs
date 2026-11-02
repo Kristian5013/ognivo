@@ -291,7 +291,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 return Ok(terminated(terminal.as_ref()));
             }
             Outcome::Stopped => {
-                agent.abandon_turn("The user stopped this turn.");
+                agent.abandon_turn("The user stopped the last turn.");
                 screen.line("· stopped", Paint::Dim);
                 true
             }
@@ -313,7 +313,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 true
             }
             Outcome::Ended(Err(e)) => {
-                agent.abandon_turn(&format!("This turn ended on a server error: {e}"));
+                agent.abandon_turn(&format!("The last turn ended on a server error: {e}"));
                 screen.line(&format!("[ognivo] server error: {e}"), Paint::Red);
                 true
             }

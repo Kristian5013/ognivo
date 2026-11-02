@@ -1020,6 +1020,15 @@ dependencies = [
 [[package]]
 name = "ognivo-evals"
 version = "0.0.1"
+dependencies = [
+ "ognivo-core",
+ "ognivo-models",
+ "ognivo-store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "ognivo-models"

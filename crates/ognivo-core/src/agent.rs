@@ -333,6 +333,8 @@ pub struct Agent {
     /// The instruction files of the system prompt.
     prompt_instructions: Load,
     journal: Journal,
+    /// Why the last turn was stopped, for the model's next message.
+    stopped: Option<String>,
     /// Files the user reverted since the model's last turn, for its next message.
     reverted: Vec<String>,
     /// What this turn changed, ran and was refused.
@@ -420,6 +422,7 @@ impl Agent {
             instructions,
             prompt_instructions,
             journal: Journal::new(opts.workspace.unreviewed_changes),
+            stopped: None,
             reverted: Vec::new(),
             ledger: Ledger::default(),
             repeats: Repeats::default(),
@@ -482,13 +485,16 @@ impl Agent {
             };
             agent.instructions.mark_looked(looked);
             agent.seen = seen.into_iter().collect();
+            agent.stopped = notes.stopped;
             agent.reverted = notes.reverted;
             agent.requests = notes.requests;
         }
         agent.session = Some(session);
         if notes.in_turn {
             agent.in_turn = true;
-            agent.abandon_turn("ognivo stopped before this turn ended; the session goes on now");
+            agent.abandon_turn(
+                "ognivo stopped before the last turn ended; the session goes on now.",
+            );
         } else {
             agent.save();
         }
@@ -597,7 +603,8 @@ impl Agent {
 
     /// Ends a turn that was dropped before its end (the user stopped it, or the server
     /// failed): every call of the last generation gets a result, so the history stays
-    /// well-formed, and the model reads `why` with the next message.
+    /// well-formed, and the model reads `why` with the next user message. What the server
+    /// was sent stays as it was, so the next request goes on from its cache.
     pub fn abandon_turn(&mut self, why: &str) {
         if let Some(at) = self
             .messages
@@ -629,7 +636,7 @@ impl Agent {
                 });
             }
         }
-        self.append_to_last(&format!("[ognivo] {why}"));
+        self.stopped = Some(why.to_owned());
         self.running = None;
         self.stuck = None;
         let open = std::mem::take(&mut self.in_turn);
@@ -643,6 +650,7 @@ impl Agent {
     /// changed stays unreviewed (§8), and the counters go on.
     pub fn clear(&mut self) {
         self.prompt_instructions = self.instructions.start();
+        self.stopped = None;
         self.messages = vec![ChatMessage::System(system_prompt(
             &self.opts.root,
             &self.prompt_instructions.text,
@@ -692,6 +700,7 @@ impl Agent {
         Notes {
             instructions: self.prompt_instructions.files.clone(),
             skipped: self.prompt_instructions.skipped.clone(),
+            stopped: self.stopped.clone(),
             reverted: self.reverted.clone(),
             requests: self.requests.clone(),
             in_turn: self.in_turn,
@@ -951,13 +960,16 @@ impl Agent {
             limit,
             told: 0,
         });
-        let mut user = match self.opts.time_limit {
-            Some(limit) => format!(
-                "{user}\n\n[ognivo] Time limit: {}. ognivo stops the turn when it runs out.",
+        let mut user = user.to_owned();
+        if let Some(why) = self.stopped.take() {
+            user.push_str(&format!("\n\n[ognivo] {why}"));
+        }
+        if let Some(limit) = self.opts.time_limit {
+            user.push_str(&format!(
+                "\n\n[ognivo] Time limit: {}. ognivo stops the turn when it runs out.",
                 about(limit)
-            ),
-            None => user.to_owned(),
-        };
+            ));
+        }
         if !self.reverted.is_empty() {
             user.push_str(&format!(
                 "\n\n[ognivo] Since your last turn the user reverted your changes to {}: they are as they were before your edits. Read them again before you edit them.",
@@ -2348,20 +2360,20 @@ mod tests {
                 .await
                 .is_err()
         );
-        r.agent.abandon_turn("The user stopped this turn.");
+        r.agent.abandon_turn("The user stopped the last turn.");
         assert_eq!(
             tool_results(&r.agent),
             [
                 "[error] stopped before it finished; it may have done part of its work",
-                "[error] not run: the turn was stopped\n\n[ognivo] The user stopped this turn."
+                "[error] not run: the turn was stopped"
             ]
         );
     }
 
     #[tokio::test]
-    async fn a_turn_dropped_in_a_generation_leaves_a_note_for_the_model() {
+    async fn a_turn_dropped_in_a_generation_leaves_a_note_for_the_next_message() {
         let mut r = script(
-            vec![Step::Hang],
+            vec![Step::Hang, Step::from(answer("ok"))],
             WorkspaceState::CLEAN,
             Box::new(NoUser),
             None,
@@ -2373,12 +2385,20 @@ mod tests {
                 .await
                 .is_err()
         );
-        r.agent.abandon_turn("The user stopped this turn.");
+        r.agent.abandon_turn("The user stopped the last turn.");
+        // the server has the message as it was sent
         assert_eq!(
             r.agent.messages().last(),
-            Some(&ChatMessage::User(
-                "fix it\n\n[ognivo] The user stopped this turn.".into()
-            ))
+            Some(&ChatMessage::User("fix it".into()))
+        );
+        r.agent.turn("go on", &mut on).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(
+            seen[1].messages[1..],
+            [
+                ChatMessage::User("fix it".into()),
+                ChatMessage::User("go on\n\n[ognivo] The user stopped the last turn.".into())
+            ]
         );
     }
 
@@ -2735,24 +2755,35 @@ mod tests {
         } = r;
         drop(agent);
 
-        let (mut agent, _) = resumed(&root, id, vec![]);
+        let (mut agent, seen) = resumed(&root, id, vec![answer("ok")]);
         assert_eq!(agent.changes().len(), 1);
         let Some(ChatMessage::Tool { content, .. }) = agent.messages().last() else {
             panic!("{:?}", agent.messages());
         };
-        assert!(
-            content.starts_with("[edit: applied")
-                && content.ends_with(
-                    "\n\n[ognivo] ognivo stopped before this turn ended; the session goes on now"
-                ),
-            "{content}"
+        assert!(content.starts_with("[edit: applied"), "{content}");
+        agent.turn("go on", &mut on).await.unwrap();
+        assert_eq!(
+            seen.lock().unwrap()[0].messages.last(),
+            Some(&ChatMessage::User(
+                "go on\n\n[ognivo] ognivo stopped before the last turn ended; the session goes on now."
+                    .into()
+            ))
         );
         drop(agent);
-        let kinds = event_kinds(&root, id);
-        assert_eq!(kinds.last().map(String::as_str), Some("end"));
         let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
-        let end = store.events(id).unwrap().pop().unwrap();
-        assert!(end.data.contains(r#""end":"stopped""#), "{}", end.data);
+        let ends: Vec<String> = store
+            .events(id)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.kind == "end")
+            .map(|e| e.data)
+            .collect();
+        assert!(
+            ends.len() == 2
+                && ends[0].contains(r#""end":"stopped""#)
+                && ends[1].contains(r#""end":"answer""#),
+            "{ends:?}"
+        );
     }
 
     #[tokio::test]

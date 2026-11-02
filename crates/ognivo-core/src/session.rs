@@ -62,6 +62,8 @@ pub struct Notes {
     /// The instruction files of its system prompt, and those it could not take.
     pub instructions: Vec<Given>,
     pub skipped: Vec<Skipped>,
+    /// Why the last turn was stopped, for the model's next message.
+    pub stopped: Option<String>,
     /// Files the user reverted since the model's last turn.
     pub reverted: Vec<String>,
     /// The user's requests, oldest first: a compaction quotes them.

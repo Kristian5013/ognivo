@@ -366,15 +366,16 @@ async fn ctrl_c_stops_the_turn_and_the_chat_goes_on() {
     assert!(out.status.success(), "{:?}\n{stdout}", out.status);
     assert!(stdout.contains("· stopped"), "{stdout}");
     assert!(stdout.contains("Going on."), "{stdout}");
-    // the model learns that the first turn was stopped
+    // the model learns that the first turn was stopped, and what it was sent stays as it was
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
     let m = &bodies[1]["messages"];
+    assert_eq!(m[1], bodies[0]["messages"][1]);
+    assert_eq!(m[1], json!({"role": "user", "content": "hello"}));
     assert_eq!(
-        m[1],
-        json!({"role": "user", "content": "hello\n\n[ognivo] The user stopped this turn."})
+        m[2],
+        json!({"role": "user", "content": "go on\n\n[ognivo] The user stopped the last turn."})
     );
-    assert_eq!(m[2], json!({"role": "user", "content": "go on"}));
 }
 
 #[tokio::test]

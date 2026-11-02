@@ -1,0 +1,104 @@
+: profile gemma-4-26b-a4b
+: verdict repeating:reasoning
+: like m1-og-b/gemma-4-26b-a4b.ognivo/flowcoin-ct-memeq-multibit #31: one paragraph of reasoning over and over; the driver dropped the stream
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"role":"assistant","content":null}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"The comparison must not branch on the data. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"I'll use `diff |= a[i] ^ b[i];"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"` and I'll keep `diff` as `uint32_t`, so the loop stays constant time.\n\n"}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
+data: {"choices":[{"finish_reason":null,"index":0,"delta":{"reasoning_content":"Wait, I'll try to change the loop again. "}}],"created":1793450610,"id":"chatcmpl-crqOckrtW48ssGlI6zD2dsoY9aAJh06J","model":"gemma-4-26b-a4b","system_fingerprint":"b11924-12cc59ba4","object":"chat.completion.chunk"}
+
