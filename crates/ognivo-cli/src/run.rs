@@ -19,6 +19,7 @@ use ognivo_core::verify;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::session::{Failure, SessionArgs};
+use crate::view::{given, not_read};
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
@@ -80,6 +81,14 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     };
     let mut agent = Agent::new(Box::new(s.driver), s.family, approver, opts);
     let jsonl = a.jsonl;
+    let start = agent.instructions();
+    if !start.files.is_empty() || !start.skipped.is_empty() {
+        let e = AgentEvent::Instructions {
+            files: start.files.clone(),
+            skipped: start.skipped.clone(),
+        };
+        show(&e, jsonl);
+    }
     let mut on = move |e: AgentEvent| show(&e, jsonl);
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
@@ -180,6 +189,14 @@ fn show(e: &AgentEvent, jsonl: bool) {
             let removed: usize = hunks.iter().map(|h| h.removed.len()).sum();
             let added: usize = hunks.iter().map(|h| h.added.len()).sum();
             eprintln!("· {path}: +{added} -{removed}");
+        }
+        AgentEvent::Instructions { files, skipped } => {
+            if !files.is_empty() {
+                eprintln!("· instructions: {}", given(files));
+            }
+            for s in skipped {
+                eprintln!("{}", not_read(s));
+            }
         }
         AgentEvent::Refused { tool, reason } => eprintln!("✗ {tool}: {reason}"),
         AgentEvent::Notice { text } => eprintln!("· {text}"),

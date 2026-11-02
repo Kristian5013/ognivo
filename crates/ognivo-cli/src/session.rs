@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use clap::Args;
 use ognivo_core::agent::AgentOptions;
 use ognivo_core::approval::WorkspaceState;
+use ognivo_core::instructions::UserInstructions;
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{ChatDriver, Family, doctor, profile};
 
@@ -138,9 +139,23 @@ impl SessionArgs {
                 max_tokens,
                 seed,
                 time_limit: None,
+                user_instructions: user_instructions(),
             },
         })
     }
+}
+
+/// The user's instruction files under `$HOME`, Claude Code's in `CLAUDE_CONFIG_DIR` when
+/// that is set.
+fn user_instructions() -> UserInstructions {
+    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+        return UserInstructions::default();
+    };
+    let home = PathBuf::from(home);
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from);
+    UserInstructions::at(std::fs::canonicalize(&home).unwrap_or(home), claude)
 }
 
 /// Clean only when git says nothing is changed or untracked; otherwise, or outside git,

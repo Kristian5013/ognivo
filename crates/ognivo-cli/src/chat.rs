@@ -17,6 +17,7 @@ use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::instructions::Load;
 use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
@@ -100,6 +101,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         ),
         Paint::Plain,
     );
+    instructions(&screen, agent.instructions());
     screen.line("/help · ^C stops a turn · ^D quits", Paint::Dim);
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
@@ -117,6 +119,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Entry::Clear => {
                 agent.clear();
                 screen.line("· new conversation", Paint::Dim);
+                instructions(&screen, agent.instructions());
                 continue;
             }
             Entry::Changes(file) => {
@@ -211,6 +214,17 @@ enum Outcome {
     /// By ^C, here or at a question.
     Stopped,
     Terminated,
+}
+
+/// The instruction files of the system prompt, and those it could not take.
+fn instructions(screen: &Screen, load: &Load) {
+    if !load.files.is_empty() {
+        let line = format!("instructions {}", view::given(&load.files));
+        screen.line(&line, Paint::Plain);
+    }
+    for s in &load.skipped {
+        screen.line(&view::not_read(s), Paint::Yellow);
+    }
 }
 
 /// The line under a turn that says whether its changes were checked: green when a build

@@ -22,6 +22,7 @@ async fn reads_edits_and_answers() {
         "fn main() {\n    println!(\"hi\");\n}\n",
     )
     .unwrap();
+    std::fs::write(root.join("AGENTS.md"), "Keep the greeting short.\n").unwrap();
     let (url, bodies) = fake_server(vec![
         call_stream("r1", "read", r#"{"path":"main.rs"}"#),
         call_stream(
@@ -49,6 +50,8 @@ async fn reads_edits_and_answers() {
             .arg(dir.path().join("data"))
             .arg("--cwd")
             .arg(&root)
+            .env("HOME", dir.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -80,11 +83,23 @@ async fn reads_edits_and_answers() {
         stderr.contains("→ read") && stderr.contains("← [edit: applied exact]"),
         "{stderr}"
     );
+    assert!(
+        stderr.starts_with("· instructions: AGENTS.md\n"),
+        "{stderr}"
+    );
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 3);
-    // the prompt from stdin is the user message; the second request carries the first
-    // step's call, its verbatim reasoning and the read result
+    // the project's instructions follow the fixed ones; the prompt from stdin is the user
+    // message; the second request carries the first step's call, its verbatim reasoning
+    // and the read result
+    let system = bodies[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.ends_with(
+            "\n\n<instructions file=\"AGENTS.md\">\nKeep the greeting short.\n</instructions>"
+        ),
+        "{system}"
+    );
     assert_eq!(
         bodies[0]["messages"][1],
         json!({"role": "user", "content": "Say hello instead of hi."})
@@ -148,6 +163,8 @@ async fn sigterm_ends_the_run_with_an_end_event() {
             .arg(&data)
             .arg("--cwd")
             .arg(dir.path())
+            .env("HOME", dir.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -223,6 +240,8 @@ async fn the_time_limit_ends_the_run_with_exit_124() {
             .arg(&data)
             .arg("--cwd")
             .arg(dir.path())
+            .env("HOME", dir.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

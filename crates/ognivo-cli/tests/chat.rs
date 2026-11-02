@@ -28,6 +28,9 @@ fn spawn(url: &str, root: &Path, data: &Path, stdin: &str) -> Child {
         .arg(data)
         .arg("--cwd")
         .arg(root)
+        // the user's own instruction files are looked for there
+        .env("HOME", root.parent().unwrap())
+        .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -375,4 +378,64 @@ async fn ctrl_c_stops_the_turn_and_the_chat_goes_on() {
         json!({"role": "user", "content": "hello\n\n[ognivo] The user stopped this turn."})
     );
     assert_eq!(m[2], json!({"role": "user", "content": "go on"}));
+}
+
+#[tokio::test]
+async fn instruction_files_are_named_and_reach_the_model() {
+    let (url, bodies) = fake_server(vec![
+        call_stream("c1", "read", r#"{"path":"sub/x.rs"}"#),
+        answer_stream("Read it."),
+    ])
+    .await;
+    let (dir, root) = project();
+    let home = dir.path();
+    std::fs::create_dir(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/CLAUDE.md"), "Be brief.\n").unwrap();
+    std::fs::write(root.join("AGENTS.md"), "Answer in one word.\n").unwrap();
+    std::fs::create_dir(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub/AGENTS.md"), "Tests live in tests/.\n").unwrap();
+    std::fs::write(root.join("sub/x.rs"), "x\n").unwrap();
+    // a link out of the project is named, not read
+    std::fs::write(home.join("outside.md"), "the secret").unwrap();
+    std::os::unix::fs::symlink(home.join("outside.md"), root.join("CLAUDE.md")).unwrap();
+    let data = home.join("data");
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "look\n/clear\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    let banner = "\ninstructions ~/.claude/CLAUDE.md, AGENTS.md\n· not read: CLAUDE.md (a link to outside the project)\n";
+    assert!(stdout.contains(&format!("{banner}/help")), "{stdout}");
+    // a new conversation reads them again
+    assert!(
+        stdout.contains(&format!("· new conversation{banner}")),
+        "{stdout}"
+    );
+    let at = |s: &str| stdout.find(s).unwrap_or_else(|| panic!("{s}: {stdout}"));
+    assert!(at("→ read sub/x.rs") < at("\n· instructions: sub/AGENTS.md\n"));
+    assert!(at("\n· instructions: sub/AGENTS.md\n") < at("Read it."));
+
+    let bodies = bodies.lock().unwrap();
+    let system = bodies[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        system.contains("<instructions file=\"~/.claude/CLAUDE.md\">\nBe brief.\n</instructions>\n\n<instructions file=\"AGENTS.md\">\nAnswer in one word.\n</instructions>"),
+        "{system}"
+    );
+    assert!(!system.contains("the secret"), "{system}");
+    let read = bodies[1]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "tool")
+        .unwrap();
+    assert!(
+        read["content"].as_str().unwrap().ends_with(
+            "<instructions file=\"sub/AGENTS.md\">\nTests live in tests/.\n</instructions>"
+        ),
+        "{read}"
+    );
 }

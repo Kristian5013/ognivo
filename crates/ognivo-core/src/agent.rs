@@ -39,6 +39,7 @@ use serde::Serialize;
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
 use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
 use crate::verify::{self, Ledger, Run, Verification};
@@ -139,6 +140,13 @@ pub enum AgentEvent {
         tool: String,
         result: String,
     },
+    /// Instruction files (AGENTS.md, CLAUDE.md, their imports) the model got after a
+    /// call's result, from the directories on the path of the file it read or changed, and
+    /// those it could not get.
+    Instructions {
+        files: Vec<Given>,
+        skipped: Vec<Skipped>,
+    },
     Refused {
         tool: String,
         reason: String,
@@ -217,6 +225,8 @@ pub struct AgentOptions {
     pub workspace: WorkspaceState,
     /// Wall-clock limit of each turn.
     pub time_limit: Option<Duration>,
+    /// The user's own instruction files; the project's are found from `root`.
+    pub user_instructions: UserInstructions,
 }
 
 /// The time limit of the running turn.
@@ -276,6 +286,9 @@ pub struct Agent {
     /// Files this session has read or written: only those may be overwritten whole.
     seen: HashSet<PathBuf>,
     clock: Option<Clock>,
+    instructions: Instructions,
+    /// The instruction files of the system prompt.
+    prompt_instructions: Load,
     journal: Journal,
     /// Files the user reverted since the model's last turn, for its next message.
     reverted: Vec<String>,
@@ -303,10 +316,11 @@ impl std::fmt::Debug for Agent {
     }
 }
 
-/// The fixed instructions of every session. Short on purpose: the reference agents that
-/// work best with small models keep their prefix small (docs/research/2026-10-29).
-pub fn system_prompt(root: &Path) -> String {
-    format!(
+/// The fixed instructions of every session, then the text of the user's and the project's
+/// instruction files. Short on purpose: the reference agents that work best with small
+/// models keep their prefix small (docs/research/2026-10-29).
+pub fn system_prompt(root: &Path, instructions: &str) -> String {
+    let fixed = format!(
         "You are ognivo, a coding agent. You work in the project at {} through tools: read and search files, edit them, run shell commands.\n\
          - Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n\
          - Change only what the task needs.\n\
@@ -314,7 +328,12 @@ pub fn system_prompt(root: &Path) -> String {
          - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
          - Commands run without a terminal; do not start interactive programs.",
         root.display()
-    )
+    );
+    if instructions.is_empty() {
+        fixed
+    } else {
+        format!("{fixed}\n\n{instructions}")
+    }
 }
 
 impl Agent {
@@ -325,8 +344,13 @@ impl Agent {
         opts: AgentOptions,
     ) -> Self {
         let cwd = opts.root.clone();
+        let mut instructions = Instructions::new(opts.root.clone(), opts.user_instructions.clone());
+        let prompt_instructions = instructions.start();
         Self {
-            messages: vec![ChatMessage::System(system_prompt(&opts.root))],
+            messages: vec![ChatMessage::System(system_prompt(
+                &opts.root,
+                &prompt_instructions.text,
+            ))],
             tools: projection::declarations(family),
             driver,
             family,
@@ -334,6 +358,8 @@ impl Agent {
             cwd,
             seen: HashSet::new(),
             clock: None,
+            instructions,
+            prompt_instructions,
             journal: Journal::new(opts.workspace.unreviewed_changes),
             reverted: Vec::new(),
             ledger: Ledger::default(),
@@ -348,6 +374,11 @@ impl Agent {
 
     pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
+    }
+
+    /// The instruction files of the system prompt, and those it could not take.
+    pub fn instructions(&self) -> &Load {
+        &self.prompt_instructions
     }
 
     /// What the current or last turn's tool calls show, answer or not.
@@ -450,10 +481,14 @@ impl Agent {
         self.stuck = None;
     }
 
-    /// Starts a new conversation. What the session changed stays unreviewed (§8), and the
-    /// counters go on.
+    /// Starts a new conversation, with the instruction files read again. What the session
+    /// changed stays unreviewed (§8), and the counters go on.
     pub fn clear(&mut self) {
-        self.messages.truncate(1);
+        self.prompt_instructions = self.instructions.start();
+        self.messages = vec![ChatMessage::System(system_prompt(
+            &self.opts.root,
+            &self.prompt_instructions.text,
+        ))];
         self.seen.clear();
         self.context = 0;
     }
@@ -696,6 +731,14 @@ impl Agent {
                 arguments: call.arguments.clone(),
             },
         };
+        // the file the call reads or changes: the instructions on its path come with it
+        let touched = match &parsed {
+            Ok(Call::Read { path, .. } | Call::Edit { path, .. } | Call::Write { path, .. }) => {
+                Some(files::resolve(&self.cwd, path))
+            }
+            _ => None,
+        };
+        let mut near = Load::default();
         let result = match self.repeats.check(&key) {
             Check::Run => {
                 let mut result = match parsed {
@@ -709,6 +752,13 @@ impl Agent {
                     self.stats.repeated += 1;
                     result.push_str("\n\n");
                     result.push_str(&note);
+                }
+                if let Some(path) = touched {
+                    near = self.instructions.near(&path);
+                    if !near.text.is_empty() {
+                        result.push_str("\n\n");
+                        result.push_str(&near.text);
+                    }
                 }
                 result
             }
@@ -733,6 +783,12 @@ impl Agent {
             tool: call.name.clone(),
             result: result.clone(),
         });
+        if !near.files.is_empty() || !near.skipped.is_empty() {
+            on(AgentEvent::Instructions {
+                files: near.files,
+                skipped: near.skipped,
+            });
+        }
         result
     }
 
@@ -1192,6 +1248,7 @@ mod tests {
             seed: 1,
             workspace,
             time_limit,
+            user_instructions: UserInstructions::default(),
         };
         Run {
             agent: Agent::new(Box::new(driver), Family::Harmony, approver, opts),
@@ -1977,6 +2034,70 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
             "fn a() -> u32 {\n    2\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn instructions_reach_the_system_prompt_and_a_subdirectory_s_its_first_read() {
+        let read = |path: &str| {
+            calls(
+                &[("read", serde_json::json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let mut r = agent(
+            vec![read("sub/x.rs"), read("sub/y.rs"), answer("done")],
+            WorkspaceState::CLEAN,
+        );
+        std::fs::write(r.root.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        std::fs::create_dir(r.root.join("sub")).unwrap();
+        std::fs::write(r.root.join("sub/CLAUDE.md"), "No unsafe here.").unwrap();
+        std::fs::write(r.root.join("sub/x.rs"), "x\n").unwrap();
+        std::fs::write(r.root.join("sub/y.rs"), "y\n").unwrap();
+        // they were not there when the session began; a new conversation reads them again
+        r.agent.clear();
+        let (end, events) = turn(&mut r).await;
+        answered(end);
+        let ChatMessage::System(system) = &r.agent.messages()[0] else {
+            panic!("{:?}", r.agent.messages()[0]);
+        };
+        assert!(system.starts_with("You are ognivo"), "{system}");
+        assert!(
+            system.contains("<instructions file=\"AGENTS.md\">\nUse tabs.\n</instructions>"),
+            "{system}"
+        );
+        assert!(
+            r.agent
+                .instructions()
+                .files
+                .iter()
+                .any(|f| f.path == "AGENTS.md")
+        );
+        let results = tool_results(&r.agent);
+        assert!(results[0].starts_with("[read: sub/x.rs"), "{}", results[0]);
+        assert!(
+            results[0].ends_with("\n\n[ognivo] Instructions for the files under sub/ follow; where they disagree with the earlier ones, they win.\n\n<instructions file=\"sub/CLAUDE.md\">\nNo unsafe here.\n</instructions>"),
+            "{}",
+            results[0]
+        );
+        assert!(!results[1].contains("instructions"), "{}", results[1]);
+        // the user hears of them after the call's result
+        let at = events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::Instructions { .. }))
+            .unwrap();
+        assert!(matches!(events[at - 1], AgentEvent::ToolFinished { .. }));
+        let AgentEvent::Instructions { files, skipped } = &events[at] else {
+            unreachable!()
+        };
+        assert_eq!(files[0].path, "sub/CLAUDE.md");
+        assert!(skipped.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Instructions { .. }))
+                .count(),
+            1
         );
     }
 }

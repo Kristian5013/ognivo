@@ -946,6 +946,7 @@ dependencies = [
  "ognivo-store",
  "ognivo-tools",
  "regex",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",

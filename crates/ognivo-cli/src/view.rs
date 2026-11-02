@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use ognivo_core::agent::AgentEvent;
+use ognivo_core::instructions::{Given, Skipped};
 use ognivo_core::journal::FileChange;
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::projection::Call;
@@ -78,6 +79,15 @@ impl View {
                 hunks,
             } => self.changed(&path, created, &hunks),
             AgentEvent::ToolFinished { result, .. } => self.finished(&result),
+            AgentEvent::Instructions { files, skipped } => {
+                if !files.is_empty() {
+                    let line = format!("· instructions: {}", given(&files));
+                    self.screen.line(&line, Paint::Dim);
+                }
+                for s in &skipped {
+                    self.screen.line(&not_read(s), Paint::Yellow);
+                }
+            }
             AgentEvent::Refused { tool, reason } => {
                 let name = self
                     .call
@@ -344,6 +354,27 @@ pub fn counts(created: bool, hunks: &[Hunk]) -> String {
     } else {
         format!("+{added} -{removed}")
     }
+}
+
+/// `AGENTS.md, CLAUDE.md (cut)`: the instruction files the model got.
+pub fn given(files: &[Given]) -> String {
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| {
+            let name = short(&f.path, LINE_CHARS);
+            if f.cut { format!("{name} (cut)") } else { name }
+        })
+        .collect();
+    names.join(", ")
+}
+
+/// `· not read: ~/x.md (imported by CLAUDE.md from outside the project)`.
+pub fn not_read(s: &Skipped) -> String {
+    format!(
+        "· not read: {} ({})",
+        short(&s.path, LINE_CHARS),
+        short(&s.why, LINE_CHARS)
+    )
 }
 
 /// A file's unreviewed change for `/changes`: a line with its counts, then its diff, all
