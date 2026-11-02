@@ -139,6 +139,7 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         profile: p.clone(),
         n_ctx: props.n_ctx,
     };
+    let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
     for s in &scenarios {
         for &seed in &a.seeds {
             if done.contains(&(s.id.clone(), seed)) {
@@ -169,15 +170,37 @@ async fn suite(a: &Args) -> Result<Summary, String> {
             writeln!(f, "{}", serde_json::to_string(&r).unwrap_or_default())
                 .map_err(|e| e.to_string())?;
             results.push(r);
+            // a suite stopped at the end of a night window keeps the summary of what ran
+            let now = selected(&results, &wanted, &a.seeds);
+            write_summary(&a.out, &t2::summarize(&p.id, info.clone(), &a.seeds, &now))?;
         }
     }
-    let wanted: HashSet<&str> = scenarios.iter().map(|s| s.id.as_str()).collect();
-    results.retain(|r| wanted.contains(r.scenario.as_str()) && a.seeds.contains(&r.seed));
-    let s = t2::summarize(&p.id, info, &a.seeds, &results);
-    let text = serde_json::to_string_pretty(&s).unwrap_or_default() + "\n";
-    std::fs::write(a.out.join("summary.json"), text).map_err(|e| e.to_string())?;
+    let s = t2::summarize(
+        &p.id,
+        info,
+        &a.seeds,
+        &selected(&results, &wanted, &a.seeds),
+    );
+    write_summary(&a.out, &s)?;
     print_summary(&s);
     Ok(s)
+}
+
+/// The results of this suite: its scenarios and seeds, whatever else `results.jsonl` holds.
+fn selected(results: &[RunResult], scenarios: &HashSet<String>, seeds: &[u32]) -> Vec<RunResult> {
+    results
+        .iter()
+        .filter(|r| scenarios.contains(&r.scenario) && seeds.contains(&r.seed))
+        .cloned()
+        .collect()
+}
+
+/// `summary.json`, replaced whole.
+fn write_summary(out: &Path, s: &Summary) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(s).unwrap_or_default() + "\n";
+    let tmp = out.join(".summary.json");
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, out.join("summary.json")).map_err(|e| e.to_string())
 }
 
 fn print_summary(s: &Summary) {

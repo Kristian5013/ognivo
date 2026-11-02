@@ -12,8 +12,9 @@
 //!   goes on with the generation it got (`tests/kv.rs`).
 //!
 //! T2-mini ([`t2`], the `t2` binary) runs scenarios on fixture projects against a live
-//! llama-server, nightly: the M1 exit metrics per profile. T3 (agentic tasks through
-//! Harbor) comes next.
+//! llama-server, nightly (`scripts/night.sh`, the morning report in [`night`]): the M1 exit
+//! metrics per profile. T3 (agentic tasks through Harbor) comes next.
 
+pub mod night;
 pub mod replay;
 pub mod t2;
