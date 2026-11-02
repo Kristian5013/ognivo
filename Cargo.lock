@@ -1002,6 +1002,7 @@ name = "ognivo-core"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "globset",
  "ognivo-models",
  "ognivo-protocol",
  "ognivo-store",

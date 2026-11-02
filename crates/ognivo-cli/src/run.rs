@@ -77,10 +77,22 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         Ok(store) => store,
         Err(f) => return fail(f),
     };
-    let mut s = match a.session.connect(root, None).await {
+    let mut s = match a.session.connect(root.clone(), None).await {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
+    for p in &s.rule_problems {
+        eprintln!("· not a rule: {p}");
+    }
+    // the project's allow rules count only as the user answered in chat
+    if let Some(pending) = s.pending.take() {
+        match store.trusted(&root, &pending.key()) {
+            Ok(Some(true)) => s.opts.rules.trust(pending),
+            _ => eprintln!(
+                "· the project's allow rules are not used: trust them once in ognivo chat"
+            ),
+        }
+    }
     let seed = s.opts.seed;
     s.opts.time_limit = a.time_limit.map(Duration::from_secs);
     let mut agent = match s.new_agent("run", &a.session.url, store, approver) {

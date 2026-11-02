@@ -45,6 +45,7 @@ use crate::compact;
 use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
 use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
+use crate::rules::{Rules, Ruling};
 use crate::session::{Notes, Resumed, Session};
 use crate::verify::{self, Ledger, Run, Verification};
 
@@ -252,6 +253,8 @@ pub struct AgentOptions {
     pub time_limit: Option<Duration>,
     /// The user's own instruction files; the project's are found from `root`.
     pub user_instructions: UserInstructions,
+    /// Permission rules on top of the policy (§8).
+    pub rules: Rules,
 }
 
 /// The time limit of the running turn.
@@ -1223,10 +1226,11 @@ impl Agent {
                 limit,
             } => {
                 let p = files::resolve(&self.cwd, &path);
+                let ruling = self.opts.rules.read(&p, approval::decide_read(&p, &root));
                 if let Some(refusal) = self
                     .permit(
                         tool,
-                        approval::decide_read(&p, &root),
+                        ruling,
                         &p.display().to_string(),
                         "outside the project",
                         Vec::new(),
@@ -1253,10 +1257,14 @@ impl Agent {
                 glob,
             } => {
                 let base = path.map_or_else(|| self.cwd.clone(), |p| files::resolve(&self.cwd, &p));
+                let ruling = self
+                    .opts
+                    .rules
+                    .read(&base, approval::decide_read(&base, &root));
                 if let Some(refusal) = self
                     .permit(
                         tool,
-                        approval::decide_read(&base, &root),
+                        ruling,
                         &base.display().to_string(),
                         "outside the project",
                         Vec::new(),
@@ -1266,15 +1274,20 @@ impl Agent {
                 {
                     return refusal;
                 }
-                search::grep(&base, &root, &pattern, glob.as_deref())
+                let hidden = |p: &Path| self.opts.rules.hides(p);
+                search::grep(&base, &root, &pattern, glob.as_deref(), &hidden)
                     .unwrap_or_else(|e| format!("[error] {e}"))
             }
             Call::Glob { pattern, path } => {
                 let base = path.map_or_else(|| self.cwd.clone(), |p| files::resolve(&self.cwd, &p));
+                let ruling = self
+                    .opts
+                    .rules
+                    .read(&base, approval::decide_read(&base, &root));
                 if let Some(refusal) = self
                     .permit(
                         tool,
-                        approval::decide_read(&base, &root),
+                        ruling,
                         &base.display().to_string(),
                         "outside the project",
                         Vec::new(),
@@ -1284,7 +1297,9 @@ impl Agent {
                 {
                     return refusal;
                 }
-                search::glob(&base, &root, &pattern).unwrap_or_else(|e| format!("[error] {e}"))
+                let hidden = |p: &Path| self.opts.rules.hides(p);
+                search::glob(&base, &root, &pattern, &hidden)
+                    .unwrap_or_else(|e| format!("[error] {e}"))
             }
             Call::Edit {
                 path,
@@ -1313,10 +1328,11 @@ impl Agent {
                             }],
                             &root,
                         );
+                        let ruling = self.opts.rules.edit(&change.path, decision);
                         if let Some(refusal) = self
                             .permit(
                                 tool,
-                                decision,
+                                ruling,
                                 &p.display().to_string(),
                                 "a protected path or outside the project",
                                 Vec::new(),
@@ -1352,10 +1368,11 @@ impl Agent {
                             }],
                             &root,
                         );
+                        let ruling = self.opts.rules.edit(&change.path, decision);
                         if let Some(refusal) = self
                             .permit(
                                 tool,
-                                decision,
+                                ruling,
                                 &p.display().to_string(),
                                 "a protected path or outside the project",
                                 Vec::new(),
@@ -1389,14 +1406,19 @@ impl Agent {
                     return e;
                 }
                 let decision = approval::decide(effect, self.workspace());
-                let unreviewed =
-                    if effect == Effect::ExecutesProjectCode && decision == Decision::Ask {
-                        self.journal.summary()
-                    } else {
-                        Vec::new()
-                    };
+                let ruling = self
+                    .opts
+                    .rules
+                    .command(&command, &self.cwd, decision, |part| {
+                        classify_command(part, &ctx) == Effect::ReadOnly
+                    });
+                let unreviewed = if effect == Effect::ExecutesProjectCode && ruling == Ruling::Ask {
+                    self.journal.summary()
+                } else {
+                    Vec::new()
+                };
                 if let Some(refusal) = self
-                    .permit(tool, decision, &command, reason, unreviewed, on)
+                    .permit(tool, ruling, &command, reason, unreviewed, on)
                     .await
                 {
                     if checks {
@@ -1517,21 +1539,39 @@ impl Agent {
     async fn permit(
         &mut self,
         tool: &str,
-        decision: Decision,
+        ruling: Ruling,
         action: &str,
         reason: &str,
         unreviewed: Vec<String>,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Option<String> {
-        if decision == Decision::Allow {
-            return None;
-        }
         let req = ApprovalRequest {
             tool: tool.to_owned(),
             action: action.to_owned(),
             reason: reason.to_owned(),
             unreviewed,
         };
+        match ruling {
+            Ruling::Allow => return None,
+            Ruling::Ask => {}
+            Ruling::Deny(rule) => {
+                self.stats.refused += 1;
+                if let Some(s) = self.session.as_mut() {
+                    s.approval(&req, false);
+                }
+                let text = format!(
+                    "{action} is denied by the rule {rule}. Do not retry it; do the task another way, or say in the final answer what the rule kept you from doing."
+                );
+                self.emit(
+                    on,
+                    AgentEvent::Refused {
+                        tool: tool.to_owned(),
+                        reason: text.clone(),
+                    },
+                );
+                return Some(format!("[refused] {text}"));
+            }
+        }
         let verdict = self.approver.approve(&req).await;
         if let Some(s) = self.session.as_mut() {
             s.approval(&req, verdict == Verdict::Allow);
@@ -1702,6 +1742,7 @@ mod tests {
             workspace,
             time_limit,
             user_instructions: UserInstructions::default(),
+            rules: Rules::default(),
         }
     }
 
@@ -2883,5 +2924,77 @@ mod tests {
             .count();
         assert_eq!(compactions, 2);
         assert_eq!(r.seen.lock().unwrap().len(), 11);
+    }
+
+    #[tokio::test]
+    async fn rules_refuse_without_a_question_and_allow_what_would_ask() {
+        let shell = |command: &str| {
+            calls(
+                &[("shell", serde_json::json!({ "command": command }))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let grep = calls(
+            &[("grep", serde_json::json!({"pattern": "fn", "path": "."}))],
+            FinishReason::ToolCalls,
+        );
+        let asked = Asked::default();
+        let questions = asked.0.clone();
+        let mut r = agent_with(
+            vec![
+                shell("touch made.txt"),
+                shell("rm -f made.txt"),
+                grep,
+                answer("done"),
+                answer("done"),
+            ],
+            WorkspaceState::CLEAN,
+            Box::new(asked),
+        );
+        std::fs::create_dir(r.root.join(".ognivo")).unwrap();
+        std::fs::write(
+            r.root.join(".ognivo/config.toml"),
+            "[permissions]\nallow = [\"Bash(touch:*)\"]\ndeny = [\"Bash(rm:*)\", \"Read(secret.rs)\"]\n",
+        )
+        .unwrap();
+        std::fs::write(r.root.join("secret.rs"), "fn hidden() {}\n").unwrap();
+        let loaded = crate::rules::load(&crate::rules::Places {
+            root: r.root.clone(),
+            home: None,
+            claude_dir: None,
+        });
+        let mut rules = loaded.rules;
+        // the project's allow rule counts once trusted
+        rules.trust(loaded.pending.unwrap());
+        r.agent.opts.rules = rules;
+        let (end, events) = turn(&mut r).await;
+        answered(end);
+        // neither command asked: one was allowed, the other denied by a rule
+        assert!(
+            questions.lock().unwrap().is_empty(),
+            "{:?}",
+            questions.lock().unwrap()
+        );
+        assert!(r.root.join("made.txt").exists());
+        let results = tool_results(&r.agent);
+        assert!(results[0].starts_with("[shell: exit 0"), "{}", results[0]);
+        assert_eq!(
+            results[1],
+            "[refused] rm -f made.txt is denied by the rule Bash(rm:*) in .ognivo/config.toml. Do not retry it; do the task another way, or say in the final answer what the rule kept you from doing."
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Refused { .. }))
+        );
+        // a file a deny rule names is left out of a search, which says so
+        assert!(results[2].contains("lib.rs:1:fn a()"), "{}", results[2]);
+        assert!(!results[2].contains("hidden"), "{}", results[2]);
+        assert!(
+            results[2].contains("[1 file left out by the permission rules]"),
+            "{}",
+            results[2]
+        );
+        assert_eq!(r.agent.stats.refused, 1);
     }
 }

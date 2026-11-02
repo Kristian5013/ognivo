@@ -13,7 +13,7 @@
 //! - Network access and everything else asks.
 //!
 //! User and project rules (`~/.ognivo/config.toml`, `.claude/settings.json` permissions)
-//! are layered on top in M1 (deny > ask > allow).
+//! are layered on top by [`crate::rules`] (deny > ask > allow).
 
 use std::path::{Component, Path};
 

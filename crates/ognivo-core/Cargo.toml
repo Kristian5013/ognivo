@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 futures.workspace = true
+globset.workspace = true
 regex.workspace = true
 rustix.workspace = true
 serde.workspace = true

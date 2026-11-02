@@ -9,7 +9,8 @@
 //!   column for sealed token ids (the Native path), empty on the Generic path;
 //! - `journal_files`, `journal_dirs`, `journal_commands`: the edit journal; the contents of
 //!   files live in `blobs`, keyed by their blake3 hash and compressed with zstd;
-//! - `transcript`: FTS5 over the user's messages and the answers.
+//! - `transcript`: FTS5 over the user's messages and the answers;
+//! - `trusted_rules`: the user's answer about a project's allow rules, for exactly those.
 //!
 //! The store keeps what the core gives it: messages, events, counters and conversation
 //! notes are JSON the core writes and reads. Paths are kept as the OS spells them, so a
@@ -25,11 +26,23 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, TransactionBehavior, params};
 
-/// The schema this build writes, in `PRAGMA user_version`.
-const VERSION: i64 = 1;
+/// The schema steps, oldest first: a store at version `n` has run the first `n`; the
+/// version this build writes is their count (`PRAGMA user_version`).
+const MIGRATIONS: &[&str] = &[SCHEMA_1, SCHEMA_2];
+const VERSION: i64 = MIGRATIONS.len() as i64;
 const ZSTD_LEVEL: i32 = 3;
 
-const SCHEMA: &str = "
+const SCHEMA_2: &str = "
+CREATE TABLE trusted_rules (
+    root BLOB NOT NULL,
+    rules TEXT NOT NULL,
+    trusted INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    PRIMARY KEY (root, rules)
+);
+";
+
+const SCHEMA_1: &str = "
 CREATE TABLE sessions (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -304,14 +317,13 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", true)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        match version {
-            0 => {
-                tx.execute_batch(SCHEMA)?;
-                tx.pragma_update(None, "user_version", VERSION)?;
-            }
-            VERSION => {}
-            newer => return Err(StoreError::Newer(newer)),
+        if version > VERSION {
+            return Err(StoreError::Newer(version));
         }
+        for step in &MIGRATIONS[version.max(0) as usize..] {
+            tx.execute_batch(step)?;
+        }
+        tx.pragma_update(None, "user_version", VERSION)?;
         tx.commit()?;
         Ok(Self { conn })
     }
@@ -396,6 +408,31 @@ impl Store {
             }
         }
         Ok(hits)
+    }
+
+    /// The user's answer about exactly these allow rules of a project, if they gave one.
+    pub fn trusted(&self, root: &Path, rules: &str) -> Result<Option<bool>, StoreError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT trusted FROM trusted_rules WHERE root = ?1 AND rules = ?2",
+                params![bytes(root), rules],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_trusted(
+        &mut self,
+        root: &Path,
+        rules: &str,
+        trusted: bool,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO trusted_rules (root, rules, trusted, at) VALUES (?1, ?2, ?3, ?4)",
+            params![bytes(root), rules, trusted, now()],
+        )?;
+        Ok(())
     }
 
     /// Removes a session and everything kept for it.
@@ -813,7 +850,33 @@ mod tests {
             .unwrap()
             .pragma_update(None, "user_version", VERSION + 1)
             .unwrap();
-        assert!(matches!(Store::open(&path), Err(StoreError::Newer(2))));
+        assert!(matches!(Store::open(&path), Err(StoreError::Newer(v)) if v == VERSION + 1));
+    }
+
+    #[test]
+    fn an_older_store_is_brought_up_to_date_and_keeps_its_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ognivo.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (kind, root, profile, server, seed, created, updated)
+                 VALUES ('chat', x'2f70', 'gpt-oss-20b', 'u', 1, 0, 0)",
+                [],
+            )
+            .unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.session(1).unwrap().unwrap().root, Path::new("/p"));
+        assert_eq!(store.trusted(Path::new("/p"), "r").unwrap(), None);
+        store.set_trusted(Path::new("/p"), "r", true).unwrap();
+        assert_eq!(store.trusted(Path::new("/p"), "r").unwrap(), Some(true));
+        // another set of rules is another question
+        assert_eq!(store.trusted(Path::new("/p"), "r2").unwrap(), None);
+        store.set_trusted(Path::new("/p"), "r", false).unwrap();
+        assert_eq!(store.trusted(Path::new("/p"), "r").unwrap(), Some(false));
     }
 
     #[test]

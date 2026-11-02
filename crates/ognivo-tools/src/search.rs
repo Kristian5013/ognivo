@@ -1,6 +1,8 @@
 //! grep and glob over the project, embedded (the machine has no system ripgrep). Both walk
 //! with the `ignore` crate, so `.gitignore`, `.ignore` and hidden files are treated the
-//! way ripgrep treats them, and both cap their output (docs/m0/baseline.md, req. 9).
+//! way ripgrep treats them, and both cap their output (docs/m0/baseline.md, req. 9). Files
+//! the caller hides (the permission rules' deny and ask paths) are left out of a directory's
+//! results, and the result says how many.
 
 use std::path::Path;
 use std::time::SystemTime;
@@ -30,13 +32,14 @@ pub enum SearchError {
 
 /// Searches `base` (a directory or one file) for `pattern`, a Rust regex, one line at a
 /// time. An invalid regex is searched as literal text and the result says so. `glob`
-/// filters the files of a directory by their path relative to it. Paths in the result are
-/// named relative to `root` (see [`Target`]).
+/// filters the files of a directory by their path relative to it, and `hidden` leaves
+/// some out. Paths in the result are named relative to `root` (see [`Target`]).
 pub fn grep(
     base: &Path,
     root: &Path,
     pattern: &str,
     glob: Option<&str>,
+    hidden: &dyn Fn(&Path) -> bool,
 ) -> Result<String, SearchError> {
     check_base(base)?;
     let (re, note) = match Regex::new(pattern) {
@@ -66,12 +69,18 @@ pub fn grep(
     };
     let mut rows = Vec::new();
     let mut files = 0usize;
+    let mut left_out = 0usize;
     let mut capped = false;
     'walk: for path in walk(base) {
         let rel = path.strip_prefix(base).unwrap_or(&path);
         if let Some(f) = &filter
             && !f.is_match(rel)
         {
+            continue;
+        }
+        // the caller decided on a single file already
+        if path != base && hidden(&path) {
+            left_out += 1;
             continue;
         }
         let Ok(meta) = path.metadata() else { continue };
@@ -118,6 +127,7 @@ pub fn grep(
             "\n[first {GREP_MAX_MATCHES} matches shown; narrow the pattern, path or glob]"
         ));
     }
+    out.push_str(&left_out_note(left_out));
     if let Some(n) = note {
         out.push('\n');
         out.push_str(&n);
@@ -130,12 +140,23 @@ pub fn grep(
 }
 
 /// Lists files under `base` whose path relative to `base` matches `pattern`, newest first,
-/// named relative to `root`.
-pub fn glob(base: &Path, root: &Path, pattern: &str) -> Result<String, SearchError> {
+/// named relative to `root`; `hidden` leaves some out.
+pub fn glob(
+    base: &Path,
+    root: &Path,
+    pattern: &str,
+    hidden: &dyn Fn(&Path) -> bool,
+) -> Result<String, SearchError> {
     check_base(base)?;
     let m = matcher(pattern)?;
+    let mut left_out = 0usize;
     let mut found: Vec<(SystemTime, String)> = walk(base)
         .filter(|p| m.is_match(p.strip_prefix(base).unwrap_or(p)))
+        .filter(|p| {
+            let keep = !hidden(p);
+            left_out += usize::from(!keep);
+            keep
+        })
         .map(|p| {
             let t = p
                 .metadata()
@@ -155,11 +176,20 @@ pub fn glob(base: &Path, root: &Path, pattern: &str) -> Result<String, SearchErr
             "\n[newest {GLOB_MAX_FILES} shown; narrow the pattern]"
         ));
     }
+    out.push_str(&left_out_note(left_out));
     for (_, p) in found.into_iter().take(GLOB_MAX_FILES) {
         out.push('\n');
         out.push_str(&p);
     }
     Ok(out)
+}
+
+fn left_out_note(n: usize) -> String {
+    match n {
+        0 => String::new(),
+        1 => "\n[1 file left out by the permission rules]".to_owned(),
+        n => format!("\n[{n} files left out by the permission rules]"),
+    }
 }
 
 fn check_base(base: &Path) -> Result<(), SearchError> {
@@ -220,7 +250,7 @@ mod tests {
     #[test]
     fn grep_respects_gitignore_and_globs() {
         let d = tree();
-        let out = grep(d.path(), d.path(), "alpha", Some("*.rs")).unwrap();
+        let out = grep(d.path(), d.path(), "alpha", Some("*.rs"), &|_| false).unwrap();
         assert!(out.starts_with("[grep: 2 matches in 2 files"), "{out}");
         assert!(out.contains("src/a.rs:1:fn alpha() {}"));
         assert!(out.contains("src/deep/b.rs:1:// alpha(x)"));
@@ -231,7 +261,7 @@ mod tests {
     #[test]
     fn invalid_regex_falls_back_to_literal() {
         let d = tree();
-        let out = grep(d.path(), d.path(), "alpha(x", None).unwrap();
+        let out = grep(d.path(), d.path(), "alpha(x", None, &|_| false).unwrap();
         assert!(out.contains("searched as literal text"), "{out}");
         assert!(out.contains("src/deep/b.rs:1:// alpha(x)"), "{out}");
     }
@@ -239,11 +269,11 @@ mod tests {
     #[test]
     fn grep_and_glob_refuse_the_filesystem_root() {
         assert!(matches!(
-            grep(Path::new("/"), Path::new("/"), "x", None),
+            grep(Path::new("/"), Path::new("/"), "x", None, &|_| false),
             Err(SearchError::FilesystemRoot)
         ));
         assert!(matches!(
-            glob(Path::new("/"), Path::new("/"), "*"),
+            glob(Path::new("/"), Path::new("/"), "*", &|_| false),
             Err(SearchError::FilesystemRoot)
         ));
     }
@@ -251,13 +281,33 @@ mod tests {
     #[test]
     fn glob_lists_matching_files() {
         let d = tree();
-        let out = glob(d.path(), d.path(), "**/*.rs").unwrap();
+        let out = glob(d.path(), d.path(), "**/*.rs", &|_| false).unwrap();
         assert!(out.starts_with("[glob: 2 files match **/*.rs"), "{out}");
         assert!(out.contains("src/a.rs") && out.contains("src/deep/b.rs"));
         assert!(matches!(
-            glob(d.path(), d.path(), "a["),
+            glob(d.path(), d.path(), "a[", &|_| false),
             Err(SearchError::BadGlob { .. })
         ));
+    }
+
+    #[test]
+    fn hidden_files_are_left_out_of_a_directory_and_counted() {
+        let d = tree();
+        let secret = d.path().join("src/deep/b.rs");
+        let hide = |p: &Path| p == secret;
+        let out = grep(d.path(), d.path(), "alpha", Some("*.rs"), &hide).unwrap();
+        assert!(out.starts_with("[grep: 1 matches in 1 files"), "{out}");
+        assert!(
+            out.contains("\n[1 file left out by the permission rules]"),
+            "{out}"
+        );
+        assert!(!out.contains("b.rs"), "{out}");
+        let listed = glob(d.path(), d.path(), "**/*.rs", &hide).unwrap();
+        assert!(listed.starts_with("[glob: 1 files match"), "{listed}");
+        assert!(listed.contains("[1 file left out by the permission rules]"));
+        // a file the caller named itself is searched
+        let one = grep(&secret, d.path(), "alpha", None, &hide).unwrap();
+        assert!(one.ends_with("src/deep/b.rs:1:// alpha(x)"), "{one}");
     }
 
     /// M1 live run: a file path plus a glob found nothing; rows were relative to the base.
@@ -265,15 +315,15 @@ mod tests {
     fn a_file_base_ignores_the_glob_and_rows_name_paths_from_the_root() {
         let d = tree();
         let file = d.path().join("src/deep/b.rs");
-        let out = grep(&file, d.path(), "alpha", Some("**/*.rs")).unwrap();
+        let out = grep(&file, d.path(), "alpha", Some("**/*.rs"), &|_| false).unwrap();
         assert!(
             out.starts_with("[grep: 1 matches in 1 files for /alpha/ under src/deep/b.rs"),
             "{out}"
         );
         assert!(out.ends_with("\nsrc/deep/b.rs:1:// alpha(x)"), "{out}");
-        let sub = grep(&d.path().join("src"), d.path(), "beta", None).unwrap();
+        let sub = grep(&d.path().join("src"), d.path(), "beta", None, &|_| false).unwrap();
         assert!(sub.ends_with("\nsrc/a.rs:2:fn beta() {}"), "{sub}");
-        let multi = grep(d.path(), d.path(), "}\n}", None).unwrap();
+        let multi = grep(d.path(), d.path(), "}\n}", None, &|_| false).unwrap();
         assert!(multi.contains("one line at a time"), "{multi}");
     }
 }

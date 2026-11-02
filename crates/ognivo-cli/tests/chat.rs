@@ -707,3 +707,67 @@ async fn a_full_context_is_compacted_and_the_turn_goes_on() {
     );
     assert!(next.len() < ask.len() - 2, "{}", next.len());
 }
+
+#[tokio::test]
+async fn project_rules_deny_at_once_and_allow_once_trusted() {
+    let (dir, root) = project();
+    std::fs::create_dir(root.join(".claude")).unwrap();
+    std::fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions": {"allow": ["Bash(touch:*)"], "deny": ["Bash(rm:*)"]}}"#,
+    )
+    .unwrap();
+    let data = dir.path().join("data");
+    let (url, _) = fake_server(vec![
+        call_stream("c1", "shell", r#"{"command":"touch made.txt"}"#),
+        answer_stream("Made it."),
+        answer_stream("Made it."),
+    ])
+    .await;
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "y\nmake it\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    assert!(
+        stdout.contains(
+            "? the project's settings allow these without a question:\n    Bash(touch:*) (.claude/settings.json)\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\nrules .claude/settings.json (2)\n"),
+        "{stdout}"
+    );
+    // trusted: the command ran without a question
+    assert!(!stdout.contains("? shell"), "{stdout}");
+    assert!(root.join("made.txt").exists());
+
+    // the answer is kept; a deny rule refuses without a question
+    let (url, _) = fake_server(vec![
+        call_stream("c2", "shell", r#"{"command":"rm -f made.txt"}"#),
+        answer_stream("Could not remove it."),
+    ])
+    .await;
+    let (r, d) = (root.clone(), data.clone());
+    let out = tokio::task::spawn_blocking(move || {
+        spawn(&url, &r, &d, "remove it\n/exit\n").wait_with_output()
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{:?}\n{stdout}", out.status);
+    assert!(!stdout.contains("? the project's settings"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "✗ shell: rm -f made.txt is denied by the rule Bash(rm:*) in .claude/settings.json."
+        ),
+        "{stdout}"
+    );
+    assert!(root.join("made.txt").exists());
+}

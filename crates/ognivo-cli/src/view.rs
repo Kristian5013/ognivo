@@ -691,12 +691,12 @@ mod tests {
             Status::of("read", &read),
             Status::Done("lines 1-3 of 3 lines, 14 B, ~4 tokens")
         );
-        let grep = search::grep(root, root, "t", None).unwrap();
+        let grep = search::grep(root, root, "t", None, &|_| false).unwrap();
         assert_eq!(
             Status::of("grep", &grep),
             Status::Done("2 matches in 1 files")
         );
-        let glob = search::glob(root, root, "*.txt").unwrap();
+        let glob = search::glob(root, root, "*.txt", &|_| false).unwrap();
         assert_eq!(Status::of("glob", &glob), Status::Done("1 files"));
         assert_eq!(
             Status::of("shell", "[shell: exit 0, 0.1 s]\nok"),

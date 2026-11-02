@@ -17,7 +17,10 @@ subdirectory once the agent works there, with `@path` imports. Sessions are kept
 (`~/.ognivo/data/ognivo.db`) as they go: `chat --resume ID` or `--continue` picks one up
 with its conversation and edit journal, and `ognivo sessions` lists them or finds them by
 words. When the context fills up, the history is compacted in the middle of a turn: the
-model's summary, ognivo's facts and the last steps replace the rest.
+model's summary, ognivo's facts and the last steps replace the rest. Permission rules come
+from `~/.ognivo/config.toml` and the project, in Claude Code's syntax and from its
+`settings.json` files too (deny > ask > allow); a project's allow rules count once you
+trust them.
 
 ## Layout
 

@@ -11,6 +11,7 @@ use clap::Args;
 use ognivo_core::agent::{Agent, AgentOptions, Approver};
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
+use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{ChatDriver, Family, doctor, profile};
@@ -86,6 +87,11 @@ pub struct Connected {
     pub level: Option<String>,
     /// What git says is changed in the project now; `None` outside git.
     changed: Option<Vec<PathBuf>>,
+    /// The project's allow rules, which count once the user trusts them.
+    pub pending: Option<Pending>,
+    /// The files with rules, and the rules that could not be used, with why.
+    pub rule_files: Vec<String>,
+    pub rule_problems: Vec<String>,
     pub opts: AgentOptions,
 }
 
@@ -245,6 +251,12 @@ impl SessionArgs {
                 .map_or(1, |d| d.subsec_nanos())
         });
         let changed = changed_files(&root);
+        let (home, claude_dir) = user_dirs();
+        let loaded = rules::load(&Places {
+            root: root.clone(),
+            home,
+            claude_dir,
+        });
         Ok(Connected {
             driver,
             family,
@@ -260,8 +272,12 @@ impl SessionArgs {
                 seed,
                 time_limit: None,
                 user_instructions: user_instructions(),
+                rules: loaded.rules,
             },
             changed,
+            pending: loaded.pending,
+            rule_files: loaded.files,
+            rule_problems: loaded.problems,
         })
     }
 }
@@ -342,12 +358,20 @@ fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
 /// The user's instruction files under `$HOME`, Claude Code's in `CLAUDE_CONFIG_DIR` when
 /// that is set.
 fn user_instructions() -> UserInstructions {
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
-        return UserInstructions::default();
-    };
-    let home = PathBuf::from(home);
+    match user_dirs() {
+        (Some(home), claude) => UserInstructions::at(home, claude),
+        (None, _) => UserInstructions::default(),
+    }
+}
+
+/// `$HOME`, canonical, and Claude Code's `CLAUDE_CONFIG_DIR` if it is set.
+fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
+    let home = std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .map(|h| std::fs::canonicalize(&h).unwrap_or(h));
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from);
-    UserInstructions::at(std::fs::canonicalize(&home).unwrap_or(home), claude)
+    (home, claude)
 }

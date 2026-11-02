@@ -20,6 +20,7 @@ use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, 
 use ognivo_core::compact;
 use ognivo_core::instructions::Load;
 use ognivo_core::journal::{FileChange, JournalError, Reverted};
+use ognivo_core::rules::Pending;
 use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
 use ognivo_tools::files;
@@ -84,10 +85,11 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         Ok(root) => root,
         Err(f) => return fail(f),
     };
-    let s = match a.session.connect(root.clone(), stored.as_ref()).await {
+    let mut s = match a.session.connect(root.clone(), stored.as_ref()).await {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
+    let mut store = store;
     let n_ctx = s.opts.n_ctx;
     let (limit, planned) = (
         compact::limit(&s.opts.context, n_ctx),
@@ -113,6 +115,32 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         ),
         Paint::Plain,
     );
+    let rule_files = std::mem::take(&mut s.rule_files);
+    let rule_problems = std::mem::take(&mut s.rule_problems);
+    let mut untrusted = false;
+    if let Some(pending) = s.pending.take() {
+        let key = pending.key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let yes = trust(&screen, &input, &pending).await;
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    let line = format!("· the answer is not kept: {e}");
+                    screen.line(&line, Paint::Yellow);
+                }
+                yes
+            }
+            Err(e) => {
+                screen.line(&format!("· the session store: {e}"), Paint::Yellow);
+                false
+            }
+        };
+        if trusted {
+            s.opts.rules.trust(pending);
+        } else {
+            untrusted = true;
+        }
+    }
     let agent = match &stored {
         Some(row) => s.resumed_agent(row, store, Box::new(approver)),
         None => s.new_agent("chat", &a.session.url, store, Box::new(approver)),
@@ -160,6 +188,19 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             );
             instructions(&screen, agent.instructions());
         }
+    }
+    if !rule_files.is_empty() {
+        let line = format!("rules {}", printable(&rule_files.join(", ")));
+        screen.line(&line, Paint::Plain);
+    }
+    for p in &rule_problems {
+        screen.line(&format!("· not a rule: {}", printable(p)), Paint::Yellow);
+    }
+    if untrusted {
+        screen.line(
+            "· the project's allow rules are not used: you did not trust them (they are asked about again when they change)",
+            Paint::Dim,
+        );
     }
     if limit < planned {
         screen.line(
@@ -305,6 +346,26 @@ enum Outcome {
     /// By ^C, here or at a question.
     Stopped,
     Terminated,
+}
+
+/// Whether the project's allow rules may count: they let commands run without a question.
+async fn trust(screen: &Screen, input: &Input, pending: &Pending) -> bool {
+    screen.line(
+        "? the project's settings allow these without a question:",
+        Paint::Bold,
+    );
+    for r in &pending.rules {
+        let mut line = format!("    {} ({})", printable(&r.text), printable(&r.source));
+        let any = matches!(r.text.as_str(), "Bash" | "Bash(*)");
+        if any {
+            line.push_str(": any command at all");
+        }
+        screen.line(&line, if any { Paint::Yellow } else { Paint::Plain });
+    }
+    matches!(
+        input.read("  use them? [y]es [n]o > ").await,
+        Read::Line(line) if answer(&line) == Some(Answer::Yes)
+    )
 }
 
 /// The session `--resume` or `--continue` asks for.
