@@ -281,3 +281,278 @@ prompt_hash: string, };
 export type Delta = { "type": "text", text: string, };
 
 export type TurnEnd = "answer" | "step_limit" | "stuck" | "time_limit" | "error" | "interrupted";
+
+export type Initialize = { 
+/**
+ * The client and its version, e.g. `ognivo-desktop 0.0.1`.
+ */
+client: string, 
+/**
+ * The version of the event model it reads ([`crate::VERSION`]).
+ */
+protocol: number, };
+
+export type Initialized = { protocol: number, 
+/**
+ * The core's version.
+ */
+core: string, 
+/**
+ * The last event's place in the stream: the client gets the events after it.
+ */
+seq: number, };
+
+export type ListThreads = { 
+/**
+ * The project's root; every project's threads when `None`.
+ */
+project: string | null, limit: number | null, };
+
+export type Threads = { 
+/**
+ * The users' threads, the last updated first: subagents' threads are their parents'.
+ */
+threads: Array<ThreadSummary>, };
+
+export type ThreadSummary = { thread: ThreadId, 
+/**
+ * `chat` or `run`.
+ */
+kind: string, project: string, profile: string, level: string | null, 
+/**
+ * The server's URL, and the model behind llama-server's router.
+ */
+server: string, model: string | null, 
+/**
+ * The first line of its first message.
+ */
+title: string, 
+/**
+ * Unix milliseconds.
+ */
+created: number, updated: number, turns: number, 
+/**
+ * Files with unreviewed changes in its edit journal.
+ */
+unreviewed: number, 
+/**
+ * Whether the core has it open, and whether a turn of it runs.
+ */
+open: boolean, running: boolean, };
+
+export type Server = { 
+/**
+ * The server's base URL, e.g. `http://127.0.0.1:8080`.
+ */
+url: string, 
+/**
+ * The bearer token of a server started with `--api-key`.
+ */
+api_key: string | null, 
+/**
+ * For llama-server's router: the model, by its id or alias.
+ */
+model: string | null, };
+
+export type StartThread = { 
+/**
+ * The project's root.
+ */
+project: string, server: Server, 
+/**
+ * The profile; the server's model decides when `None`.
+ */
+profile: string | null, 
+/**
+ * The reasoning level; the profile's default when `None`.
+ */
+level: string | null, 
+/**
+ * The Native path (gpt-oss): ognivo renders the model's format itself.
+ */
+native: boolean, 
+/**
+ * With `native`: gpt-oss gets the tools of its training.
+ */
+priors: boolean, 
+/**
+ * The agent may hand tasks to subagents.
+ */
+subagents: boolean, };
+
+export type ResumeThread = { thread: ThreadId, 
+/**
+ * Where its model is now; the server it last had when `None`.
+ */
+server: Server | null, native: boolean, priors: boolean, subagents: boolean, };
+
+export type Opened = { thread: ThreadId, info: ThreadInfo, 
+/**
+ * What the start found, as `ognivo chat` says it under its banner: instruction and
+ * rule files, a tree that is not clean, a context smaller than the profile plans for.
+ */
+notes: Array<string>, };
+
+export type ThreadRef = { thread: ThreadId, };
+
+export type ReadThread = { thread: ThreadId, 
+/**
+ * Only what came after this place in the stream.
+ */
+after: number | null, };
+
+export type ThreadEvents = { 
+/**
+ * The kept events of the thread and of its subagents' threads, in order. None for a
+ * thread from before the core kept them, or from `chat` and `run`: its trajectory
+ * tells what happened.
+ */
+events: Array<Event>, };
+
+export type Trajectory = { 
+/**
+ * The thread in ATIF, as `ognivo run --atif` writes it.
+ */
+trajectory: unknown, };
+
+export type StartTurn = { thread: ThreadId, 
+/**
+ * The user's message.
+ */
+text: string, };
+
+export type Changes = { files: Array<ChangedFile>, 
+/**
+ * Commands with side effects, which a revert does not undo.
+ */
+commands: Array<string>, 
+/**
+ * The project may hold changes ognivo did not make: builds and tests ask until they
+ * are accepted.
+ */
+inherited: boolean, };
+
+export type ChangedFile = { 
+/**
+ * Relative to the project root inside it, absolute outside.
+ */
+path: string, created: boolean, 
+/**
+ * The file is gone.
+ */
+deleted: boolean, 
+/**
+ * Something else changed it too since the agent's last edit: a revert loses that.
+ */
+drifted: boolean, 
+/**
+ * Against what it was before the session.
+ */
+hunks: Array<Hunk>, };
+
+export type Accept = { thread: ThreadId, 
+/**
+ * One file; all of it when `None`.
+ */
+path: string | null, };
+
+export type Accepted = { 
+/**
+ * What was accepted.
+ */
+accepted: Array<string>, 
+/**
+ * Whether anything is still unreviewed: builds and tests ask until nothing is.
+ */
+unreviewed: boolean, };
+
+export type Revert = { thread: ThreadId, path: string, 
+/**
+ * Revert a drifted file too, losing what else changed it.
+ */
+force: boolean, };
+
+export type Reverted = { 
+/**
+ * The agent had created the file, and it is gone.
+ */
+removed: boolean, };
+
+export type Done = Record<symbol, never>;
+
+export type ItemRef = { thread: ThreadId, item: ItemId, };
+
+export type ApprovalAsked = { 
+/**
+ * The user's thread whose agent, or subagent, asks.
+ */
+thread: ThreadId, 
+/**
+ * The question's item in the stream: in a subagent's own thread when one asks.
+ */
+item: ItemRef | null, tool: string, 
+/**
+ * What would happen: the command line, the file path.
+ */
+action: string, reason: string, 
+/**
+ * For running project code: what is unreviewed.
+ */
+unreviewed: Array<string>, 
+/**
+ * The subagent that asks, by its task's title.
+ */
+agent: string | null, };
+
+export type Decision = "allow" | "allow_session" | "deny";
+
+export type ApprovalAnswer = { decision: Decision, 
+/**
+ * With `deny`: what the agent should do instead.
+ */
+instead: string | null, };
+
+export type TrustAsked = { project: string, rules: Array<Rule>, };
+
+export type Rule = { text: string, 
+/**
+ * The file it comes from.
+ */
+source: string, 
+/**
+ * It allows any command at all.
+ */
+any: boolean, };
+
+export type TrustAnswer = { trust: boolean, };
+
+export type Cancel = { id: number, };
+
+/** The core's methods. */
+export type Methods = {
+  "initialize": { params: Initialize; result: Initialized };
+  "thread/list": { params: ListThreads; result: Threads };
+  "thread/start": { params: StartThread; result: Opened };
+  "thread/resume": { params: ResumeThread; result: Opened };
+  "thread/read": { params: ReadThread; result: ThreadEvents };
+  "thread/trajectory": { params: ThreadRef; result: Trajectory };
+  "thread/clear": { params: ThreadRef; result: Done };
+  "thread/close": { params: ThreadRef; result: Done };
+  "turn/start": { params: StartTurn; result: Done };
+  "turn/interrupt": { params: ThreadRef; result: Done };
+  "turn/answer_now": { params: ThreadRef; result: Done };
+  "changes/list": { params: ThreadRef; result: Changes };
+  "changes/accept": { params: Accept; result: Accepted };
+  "changes/revert": { params: Revert; result: Reverted };
+};
+
+/** What the core asks its clients. */
+export type Asks = {
+  "approval/ask": { params: ApprovalAsked; result: ApprovalAnswer };
+  "rules/trust": { params: TrustAsked; result: TrustAnswer };
+};
+
+export const NOTIFY_EVENT = "event";
+export const NOTIFY_CANCEL = "$/cancelRequest";
+
+export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004 } as const;

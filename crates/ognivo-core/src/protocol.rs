@@ -62,6 +62,58 @@ impl Projector {
         }
     }
 
+    /// A thread picked up again: its turns, items and generations go on from these.
+    pub fn resumed(
+        thread: p::ThreadId,
+        info: p::ThreadInfo,
+        turns: u32,
+        items: u32,
+        generations: u32,
+    ) -> Self {
+        Self {
+            turn: turns,
+            items,
+            generations,
+            ..Self::new(thread, info)
+        }
+    }
+
+    /// The question that waits for the user now, in this thread or in a subagent's: the
+    /// thread and the item that ask `tool` about `action`, for `agent` (a subagent by its
+    /// task's title) or the thread's own agent.
+    pub fn asking(
+        &self,
+        agent: Option<&str>,
+        tool: &str,
+        action: &str,
+    ) -> Option<(p::ThreadId, p::ItemId)> {
+        let asks = |item: &p::Item| {
+            matches!(&item.body, ItemBody::Approval { tool: t, action: a, allowed: None, .. }
+                if t == tool && a == action)
+        };
+        let Some(title) = agent else {
+            return self
+                .approval
+                .as_ref()
+                .filter(|item| asks(item))
+                .map(|item| (self.thread, item.id));
+        };
+        let mut subagents: Vec<_> = self.subagents.iter().collect();
+        subagents.sort_by_key(|(index, _)| **index);
+        subagents.into_iter().find_map(|(_, (item, child))| {
+            let ours = matches!(&item.body, ItemBody::Subagent { title: t, .. } if t == title);
+            child
+                .approval
+                .as_ref()
+                .filter(|a| ours && asks(a))
+                .map(|a| (child.thread, a.id))
+        })
+    }
+
+    pub fn thread(&self) -> p::ThreadId {
+        self.thread
+    }
+
     /// The thread's start.
     pub fn started(&self) -> Out {
         vec![(
@@ -1100,6 +1152,72 @@ mod tests {
             .map(|(t, _)| *t)
             .collect();
         assert_eq!(ends, [p::ThreadId(12), p::ThreadId(11)]);
+    }
+
+    #[test]
+    fn a_question_is_found_where_it_waits() {
+        let ask = |agent: Option<&str>, allowed| AgentEvent::Approval {
+            tool: "shell".into(),
+            action: "cargo test".into(),
+            reason: "runs project code".into(),
+            unreviewed: Vec::new(),
+            agent: agent.map(str::to_owned),
+            allowed,
+        };
+        let mut projector = Projector::new(p::ThreadId(11), info());
+        projector.event(AgentEvent::TurnStarted { user: "go".into() });
+        assert_eq!(projector.asking(None, "shell", "cargo test"), None);
+        projector.event(ask(None, None));
+        assert_eq!(
+            projector.asking(None, "shell", "cargo test"),
+            Some((p::ThreadId(11), p::ItemId(1)))
+        );
+        assert_eq!(projector.asking(None, "shell", "cargo build"), None);
+        projector.event(ask(None, Some(true)));
+        assert_eq!(projector.asking(None, "shell", "cargo test"), None);
+        // a subagent's question is in its own thread
+        for (index, title) in [(0, "Suite a"), (1, "Suite b")] {
+            projector.event(AgentEvent::SubagentStarted {
+                index,
+                title: title.into(),
+                write: None,
+                session: Some(20 + index as i64),
+                brief: String::new(),
+                level: None,
+            });
+            projector.event(sub(index, AgentEvent::TurnStarted { user: "go".into() }));
+        }
+        projector.event(sub(1, ask(Some("Suite b"), None)));
+        assert_eq!(
+            projector.asking(Some("Suite a"), "shell", "cargo test"),
+            None
+        );
+        assert_eq!(
+            projector.asking(Some("Suite b"), "shell", "cargo test"),
+            Some((p::ThreadId(21), p::ItemId(1)))
+        );
+    }
+
+    #[test]
+    fn a_thread_picked_up_again_numbers_on() {
+        let mut projector = Projector::resumed(p::ThreadId(11), info(), 3, 40, 12);
+        let out = projector.event(AgentEvent::TurnStarted { user: "go".into() });
+        assert!(matches!(
+            out[0].1,
+            p::EventKind::TurnStarted {
+                turn: p::TurnId(4),
+                ..
+            }
+        ));
+        projector.event(AgentEvent::Text { text: "hi".into() });
+        let out = projector.event(generation("step", "answer", 1, Vec::new()));
+        let p::EventKind::ItemCompleted { item } = &out[0].1 else {
+            panic!("{out:?}")
+        };
+        assert_eq!(
+            (item.id, item.turn, item.generation),
+            (p::ItemId(41), p::TurnId(4), Some(13))
+        );
     }
 
     #[test]

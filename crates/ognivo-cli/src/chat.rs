@@ -840,7 +840,7 @@ fn answer(line: &str) -> Option<Answer<'_>> {
 }
 
 /// The refusal the model reads.
-fn declined(action: &str, why: Option<&str>) -> String {
+pub(crate) fn declined(action: &str, why: Option<&str>) -> String {
     match why {
         Some(why) => format!("The user declined `{action}` and says: {why}"),
         None => format!("The user declined `{action}`. Do not retry it unchanged."),

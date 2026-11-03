@@ -1,8 +1,9 @@
-//! The `ognivo` binary: `doctor`, the headless `run`, the line-mode `chat` and `sessions`
-//! (docs/architecture.md §10).
+//! The `ognivo` binary: `doctor`, the headless `run`, the line-mode `chat`, `sessions`, and
+//! `core`, which the GUI talks to (docs/architecture.md §3, §10).
 
 mod chat;
 mod run;
+mod serve;
 mod session;
 mod sessions;
 mod view;
@@ -55,6 +56,8 @@ enum Command {
     Chat(chat::ChatArgs),
     /// List the stored sessions of this project, or find them by words
     Sessions(sessions::SessionsArgs),
+    /// Serve the GUI: the core, on a Unix socket only you can open
+    Core(serve::CoreArgs),
 }
 
 #[tokio::main]
@@ -108,6 +111,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Run(args) => run::run(args).await,
         Command::Chat(args) => chat::chat(args).await,
         Command::Sessions(args) => sessions::sessions(args),
+        Command::Core(args) => serve::serve(args).await,
     }
 }
 

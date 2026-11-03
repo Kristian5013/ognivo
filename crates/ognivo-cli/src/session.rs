@@ -28,6 +28,8 @@ const STORE_FILE: &str = "ognivo.db";
 const PROPS_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long the start waits while llama-server in router mode starts the model.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
+/// Steps of a turn, unless the user says.
+pub const MAX_STEPS: u32 = 200;
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
@@ -44,7 +46,7 @@ pub struct SessionArgs {
     #[arg(long)]
     pub cwd: Option<PathBuf>,
     /// Steps of one turn
-    #[arg(long, default_value_t = 200)]
+    #[arg(long, default_value_t = MAX_STEPS)]
     pub max_steps: u32,
     /// Seed of the first step (random when omitted)
     #[arg(long)]

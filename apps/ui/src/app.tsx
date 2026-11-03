@@ -24,23 +24,28 @@ const PANEL = ["changes", "approvals", "inspector"].includes(params.get("panel")
 const SPEEDS = [1, 4, 16];
 const DRAFT = params.get("draft") ?? "";
 
-/** Endpoint, model and what the session cost so far: the start of the Runtime HUD (§10). */
-function Hud({
-  store,
-  replaying,
-  speed,
-  onReplay,
-  onSpeed,
-  panel,
-  onPanel,
-}: {
-  store: ThreadStore;
+/** A recorded session's replay: its speed, and whether it plays. */
+export interface ReplayControls {
   replaying: boolean;
   speed: number;
   onReplay: () => void;
   onSpeed: (speed: number) => void;
+}
+
+/** Endpoint, model and what the session cost so far: the start of the Runtime HUD (§10). */
+export function Hud({
+  store,
+  replay,
+  panel,
+  onPanel,
+  waiting = 0,
+}: {
+  store: ThreadStore;
+  replay?: ReplayControls;
   panel?: Panel;
   onPanel: (panel?: Panel) => void;
+  /** Questions that wait for the user. */
+  waiting?: number;
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   useSyncExternalStore(subscribe, () => store.listVersion);
@@ -70,25 +75,29 @@ function Hud({
           </span>
         </span>
         <span className="ml-auto flex shrink-0 items-center gap-2 text-muted-foreground @4xl:ml-0">
-          <select
-            aria-label="Replay speed"
-            value={speed}
-            onChange={(e) => onSpeed(Number(e.target.value))}
-            className="rounded border border-border bg-panel px-1 py-0.5"
-          >
-            {SPEEDS.map((s) => (
-              <option key={s} value={s}>
-                {s}×
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={onReplay}
-            className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised"
-          >
-            {replaying ? "Stop" : "Replay"}
-          </button>
+          {replay && (
+            <>
+              <select
+                aria-label="Replay speed"
+                value={replay.speed}
+                onChange={(e) => replay.onSpeed(Number(e.target.value))}
+                className="rounded border border-border bg-panel px-1 py-0.5"
+              >
+                {SPEEDS.map((s) => (
+                  <option key={s} value={s}>
+                    {s}×
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={replay.onReplay}
+                className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised"
+              >
+                {replay.replaying ? "Stop" : "Replay"}
+              </button>
+            </>
+          )}
           {(["changes", "approvals", "inspector"] as const).map((p) => (
             <button
               key={p}
@@ -98,6 +107,7 @@ function Hud({
               className={`rounded border px-2 py-0.5 hover:bg-raised ${panel === p ? "border-spark/60 text-foreground" : "border-border"}`}
             >
               {p === "changes" ? "Changes" : p === "approvals" ? "Approvals" : "Inspector"}
+              {p === "approvals" && waiting > 0 && <span className="ml-1 text-spark">{waiting}</span>}
             </button>
           ))}
         </span>
@@ -213,10 +223,7 @@ export function App() {
           <>
             <Hud
               store={store}
-              replaying={Boolean(replay)}
-              speed={speed}
-              onReplay={toggleReplay}
-              onSpeed={setSpeed}
+              replay={{ replaying: Boolean(replay), speed, onReplay: toggleReplay, onSpeed: setSpeed }}
               panel={panel}
               onPanel={setPanel}
             />

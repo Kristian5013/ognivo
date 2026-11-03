@@ -10,7 +10,10 @@
 //! - `journal_files`, `journal_dirs`, `journal_commands`: the edit journal; the contents of
 //!   files live in `blobs`, keyed by their blake3 hash and compressed with zstd;
 //! - `transcript`: FTS5 over the user's messages and the answers;
-//! - `trusted_rules`: the user's answer about a project's allow rules, for exactly those.
+//! - `trusted_rules`: the user's answer about a project's allow rules, for exactly those;
+//! - `wire`: what `ognivo core` told its clients about its threads (ognivo-protocol), by
+//!   the clients' `seq`, for a client that comes back or opens a thread later; text deltas
+//!   are not kept, the items they make up are.
 //!
 //! The store keeps what the core gives it: messages, events, counters and conversation
 //! notes are JSON the core writes and reads. Paths are kept as the OS spells them, so a
@@ -28,9 +31,20 @@ use rusqlite::{Connection, OptionalExtension as _, Row, Transaction, Transaction
 
 /// The schema steps, oldest first: a store at version `n` has run the first `n`; the
 /// version this build writes is their count (`PRAGMA user_version`).
-const MIGRATIONS: &[&str] = &[SCHEMA_1, SCHEMA_2];
+const MIGRATIONS: &[&str] = &[SCHEMA_1, SCHEMA_2, SCHEMA_3];
 const VERSION: i64 = MIGRATIONS.len() as i64;
 const ZSTD_LEVEL: i32 = 3;
+
+const SCHEMA_3: &str = "
+CREATE TABLE wire (
+    seq INTEGER PRIMARY KEY,
+    thread INTEGER NOT NULL,
+    root INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    data TEXT NOT NULL
+);
+CREATE INDEX wire_by_root ON wire (root, seq);
+";
 
 const SCHEMA_2: &str = "
 CREATE TABLE trusted_rules (
@@ -448,6 +462,7 @@ impl Store {
     pub fn delete_session(&mut self, id: SessionId) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM transcript WHERE session = ?1", [id])?;
+        tx.execute("DELETE FROM wire WHERE root = ?1 OR thread = ?1", [id])?;
         tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         tx.execute(DROP_UNUSED_BLOBS, [])?;
         tx.commit()?;
@@ -629,6 +644,41 @@ impl Store {
                     data: r.get(4)?,
                 })
             })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Appends an event of the clients' stream: `thread`'s, of the user's thread `root`
+    /// (itself, or the one a subagent works for). The core numbers the stream.
+    pub fn append_wire(
+        &mut self,
+        seq: Seq,
+        thread: SessionId,
+        root: SessionId,
+        data: &str,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT INTO wire (seq, thread, root, at, data) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![seq, thread, root, now(), data],
+        )?;
+        Ok(())
+    }
+
+    /// The last place of the clients' stream that is kept; 0 before the first.
+    pub fn last_wire(&self) -> Result<Seq, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT coalesce(max(seq), 0) FROM wire", [], |r| r.get(0))?)
+    }
+
+    /// The kept events of the user's thread `root` and of its subagents after `after`, in
+    /// order, as JSON.
+    pub fn wire(&self, root: SessionId, after: Seq) -> Result<Vec<String>, StoreError> {
+        let mut st = self
+            .conn
+            .prepare("SELECT data FROM wire WHERE root = ?1 AND seq > ?2 ORDER BY seq")?;
+        let rows = st
+            .query_map(params![root, after], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         Ok(rows)
     }
@@ -886,6 +936,27 @@ mod tests {
         assert_eq!(store.trusted(Path::new("/p"), "r2").unwrap(), None);
         store.set_trusted(Path::new("/p"), "r", false).unwrap();
         assert_eq!(store.trusted(Path::new("/p"), "r").unwrap(), Some(false));
+    }
+
+    #[test]
+    fn the_clients_stream_is_kept_by_thread_and_goes_with_its_session() {
+        let mut store = Store::memory().unwrap();
+        let a = store.create_session(&new("/p", "chat")).unwrap();
+        let sub = store.create_session(&new("/p", "subagent")).unwrap();
+        let b = store.create_session(&new("/p", "chat")).unwrap();
+        assert_eq!(store.last_wire().unwrap(), 0);
+        store.append_wire(1, a, a, "a1").unwrap();
+        store.append_wire(2, b, b, "b2").unwrap();
+        // the stream skips the deltas it does not keep
+        store.append_wire(5, sub, a, "s5").unwrap();
+        store.append_wire(6, a, a, "a6").unwrap();
+        assert_eq!(store.last_wire().unwrap(), 6);
+        assert_eq!(store.wire(a, 0).unwrap(), ["a1", "s5", "a6"]);
+        assert_eq!(store.wire(a, 1).unwrap(), ["s5", "a6"]);
+        assert!(store.append_wire(6, b, b, "again").is_err());
+        store.delete_session(a).unwrap();
+        assert!(store.wire(a, 0).unwrap().is_empty());
+        assert_eq!(store.wire(b, 0).unwrap(), ["b2"]);
     }
 
     #[test]

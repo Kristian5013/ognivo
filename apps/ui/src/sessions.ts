@@ -1,5 +1,5 @@
-// The recorded sessions of fixtures/. Once the core speaks the frozen event model (M2),
-// sessions come from it instead.
+// The recorded sessions of fixtures/, for the UI's development and its perf bench: the
+// GUI's own sessions come from the core (threads.ts).
 
 import { type AtifTrace, fromAtif } from "./atif.ts";
 import type { Item, Thread } from "./model.ts";

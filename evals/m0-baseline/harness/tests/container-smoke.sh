@@ -6,7 +6,7 @@
 #
 # 1 network   a container with the runs' network flags reaches the host's 127.0.0.1:PORT (a
 #             mock llama-server) and nothing else: not host port 22, not another listening host
-#             port (PORT+2, and 8080 where Open WebUI listens), not 169.254.1.2, not 1.1.1.1, not
+#             port (PORT+2, and the host's 8080), not 169.254.1.2, not 1.1.1.1, not
 #             IPv6, no DNS
 # 2 suite     run-suite.sh --server on the fixture tasks with ENGINE=podman and the real image;
 #             the "llama-server" is tests/fake-llama-server.sh (scripts/mock_llama.py) and the

@@ -23,6 +23,7 @@ clap.workspace = true
 futures.workspace = true
 rustix = { workspace = true, features = ["termios"] }
 rustyline.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["signal", "sync"] }
 

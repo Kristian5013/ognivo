@@ -8,10 +8,18 @@ import type { ThreadStore } from "../store.ts";
 
 const BUDGETS = profiles as Record<string, { context: { working_max: number; compact_at: number } }>;
 
+/** What a composer on the core does: sends the message (Enter; Shift+Enter is a new
+ * line), and stops the running turn. */
+export interface Sending {
+  send: (text: string) => Promise<void>;
+  stop: () => void;
+  running: boolean;
+}
+
 /** Where the user writes, with `@` for the files of the session and what the message
  * would cost: its tokens, the files it names, and where the conversation would stand
- * against the profile's budget. It sends nothing until there is a core to send to. */
-export function Composer({ store, draft = "" }: { store: ThreadStore; draft?: string }) {
+ * against the profile's budget. Without a core it sends nothing. */
+export function Composer({ store, draft = "", sending }: { store: ThreadStore; draft?: string; sending?: Sending }) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   // the list version stands for the items: they are read again when rows come
   const version = useSyncExternalStore(subscribe, () => store.listVersion);
@@ -20,7 +28,23 @@ export function Composer({ store, draft = "" }: { store: ThreadStore; draft?: st
   const [caret, setCaret] = useState(draft.length);
   const [active, setActive] = useState("");
   const [closed, setClosed] = useState(false);
+  const [error, setError] = useState<string>();
+  const [busy, setBusy] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
+
+  const submit = () => {
+    if (!sending || busy || sending.running || !text.trim()) return;
+    setBusy(true);
+    setError(undefined);
+    sending
+      .send(text)
+      .then(() => {
+        setText("");
+        setCaret(0);
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setBusy(false));
+  };
 
   const mention = closed ? undefined : mentionAt(text, caret);
   const matches = useMemo(() => {
@@ -81,7 +105,11 @@ export function Composer({ store, draft = "" }: { store: ThreadStore; draft?: st
           ref={area}
           value={text}
           rows={2}
-          placeholder="Ask ognivo (no core connected yet) · @ names a file of the session"
+          placeholder={
+            sending
+              ? "Ask ognivo · @ names a file of the session · Enter sends, Shift+Enter is a new line"
+              : "Ask ognivo (no core connected) · @ names a file of the session"
+          }
           onChange={(e) => {
             setText(e.target.value);
             setCaret(e.target.selectionStart);
@@ -89,7 +117,13 @@ export function Composer({ store, draft = "" }: { store: ThreadStore; draft?: st
           }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           onKeyDown={(e) => {
-            if (!mention || matches.length === 0) return;
+            if (!mention || matches.length === 0) {
+              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && sending) {
+                e.preventDefault();
+                submit();
+              }
+              return;
+            }
             const i = Math.max(0, matches.indexOf(selected ?? ""));
             if (e.key === "ArrowDown" || e.key === "ArrowUp") {
               e.preventDefault();
@@ -115,7 +149,27 @@ export function Composer({ store, draft = "" }: { store: ThreadStore; draft?: st
               {share > budget.compact_at ? `: over ${Math.round(budget.compact_at * 100)}%, the conversation compacts` : ""}
             </span>
           )}
-          <span className="ml-auto">counts are estimates until a core asks the server</span>
+          {error && <span className="text-err">{error}</span>}
+          <span className="ml-auto">counts are estimates: 4 bytes a token</span>
+          {sending &&
+            (sending.running ? (
+              <button
+                type="button"
+                onClick={sending.stop}
+                className="rounded border border-warn/60 px-2 py-0.5 text-foreground hover:bg-raised"
+              >
+                Stop
+              </button>
+            ) : (
+              <button
+                type="button"
+                disabled={busy || !text.trim()}
+                onClick={submit}
+                className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised disabled:opacity-40"
+              >
+                Send
+              </button>
+            ))}
         </div>
       </div>
     </div>

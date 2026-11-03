@@ -993,6 +993,7 @@ dependencies = [
  "ognivo-tools",
  "rustix",
  "rustyline",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

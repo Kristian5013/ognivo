@@ -1,36 +1,37 @@
 // The core's events (protocol.ts, the event model frozen in M2) as a thread's store takes
 // them. One thread at a time: a subagent's events are those of its own thread, which its
-// item in the parent names.
+// item in the parent names. A thread whose earlier turns came from its trajectory has its
+// generations numbered on from those (`offset`).
 
 import type { Call, Generation, Item, ToolResult } from "./model.ts";
 import type * as P from "./protocol.ts";
 import type { LiveEvent } from "./store.ts";
 
 /** What the store makes of one event of the thread it shows. */
-export function toLive(e: P.Event): LiveEvent[] {
+export function toLive(e: P.Event, offset = 0): LiveEvent[] {
   switch (e.event) {
     case "thread_started":
       return [];
     case "turn_started":
       return [{ type: "turn_started", index: e.turn, user: e.user }];
     case "item_started":
-      return [{ type: "item_started", item: toItem(e.item) }];
+      return [{ type: "item_started", item: toItem(e.item, offset) }];
     case "item_delta":
       return [{ type: "item_delta", id: String(e.item), text: e.delta.text }];
     case "item_completed": {
-      const result = e.item.kind === "tool_call" && e.item.result ? toResult(e.item.result) : undefined;
-      return [{ type: "item_completed", id: String(e.item.id), result }];
+      const item = toItem(e.item, offset);
+      return [{ type: "item_completed", id: item.id, item, result: item.kind === "tool" ? item.result : undefined }];
     }
     case "generation":
-      return [{ type: "generation", generation: toGeneration(e.generation) }];
+      return [{ type: "generation", generation: toGeneration(e.generation, offset) }];
     case "turn_completed":
       return [{ type: "turn_completed", index: e.turn, end: e.end, why: e.why ?? undefined }];
   }
 }
 
-function toItem(item: P.Item): Item {
+function toItem(item: P.Item, offset: number): Item {
   const id = String(item.id);
-  const generation = item.generation ?? undefined;
+  const generation = item.generation === null ? undefined : item.generation + offset;
   switch (item.kind) {
     case "reasoning":
       return { kind: "reasoning", id, generation, text: item.text };
@@ -53,20 +54,27 @@ function toItem(item: P.Item): Item {
     // the store has no rows of their own for these yet
     case "compaction":
       return { kind: "notice", id, text: `compacting: about ${item.tokens} tokens, over the ${item.limit} budget` };
-    case "approval":
+    case "approval": {
+      const answer = item.allowed === null ? "waits for your answer" : item.allowed ? "allowed" : "denied";
       return {
         kind: "notice",
         id,
-        text: `${item.agent ? `subagent «${item.agent}» asks: ` : ""}${item.tool} ${item.action} (${item.reason})`,
+        text: `${item.agent ? `subagent «${item.agent}» asks` : "asks"}: ${item.tool} ${item.action} (${item.reason}) · ${answer}`,
       };
+    }
     case "instructions":
-      return { kind: "notice", id, text: `instructions: ${item.files.join(", ")}` };
-    case "subagent":
       return {
         kind: "notice",
         id,
-        text: `subagent ${item.index + 1} «${item.title}»${item.write ? ` writes ${item.write.join(", ")}` : ""}`,
+        text: `instructions: ${item.files.join(", ")}${item.skipped.map((s) => ` · not read: ${s.path} (${s.why})`).join("")}`,
       };
+    case "subagent": {
+      const mode = item.write ? `writes ${item.write.join(", ")}` : "reads";
+      const end = item.end
+        ? ` · ${item.end === "answer" ? "done" : item.end.replace("_", " ")} after ${item.steps ?? 0} steps${item.changed.length ? `, changed ${item.changed.join(", ")}` : ""}`
+        : " · working";
+      return { kind: "notice", id, text: `subagent ${item.index + 1} «${item.title}» ${mode}${end}` };
+    }
   }
 }
 
@@ -108,9 +116,9 @@ function toResult(r: P.ToolResult): ToolResult {
   };
 }
 
-function toGeneration(g: P.Generation): Generation {
+function toGeneration(g: P.Generation, offset: number): Generation {
   return {
-    index: g.index,
+    index: g.index + offset,
     outcome: g.outcome,
     finish: g.finish ?? undefined,
     seed: g.seed,

@@ -17,7 +17,7 @@
 #   M0_OG_TIME_LIMIT        HARNESS=ognivo only: ognivo's own time limit, s (0: none; default:
 #                           the agent timeout minus 10, see container/m0-entry-ognivo.sh)
 #   ENGINE=podman           docker works for smoke tests only (no --timeout, no pasta; README)
-#   LLAMA_PORT=8090         the host llama-server, bound to 127.0.0.1 (8080 is the owner's Open WebUI)
+#   LLAMA_PORT=8090         the host llama-server, bound to 127.0.0.1 (8080 is the owner's own llama-server)
 #   AGENT_TIMEOUT=1200      seconds for the agent inside the container
 #   CPUS=8 MEMORY=16g PIDS=4096   M0_NICE=10 (niceness inside the container)
 #   NETWORK=pasta:--splice-only,-T,<port>   the container has only lo; 127.0.0.1:<port> is the host's

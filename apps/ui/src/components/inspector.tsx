@@ -128,7 +128,9 @@ export function Inspector({
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   useSyncExternalStore(subscribe, () => store.listVersion);
   const gens = store.generations;
-  const g = Math.min(generation ?? gens.length - 1, gens.length - 1);
+  // by its number: the core numbers a thread's generations from 1, a recording from 0
+  const at = generation === undefined ? -1 : gens.findIndex((x) => x.index === generation);
+  const g = at < 0 ? gens.length - 1 : at;
   const gen = gens[g];
   if (!gen) return <p className="m-auto px-6 text-center text-muted-foreground">No generation yet.</p>;
 
@@ -145,14 +147,14 @@ export function Inspector({
   const next = gens.slice(g + 1).find((p) => p.request?.conversation === req?.conversation)?.request?.messages;
   const answer = req && conversation[req.messages]?.role === "assistant" ? conversation[req.messages] : undefined;
   const results = answer && req ? conversation.slice(req.messages + 1, next ?? conversation.length) : [];
-  const unused = store.itemsOf(g).filter((i) => i.kind === "void");
+  const unused = store.itemsOf(gen.index).filter((i) => i.kind === "void");
   const processed = Math.max(0, gen.prompt - gen.cached);
 
   const nav = "rounded border border-border px-2 hover:bg-raised disabled:opacity-40";
   return (
     <div className="min-h-0 flex-1 overflow-y-auto text-[12px]">
       <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-        <button type="button" className={nav} disabled={g === 0} onClick={() => onGeneration(g - 1)}>
+        <button type="button" className={nav} disabled={g === 0} onClick={() => onGeneration(gens[g - 1]!.index)}>
           ‹
         </button>
         <span>
@@ -162,7 +164,7 @@ export function Inspector({
           type="button"
           className={nav}
           disabled={g === gens.length - 1}
-          onClick={() => onGeneration(g + 1)}
+          onClick={() => onGeneration(gens[g + 1]!.index)}
         >
           ›
         </button>

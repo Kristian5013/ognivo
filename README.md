@@ -28,16 +28,16 @@ the `trajectory.json` Harbor reads.
 
 | Path | What |
 |---|---|
-| `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`) |
+| `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`, `sessions`, and `core`, which the GUI talks to) |
 | `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the router (whose step goes next at a server's slots), the model driver and its guards, Harmony rendering and reading for the Native path |
 | `crates/ognivo-core` | agent loop and approvals |
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell, apply_patch) and their per-model shapes |
 | `crates/ognivo-patch` | the apply_patch (V4A) format, after OpenAI Codex (Apache-2.0) |
-| `crates/ognivo-protocol` | core ⇄ client event types |
-| `crates/ognivo-store` | event log |
+| `crates/ognivo-protocol` | what the core and its clients say: the event model and the core's JSON-RPC methods, with their TypeScript |
+| `crates/ognivo-store` | sessions, the event log, the edit journal's contents |
 | `crates/ognivo-evals` | evaluation harness: T0 (the recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (`t2`: scenarios on fixture projects against a live server) |
-| `apps/ui` | the React UI of the GUI (React 19, Vite, Tailwind): so far the thread view of recorded sessions (`fixtures/`) |
-| `apps/desktop` | the Electron main process around it |
+| `apps/ui` | the React UI of the GUI (React 19, Vite, Tailwind): sessions on the core, and recorded ones (`fixtures/`) |
+| `apps/desktop` | the Electron main process around it, which joins the page to the core |
 | `profiles/` | per-model profiles (TOML) |
 | `scripts/` | `check.sh` (lints, tests and T0 before each commit), `night.sh` (T2-mini for each model in the night GPU window), pinned llama.cpp build, benchmarks, server probes |
 | `docs/` | architecture (Russian for now), M0 measurements, research |
@@ -45,9 +45,9 @@ the `trajectory.json` Harbor reads.
 ## Try it
 
 ```sh
-cargo run -p ognivo-cli -- doctor --url http://127.0.0.1:8090 --probe
-cargo run -p ognivo-cli -- chat --url http://127.0.0.1:8090
-echo "Which file implements the edit tool?" | cargo run -p ognivo-cli -- run --url http://127.0.0.1:8090
+cargo run -p ognivo-cli -- doctor --url http://127.0.0.1:8080 --probe
+cargo run -p ognivo-cli -- chat --url http://127.0.0.1:8080
+echo "Which file implements the edit tool?" | cargo run -p ognivo-cli -- run --url http://127.0.0.1:8080
 ```
 
 `doctor` connects to a running llama-server (or ik_llama.cpp), detects the model family,
@@ -79,9 +79,14 @@ they change is the session's to review, and each one's conversation is kept as a
 of its own. gpt-oss-20b does not delegate on its own: ask for subagents in the task. They pay
 off for independent parts that each take long (slow test suites), not for quick lookups.
 
-The GUI is at its start: it shows recorded sessions and talks to no core yet.
+The GUI works on the core: `ognivo core` runs the sessions, one core per user, on a Unix
+socket only that user can open (`$XDG_RUNTIME_DIR/ognivo/core.sock`), and the window starts
+it when none runs. The window lists the sessions of every project, starts new ones, streams
+turns, asks what needs approval in the thread, and reviews and reverts what changed. A turn
+goes on when the window closes; the core quits a minute after its last client and turn.
 
 ```sh
+cargo build --release -p ognivo-cli             # the window runs the newest of target/{release,debug}/ognivo
 npm ci                                          # runs no install scripts (.npmrc)
 npm run install-electron -w @ognivo/desktop     # so Electron's binary comes here
 npm run build -w @ognivo/ui
@@ -89,8 +94,11 @@ npm start -w @ognivo/desktop
 ```
 
 `npm run dev -w @ognivo/ui` serves the UI with hot reload at http://127.0.0.1:5180; start the
-window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it. `npm run perf -w @ognivo/desktop`
-measures the GUI's perf budgets in a real window for about ten seconds; the screen must be on.
+window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it. In a browser, or with
+`OGNIVO_UI_QUERY=recorded`, the UI shows the recorded sessions instead. `npm run e2e -w
+@ognivo/desktop` runs a session on a real core against a fake llama-server in a real window,
+and `npm run perf -w @ognivo/desktop` measures the GUI's perf budgets there for about ten
+seconds; the screen must be on for both.
 
 ## License
 

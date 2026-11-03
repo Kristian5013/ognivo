@@ -3,8 +3,9 @@
 // at the end of a long thread so touches the rows it changes and nothing else (§10:
 // 60 fps on a thread of 10k items).
 //
-// The events mirror the draft protocol of ognivo-protocol (an item starts, gets deltas,
-// completes); the core's frozen events will come in through the same `apply`.
+// The events mirror ognivo-protocol (an item starts, gets deltas, completes); the core's
+// come in through the same `apply` (live.ts). Generations go by their numbers, which
+// items name: a recorded thread numbers them from 0, the core from 1.
 
 import type { Generation, Item, Thread, ToolItem, ToolResult } from "./model.ts";
 
@@ -13,8 +14,8 @@ export type LiveEvent =
   | { type: "item_started"; item: Item }
   /** More text for a reasoning or message item. */
   | { type: "item_delta"; id: string; text: string }
-  /** A call's result; other items complete with nothing more. */
-  | { type: "item_completed"; id: string; result?: ToolResult }
+  /** A call's result, or the whole item as it ended (the core's events carry it). */
+  | { type: "item_completed"; id: string; result?: ToolResult; item?: Item }
   | { type: "generation"; generation: Generation }
   | { type: "turn_completed"; index: number; end: string; why?: string };
 
@@ -34,6 +35,7 @@ const frame: Schedule = (flush) =>
 export class ThreadStore {
   readonly info: Info;
   readonly generations: Generation[] = [];
+  private byIndex = new Map<number, Generation>();
   /** Whether a call starts open: changes do, the rest when everything opens. */
   private readonly opens: (item: Item) => boolean;
   private readonly schedule: Schedule;
@@ -73,8 +75,18 @@ export class ThreadStore {
         store.apply({ type: "turn_completed", index: turn.index, end: turn.end, why: turn.why });
       }
     }
-    store.generations.push(...generations);
+    for (const g of generations) store.addGeneration(g);
     return store;
+  }
+
+  /** The generation numbered `index`. */
+  generation(index: number): Generation | undefined {
+    return this.byIndex.get(index);
+  }
+
+  private addGeneration(g: Generation): void {
+    this.generations.push(g);
+    this.byIndex.set(g.index, g);
   }
 
   get length(): number {
@@ -118,17 +130,17 @@ export class ThreadStore {
         );
         return;
       case "item_completed": {
-        const result = e.result;
+        const { result, item: whole } = e;
         this.update(
           e.id,
-          (item) => (result && item.kind === "tool" ? { ...item, result } : item),
+          (item) => whole ?? (result && item.kind === "tool" ? { ...item, result } : item),
           false,
         );
-        if (result) this.index(this.item(e.id));
+        if (result || (whole?.kind === "tool" && whole.result)) this.index(this.item(e.id));
         return;
       }
       case "generation":
-        this.generations.push(e.generation);
+        this.addGeneration(e.generation);
         this.touchList();
         return;
       case "turn_completed":

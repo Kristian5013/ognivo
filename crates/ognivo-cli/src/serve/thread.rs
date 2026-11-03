@@ -1,0 +1,709 @@
+//! The core's threads. Each is a session of the store with its agent, on a task of its own
+//! that does what `ognivo chat` does between and during turns: a turn's events go through
+//! the thread's projector to the hub, its questions to the clients, and between turns the
+//! clients review what it changed.
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use futures::future::BoxFuture;
+use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::compact;
+use ognivo_core::journal::Reverted;
+use ognivo_core::protocol::Projector;
+use ognivo_models::{AnswerNow, DriverError};
+use ognivo_protocol::{self as p, rpc};
+use ognivo_store::SessionRow;
+use ognivo_tools::files;
+use serde_json::{Value, json};
+use tokio::sync::{mpsc, oneshot};
+
+use super::hub::{Hub, lock};
+use super::{Reply, RpcError, reply};
+use crate::chat::declined;
+use crate::session::{self, Connected, Failure, MAX_STEPS, SessionArgs};
+use crate::view::{counts, given, kilo, not_read, printable};
+
+/// What the model reads after a turn the user stopped, as in `chat`.
+const STOPPED: &str = "The user stopped the last turn.";
+const CORE_STOPPED: &str = "ognivo's core was stopped.";
+
+#[derive(Debug)]
+pub struct ThreadHandle {
+    commands: mpsc::UnboundedSender<Command>,
+    running: Arc<AtomicBool>,
+}
+
+impl ThreadHandle {
+    /// Closes the thread, stopping its turn, and waits until it is closed.
+    pub async fn shut(self) {
+        let (reply, closed) = oneshot::channel();
+        if self.commands.send(Command::Close(reply)).is_ok() {
+            let _ = closed.await;
+        }
+    }
+}
+
+/// What a client asks of an open thread.
+#[derive(Debug)]
+pub enum Command {
+    Turn(String, oneshot::Sender<Reply>),
+    Interrupt(oneshot::Sender<Reply>),
+    AnswerNow(oneshot::Sender<Reply>),
+    Changes(oneshot::Sender<Reply>),
+    Accept(Option<String>, oneshot::Sender<Reply>),
+    Revert(String, bool, oneshot::Sender<Reply>),
+    Clear(oneshot::Sender<Reply>),
+    Close(oneshot::Sender<Reply>),
+}
+
+impl Command {
+    /// The answer to a command a running turn leaves no room for.
+    fn busy(self) {
+        let reply = match self {
+            Command::Turn(_, r)
+            | Command::Interrupt(r)
+            | Command::AnswerNow(r)
+            | Command::Changes(r)
+            | Command::Accept(_, r)
+            | Command::Revert(_, _, r)
+            | Command::Clear(r)
+            | Command::Close(r) => r,
+        };
+        let _ = reply.send(Err(RpcError::new(
+            rpc::error::BUSY,
+            "a turn is running: stop it or wait for it",
+        )));
+    }
+}
+
+fn done() -> Reply {
+    reply(rpc::Done {})
+}
+
+fn no_thread(thread: p::ThreadId) -> RpcError {
+    RpcError::new(
+        rpc::error::NO_THREAD,
+        format!("thread {} is not open", thread.0),
+    )
+}
+
+fn not_started(f: Failure) -> RpcError {
+    RpcError::new(rpc::error::NOT_STARTED, f.message)
+}
+
+fn store_error(e: impl std::fmt::Display) -> RpcError {
+    RpcError::new(-32603, format!("the session store: {e}"))
+}
+
+/// Sends a command to an open thread and waits for its answer.
+pub async fn command(
+    hub: &Hub,
+    thread: p::ThreadId,
+    make: impl FnOnce(oneshot::Sender<Reply>) -> Command,
+) -> Reply {
+    let (reply, answered) = oneshot::channel();
+    let sent = lock(&hub.threads)
+        .get(&thread.0)
+        .is_some_and(|h| h.commands.send(make(reply)).is_ok());
+    if !sent {
+        return Err(no_thread(thread));
+    }
+    answered.await.unwrap_or_else(|_| Err(no_thread(thread)))
+}
+
+pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
+    let project = a.project.map(PathBuf::from);
+    let rows = lock(&hub.reader)
+        .sessions(project.as_deref(), a.limit.unwrap_or(200))
+        .map_err(store_error)?;
+    let threads = lock(&hub.threads);
+    let threads = rows
+        .into_iter()
+        .filter(|r| r.kind != "subagent")
+        .map(|r| {
+            let (server, model) = split_server(&r.server);
+            let open = threads.get(&r.id);
+            rpc::ThreadSummary {
+                thread: p::ThreadId(r.id),
+                kind: r.kind,
+                project: r.root.display().to_string(),
+                profile: r.profile,
+                level: r.level,
+                server,
+                model,
+                title: r.title,
+                created: r.created,
+                updated: r.updated,
+                turns: r.turns,
+                unreviewed: r.unreviewed_files,
+                open: open.is_some(),
+                running: open.is_some_and(|h| h.running.load(Ordering::SeqCst)),
+            }
+        })
+        .collect();
+    reply(rpc::Threads { threads })
+}
+
+/// A session's server as the store keeps it: the URL, and the model behind a router.
+fn split_server(server: &str) -> (String, Option<String>) {
+    match server.split_once(' ') {
+        Some((url, model)) => (url.to_owned(), Some(model.to_owned())),
+        None => (server.to_owned(), None),
+    }
+}
+
+pub fn read(hub: &Hub, a: rpc::ReadThread) -> Reply {
+    let after = a.after.unwrap_or(0).min(i64::MAX as u64) as i64;
+    let rows = lock(&hub.reader)
+        .wire(a.thread.0, after)
+        .map_err(store_error)?;
+    let events: Vec<Value> = rows
+        .iter()
+        .filter_map(|r| serde_json::from_str(r).ok())
+        .collect();
+    Ok(json!({ "events": events }))
+}
+
+pub fn trajectory(hub: &Hub, a: rpc::ThreadRef) -> Reply {
+    let trajectory = ognivo_core::trace::atif(&lock(&hub.reader), a.thread.0)
+        .map_err(|e| RpcError::new(rpc::error::NO_THREAD, e.to_string()))?;
+    reply(rpc::Trajectory { trajectory })
+}
+
+/// The flags of `chat` for a thread of the core.
+fn args(hub: &Hub, server: &rpc::Server, cwd: Option<PathBuf>) -> SessionArgs {
+    SessionArgs {
+        url: server.url.clone(),
+        api_key: server.api_key.clone(),
+        profile: None,
+        cwd,
+        max_steps: MAX_STEPS,
+        seed: None,
+        level: None,
+        slot: None,
+        model: server.model.clone(),
+        data_dir: Some(hub.data_dir.clone()),
+        native: false,
+        priors: false,
+        subagents: false,
+    }
+}
+
+pub async fn start(hub: &Arc<Hub>, a: rpc::StartThread) -> Reply {
+    let mut args = args(hub, &a.server, Some(PathBuf::from(&a.project)));
+    (args.profile, args.level) = (a.profile, a.level);
+    (args.native, args.priors, args.subagents) = (a.native, a.priors, a.subagents);
+    let root = args.root().map_err(not_started)?;
+    let connected = args
+        .connect(root.clone(), None)
+        .await
+        .map_err(not_started)?;
+    open(hub, &args.url, connected, root, None).await
+}
+
+pub async fn resume(hub: &Arc<Hub>, a: rpc::ResumeThread) -> Reply {
+    if lock(&hub.threads).contains_key(&a.thread.0) {
+        return Err(RpcError::new(
+            rpc::error::BUSY,
+            format!("thread {} is open already", a.thread.0),
+        ));
+    }
+    let row = lock(&hub.reader).session(a.thread.0).map_err(store_error)?;
+    let Some(row) = row.filter(|r| r.kind != "subagent") else {
+        return Err(RpcError::new(
+            rpc::error::NO_THREAD,
+            format!("there is no thread {}", a.thread.0),
+        ));
+    };
+    let server = a.server.unwrap_or_else(|| {
+        let (url, model) = split_server(&row.server);
+        rpc::Server {
+            url,
+            api_key: None,
+            model,
+        }
+    });
+    let mut args = args(hub, &server, None);
+    (args.native, args.priors, args.subagents) = (a.native, a.priors, a.subagents);
+    let root = args.root_of(&row).map_err(not_started)?;
+    let connected = args
+        .connect(root.clone(), Some(&row))
+        .await
+        .map_err(not_started)?;
+    open(hub, &args.url, connected, root, Some(row)).await
+}
+
+/// The thread of a connected session, new or stored: its agent on a task of its own.
+async fn open(
+    hub: &Arc<Hub>,
+    url: &str,
+    mut s: Connected,
+    root: PathBuf,
+    stored: Option<SessionRow>,
+) -> Reply {
+    let mut store = session::open_store(&hub.data_dir).map_err(not_started)?;
+    let mut notes = Vec::new();
+    if let Some(pending) = s.pending.take() {
+        let key = pending.key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let asked = rpc::TrustAsked {
+                    project: root.display().to_string(),
+                    rules: pending
+                        .rules
+                        .iter()
+                        .map(|r| rpc::Rule {
+                            text: r.text.clone(),
+                            source: r.source.clone(),
+                            any: matches!(r.text.as_str(), "Bash" | "Bash(*)"),
+                        })
+                        .collect(),
+                };
+                let answer = hub
+                    .ask(rpc::RULES_TRUST, json!(asked))
+                    .await
+                    .and_then(|v| serde_json::from_value::<rpc::TrustAnswer>(v).ok());
+                let yes = answer.is_some_and(|a| a.trust);
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    notes.push(format!("the answer about the rules is not kept: {e}"));
+                }
+                yes
+            }
+            Err(e) => {
+                notes.push(format!("the session store: {e}"));
+                false
+            }
+        };
+        if trusted {
+            s.opts.rules.trust(pending);
+        } else {
+            notes.push(
+                "the project's allow rules are not used: you did not trust them (they are asked about again when they change)"
+                    .into(),
+            );
+        }
+    }
+    let (limit, planned) = (
+        compact::limit(&s.opts.context, s.opts.n_ctx),
+        compact::limit(&s.opts.context, None),
+    );
+    let answer_now = s.answer_now.take();
+    let rule_files = std::mem::take(&mut s.rule_files);
+    let rule_problems = std::mem::take(&mut s.rule_problems);
+    let info = p::ThreadInfo {
+        kind: "chat".into(),
+        project: root.display().to_string(),
+        profile: s.profile.clone(),
+        level: s.level.clone(),
+        server: url.to_owned(),
+        model: s.model.clone(),
+        parent: None,
+    };
+    // the approver finds a question's item in the thread's projector, numbered once the
+    // session has its id
+    let shared = Arc::new(Mutex::new(Projector::new(p::ThreadId(0), info.clone())));
+    let approver = Box::new(Remote {
+        hub: hub.clone(),
+        projector: shared.clone(),
+        always: HashSet::new(),
+    });
+    let agent = match &stored {
+        Some(row) => s.resumed_agent(row, store, approver),
+        None => s.new_agent("chat", url, store, approver),
+    };
+    let mut agent = agent.map_err(not_started)?;
+    let Some(id) = agent.session_id() else {
+        return Err(RpcError::new(
+            rpc::error::NOT_STARTED,
+            "the session store failed",
+        ));
+    };
+    let thread = p::ThreadId(id);
+    *lock(&shared) = match &stored {
+        Some(row) => {
+            let (turns, items, generations) = numbers(hub, id, row.turns);
+            Projector::resumed(thread, info.clone(), turns, items, generations)
+        }
+        None => Projector::new(thread, info.clone()),
+    };
+    match &stored {
+        Some(row) => {
+            notes.push(format!(
+                "resumed after {} turn{}",
+                row.turns,
+                if row.turns == 1 { "" } else { "s" }
+            ));
+            if agent.inherited_changes() {
+                notes.push("the project may hold changes ognivo did not make: builds and tests ask until you accept them".into());
+            }
+        }
+        None if agent.unreviewed_changes() => notes
+            .push("not a clean git tree: builds and tests ask until you accept the changes".into()),
+        None => {}
+    }
+    if let Some(line) = unreviewed(&mut agent) {
+        notes.push(line);
+    }
+    if !rule_files.is_empty() {
+        notes.push(format!("rules {}", printable(&rule_files.join(", "))));
+    }
+    for problem in &rule_problems {
+        notes.push(format!("not a rule: {}", printable(problem)));
+    }
+    if limit < planned {
+        notes.push(format!(
+            "the server's context leaves about {} tokens for the conversation where the profile plans for {}: expect frequent compaction",
+            kilo(limit),
+            kilo(planned)
+        ));
+    }
+    let first = instructions(&agent);
+    if let Some(AgentEvent::Instructions { files, skipped }) = &first {
+        if !files.is_empty() {
+            notes.push(format!("instructions {}", given(files)));
+        }
+        notes.extend(skipped.iter().map(not_read));
+    }
+    hub.emit(thread, lock(&shared).started());
+    let (commands, received) = mpsc::unbounded_channel();
+    let running = Arc::new(AtomicBool::new(false));
+    lock(&hub.threads).insert(
+        id,
+        ThreadHandle {
+            commands,
+            running: running.clone(),
+        },
+    );
+    let actor = Actor {
+        hub: hub.clone(),
+        agent,
+        projector: shared,
+        thread,
+        root,
+        first,
+        answer_now,
+        running,
+    };
+    tokio::spawn(actor.run(received));
+    reply(rpc::Opened {
+        thread,
+        info,
+        notes,
+    })
+}
+
+/// Where a thread's numbers stand in the kept stream: its last turn, item and generation.
+/// A thread from before the core kept its events, or with turns in `chat` since, goes on
+/// from the turns its session counted.
+fn numbers(hub: &Hub, id: i64, turns: u32) -> (u32, u32, u32) {
+    let rows = lock(&hub.reader).wire(id, 0).unwrap_or_default();
+    let (mut turn, mut item, mut generation) = (0, 0, 0);
+    for row in rows {
+        let Ok(e) = serde_json::from_str::<p::Event>(&row) else {
+            continue;
+        };
+        if e.thread.0 != id {
+            continue;
+        }
+        match e.kind {
+            p::EventKind::TurnStarted { turn: t, .. } => turn = turn.max(t.0),
+            p::EventKind::ItemStarted { item: i } => item = item.max(i.id.0),
+            p::EventKind::Generation { generation: g } => generation = generation.max(g.index),
+            _ => {}
+        }
+    }
+    (turn.max(turns), item, generation)
+}
+
+/// The conversation's instruction files, for the first item of its next turn.
+fn instructions(agent: &Agent) -> Option<AgentEvent> {
+    let load = agent.instructions();
+    (!load.files.is_empty() || !load.skipped.is_empty()).then(|| AgentEvent::Instructions {
+        files: load.files.clone(),
+        skipped: load.skipped.clone(),
+    })
+}
+
+/// What waits for review, as the line under a turn of `chat` says it.
+fn unreviewed(agent: &mut Agent) -> Option<String> {
+    let mut what: Vec<String> = agent
+        .changes()
+        .iter()
+        .map(|c| format!("{} ({})", c.shown, counts(c.created, &c.hunks)))
+        .collect();
+    match agent.side_effects().len() {
+        0 => {}
+        1 => what.push("1 command with side effects".to_owned()),
+        n => what.push(format!("{n} commands with side effects")),
+    }
+    (!what.is_empty()).then(|| printable(&format!("unreviewed: {}", what.join(", "))))
+}
+
+/// A thread's agent and what goes with it, on the thread's task.
+struct Actor {
+    hub: Arc<Hub>,
+    agent: Agent,
+    projector: Arc<Mutex<Projector>>,
+    thread: p::ThreadId,
+    root: PathBuf,
+    /// The conversation's instruction files, the first item of its next turn.
+    first: Option<AgentEvent>,
+    answer_now: Option<AnswerNow>,
+    running: Arc<AtomicBool>,
+}
+
+/// How a turn came out.
+enum Ended {
+    Done(Result<TurnEnd, DriverError>),
+    /// From outside: the model reads why with the next message.
+    Stopped(&'static str),
+}
+
+impl Actor {
+    async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
+        let closed = loop {
+            let Some(command) = commands.recv().await else {
+                break None;
+            };
+            let answer = match command {
+                Command::Turn(text, reply) => {
+                    let _ = reply.send(done());
+                    match self.turn(&text, &mut commands).await {
+                        Some(close) => break Some(close),
+                        None => continue,
+                    }
+                }
+                // no turn to stop
+                Command::Interrupt(reply) | Command::AnswerNow(reply) => (reply, done()),
+                Command::Changes(reply) => (reply, self.changes()),
+                Command::Accept(file, reply) => (reply, self.accept(file)),
+                Command::Revert(file, force, reply) => (reply, self.revert(&file, force)),
+                Command::Clear(reply) => {
+                    self.agent.clear();
+                    self.first = instructions(&self.agent);
+                    (reply, done())
+                }
+                Command::Close(reply) => break Some(reply),
+            };
+            let _ = answer.0.send(answer.1);
+        };
+        lock(&self.hub.threads).remove(&self.thread.0);
+        self.agent.close();
+        if let Some(reply) = closed {
+            let _ = reply.send(done());
+        }
+    }
+
+    /// Runs a turn to its end, or until a client stops it; returns the answer of a close
+    /// that came meanwhile.
+    async fn turn(
+        &mut self,
+        text: &str,
+        commands: &mut mpsc::UnboundedReceiver<Command>,
+    ) -> Option<oneshot::Sender<Reply>> {
+        self.running.store(true, Ordering::SeqCst);
+        self.hub.running(1);
+        if let Some(a) = &self.answer_now {
+            a.clear();
+        }
+        let (hub, projector, thread) = (self.hub.clone(), self.projector.clone(), self.thread);
+        let mut first = self.first.take();
+        let mut closing = None;
+        let ended = {
+            let mut on = |e: AgentEvent| {
+                let started = matches!(e, AgentEvent::TurnStarted { .. });
+                let mut projector = lock(&projector);
+                let mut out = projector.event(e);
+                if started && let Some(e) = first.take() {
+                    out.extend(projector.event(e));
+                }
+                drop(projector);
+                hub.emit(thread, out);
+            };
+            let turn = self.agent.turn(text, &mut on);
+            tokio::pin!(turn);
+            loop {
+                tokio::select! {
+                    end = &mut turn => break Ended::Done(end),
+                    command = commands.recv() => match command {
+                        Some(Command::Interrupt(reply)) => {
+                            let _ = reply.send(done());
+                            break Ended::Stopped(STOPPED);
+                        }
+                        Some(Command::AnswerNow(reply)) => {
+                            if let Some(a) = &self.answer_now {
+                                a.press();
+                            }
+                            let _ = reply.send(done());
+                        }
+                        Some(Command::Close(reply)) => {
+                            closing = Some(reply);
+                            break Ended::Stopped(CORE_STOPPED);
+                        }
+                        Some(other) => other.busy(),
+                        None => break Ended::Stopped(CORE_STOPPED),
+                    },
+                }
+            }
+        };
+        match ended {
+            Ended::Done(Ok(_)) => {}
+            Ended::Done(Err(e)) => self
+                .agent
+                .abandon_turn(&format!("The last turn ended on a server error: {e}")),
+            Ended::Stopped(why) => {
+                self.agent.abandon_turn(why);
+                let out = lock(&self.projector).interrupted();
+                self.hub.emit(self.thread, out);
+            }
+        }
+        if let Some(e) = first {
+            self.first = Some(e);
+        }
+        if let Some(e) = self.agent.store_failure() {
+            eprintln!(
+                "ognivo core: thread {}: the session store failed: {e}; the session is no longer saved",
+                self.thread.0
+            );
+        }
+        self.running.store(false, Ordering::SeqCst);
+        self.hub.running(-1);
+        closing
+    }
+
+    fn changes(&mut self) -> Reply {
+        let files = self
+            .agent
+            .changes()
+            .into_iter()
+            .map(|c| rpc::ChangedFile {
+                path: c.shown,
+                created: c.created,
+                deleted: c.deleted,
+                drifted: c.drifted,
+                hunks: c
+                    .hunks
+                    .into_iter()
+                    .map(|h| p::Hunk {
+                        old_start: h.old_start as u32,
+                        new_start: h.new_start as u32,
+                        removed: h.removed,
+                        added: h.added,
+                    })
+                    .collect(),
+            })
+            .collect();
+        reply(rpc::Changes {
+            files,
+            commands: self.agent.side_effects().to_vec(),
+            inherited: self.agent.inherited_changes(),
+        })
+    }
+
+    /// As `/accept` in `chat`: one file, or everything.
+    fn accept(&mut self, file: Option<String>) -> Reply {
+        let path = file.as_deref().map(|f| files::resolve(&self.root, f));
+        let commands = self.agent.side_effects().len();
+        let inherited = self.agent.inherited_changes();
+        let mut accepted = self
+            .agent
+            .accept(path.as_deref())
+            .map_err(|e| RpcError::new(rpc::error::JOURNAL, e.to_string()))?;
+        if file.is_none() {
+            match commands {
+                0 => {}
+                1 => accepted.push("1 command with side effects".to_owned()),
+                n => accepted.push(format!("{n} commands with side effects")),
+            }
+            if inherited {
+                accepted.push("what the project had before this session".to_owned());
+            }
+        }
+        reply(rpc::Accepted {
+            accepted,
+            unreviewed: self.agent.unreviewed_changes(),
+        })
+    }
+
+    /// As `/revert` in `chat`, for one file; a file something else changed too only with
+    /// `force`.
+    fn revert(&mut self, file: &str, force: bool) -> Reply {
+        let path = files::resolve(&self.root, file);
+        let how = self
+            .agent
+            .revert(&path, force)
+            .map_err(|e| RpcError::new(rpc::error::JOURNAL, e.to_string()))?;
+        reply(rpc::Reverted {
+            removed: how == Reverted::Removed,
+        })
+    }
+}
+
+/// Asks the clients, the subagents' questions too; `a` allows exactly that action again for
+/// the rest of the session, as in `chat`.
+struct Remote {
+    hub: Arc<Hub>,
+    projector: Arc<Mutex<Projector>>,
+    always: HashSet<(String, String)>,
+}
+
+impl std::fmt::Debug for Remote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Remote").finish_non_exhaustive()
+    }
+}
+
+impl Approver for Remote {
+    fn approve<'a>(&'a mut self, req: &'a ApprovalRequest) -> BoxFuture<'a, Verdict> {
+        Box::pin(async move {
+            let key = (req.tool.clone(), req.action.clone());
+            if self.always.contains(&key) {
+                return Verdict::Allow;
+            }
+            let (thread, item) = {
+                let projector = lock(&self.projector);
+                let at = projector.asking(req.agent.as_deref(), &req.tool, &req.action);
+                (projector.thread(), at)
+            };
+            let asked = rpc::ApprovalAsked {
+                thread,
+                item: item.map(|(thread, item)| rpc::ItemRef { thread, item }),
+                tool: req.tool.clone(),
+                action: req.action.clone(),
+                reason: req.reason.clone(),
+                unreviewed: req.unreviewed.clone(),
+                agent: req.agent.clone(),
+            };
+            let answer = self
+                .hub
+                .ask(rpc::APPROVAL_ASK, json!(asked))
+                .await
+                .and_then(|v| serde_json::from_value::<rpc::ApprovalAnswer>(v).ok());
+            match answer {
+                Some(rpc::ApprovalAnswer {
+                    decision: rpc::Decision::Allow,
+                    ..
+                }) => Verdict::Allow,
+                Some(rpc::ApprovalAnswer {
+                    decision: rpc::Decision::AllowSession,
+                    ..
+                }) => {
+                    self.always.insert(key);
+                    Verdict::Allow
+                }
+                Some(rpc::ApprovalAnswer { instead, .. }) => {
+                    Verdict::Refuse(declined(&req.action, instead.as_deref()))
+                }
+                None => Verdict::Refuse(declined(&req.action, None)),
+            }
+        })
+    }
+
+    fn can_ask(&self) -> bool {
+        true
+    }
+}

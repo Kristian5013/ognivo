@@ -15,7 +15,7 @@
 #                     ognivo profile, scripts/llama_cmd.py) and stop it at the end; refuses when
 #                     another process holds GPU memory (nvidia-smi --query-compute-apps) or the
 #                     port is taken. Without --server a llama-server must already serve MODEL.
-#   --port N          llama-server port (default 8090, config/models.json "port"; 8080 is the owner's Open WebUI)
+#   --port N          llama-server port (default 8090, config/models.json "port"; 8080 is the owner's own llama-server)
 #   --stamp STAMP     write into runs/STAMP (default: a new UTC timestamp). An existing STAMP is
 #                     resumed: tasks with a final result.json are skipped, the others re-run
 #                     (the earlier attempt moves to <model>/_attempts/).

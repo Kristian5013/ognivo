@@ -1,6 +1,6 @@
-// The Electron main process of the ognivo GUI: one window around the UI of apps/ui. It
-// talks to no core yet; the JSON-RPC connection over the core's Unix socket (§3) comes
-// once the event model is frozen (M2).
+// The Electron main process of the ognivo GUI: one window around the UI of apps/ui, and
+// the page's way to the core: a page that asks gets a port joined to the core's Unix
+// socket, and the core starts when none answers (core.js, docs/architecture.md §3).
 //
 // Security (docs/architecture.md §10): the renderer is sandboxed and isolated and has no
 // Node; it may neither navigate away nor open windows, and a link out of the app opens in
@@ -9,7 +9,7 @@
 // request is refused.
 //
 //   OGNIVO_UI_DEV=http://127.0.0.1:5180   the UI's dev server instead of apps/ui/dist
-//   OGNIVO_UI_QUERY='session=qwen.long-file&open=all'
+//   OGNIVO_UI_QUERY='session=qwen.long-file&open=all'   a recorded session; `recorded` for all
 //   OGNIVO_SCREENSHOT=out.png             render without showing a window, save, quit
 //   OGNIVO_INACTIVE=1                     show the window without taking the focus (perf runs)
 //
@@ -19,10 +19,23 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { BrowserWindow, app, dialog, protocol, screen, session, shell } from "electron";
+import {
+  BrowserWindow,
+  MessageChannelMain,
+  app,
+  dialog,
+  ipcMain,
+  protocol,
+  screen,
+  session,
+  shell,
+} from "electron";
+
+import { bridge } from "./core.js";
 
 const SCHEME = "app";
-const UI = join(dirname(fileURLToPath(import.meta.url)), "../ui/dist");
+const HERE = dirname(fileURLToPath(import.meta.url));
+const UI = join(HERE, "../ui/dist");
 const DEV = process.env.OGNIVO_UI_DEV;
 const QUERY = process.env.OGNIVO_UI_QUERY;
 const SHOT = process.env.OGNIVO_SCREENSHOT;
@@ -103,6 +116,10 @@ async function openOutside(win, href) {
   if (response === 0) await shell.openExternal(url.href);
 }
 
+/** Where the app's own pages are. A URL's origin will not do: for app:// it is "null",
+ * as for data: and file:. */
+const HOME = DEV ? `${new URL(DEV).origin}/` : `${SCHEME}://ui/`;
+
 function createWindow() {
   const start = `${DEV ?? `${SCHEME}://ui/index.html`}${QUERY ? `?${QUERY}` : ""}`;
   // a window as big as the screen's work area or bigger gets maximized by the window
@@ -117,6 +134,7 @@ function createWindow() {
     backgroundColor: "#0f1012",
     show: false,
     webPreferences: {
+      preload: join(HERE, "preload.cjs"),
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
@@ -131,7 +149,7 @@ function createWindow() {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
-    if (new URL(url).origin !== new URL(start).origin) {
+    if (!url.startsWith(HOME)) {
       event.preventDefault();
       void openOutside(win, url);
     }
@@ -154,6 +172,16 @@ function createWindow() {
     if (SHOT) return;
     if (INACTIVE) win.showInactive();
     else win.show();
+  });
+  // the page's port to the core; only the app's own page gets one
+  ipcMain.on("ognivo:core", (event) => {
+    const frame = event.senderFrame;
+    if (event.sender !== win.webContents || frame !== win.webContents.mainFrame || !frame.url.startsWith(HOME)) {
+      return;
+    }
+    const { port1, port2 } = new MessageChannelMain();
+    event.sender.postMessage("ognivo:core", null, [port2]);
+    void bridge(port1);
   });
   void win.loadURL(start);
 }

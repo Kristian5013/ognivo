@@ -120,7 +120,7 @@ With the harness starting and stopping the pinned llama-server itself:
 harness/run-suite.sh --server gpt-oss-20b cforge-timefmt-february
 ```
 
-Against a llama-server that already runs on 127.0.0.1:8090 (the default port in config/models.json; 8080 is taken by the owner's Open WebUI) with `--alias gpt-oss-20b`, leave out
+Against a llama-server that already runs on 127.0.0.1:8090 (the default port in config/models.json; 8080 is the owner's own llama-server) with `--alias gpt-oss-20b`, leave out
 `--server`. The suite checks `/props` and `/v1/models` first: the alias and the model file must
 match, and the served chat template must be the profile's canonical one.
 
@@ -229,7 +229,8 @@ harness/run-night.sh --status          # progress and the result table
   gone with the old tree, so it fails at once, but `systemctl --user disable --now
   cforge-nightly.timer` removes the question. `vllm-muse-glimmer.service` and
   `vllm-gpt-oss-20b.service` (`--gpu-memory-utilization 0.95`) must not run during a night;
-  Open WebUI holds 127.0.0.1:8080, which is why the suite uses 8090.
+  The owner's own llama-server listens on 127.0.0.1:8080 (Open WebUI did until 2026-11-03),
+  which is why the suite uses 8090.
 - **Unattended, with a user timer** (needs linger):
 
   ```ini
@@ -465,7 +466,7 @@ State of 2026-10-30, after the review fixes (all on the final tree and the rebui
   - a two-night campaign, run from its frozen copy.
 - `tests/container-smoke.sh` with real rootless Podman (5.8.6, pasta 0.0~git20260728):
   - The network probe reaches only the forwarded port. Host port 22, another listening host
-    port, Open WebUI's 8080, 169.254.1.2, 1.1.1.1, IPv6 and DNS all fail.
+    port, the host's 8080, 169.254.1.2, 1.1.1.1, IPv6 and DNS all fail.
   - The fixture suite gives solved, solved, failed, with the session exported and no container
     left behind.
 - `--agent reference` / `--agent none` over all 18 tasks in the image: every reference solution

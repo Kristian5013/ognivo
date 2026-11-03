@@ -1,6 +1,5 @@
-// What the UI shows of a session. The core's event model freezes in M2
-// (docs/architecture.md §3): its events will be folded into these same types. Until then
-// a thread is read from a recorded ATIF trace (atif.ts).
+// What the UI shows of a session: the core's events fold into these types (live.ts), and
+// so does a recorded ATIF trace (atif.ts).
 
 /** Claude Code's tool names, which ognivo uses for its own tools. */
 export type ToolName = "Read" | "Edit" | "Write" | "Bash" | "Grep" | "Glob";

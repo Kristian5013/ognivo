@@ -12,6 +12,10 @@
 //!
 //! Frozen at the end of M2 as version 1. From here on it changes only by additions: a new
 //! event, a new item kind, a new field. A client ignores what it does not know.
+//!
+//! [`rpc`] has the methods of `ognivo core`, which serves the model over its socket.
+
+pub mod rpc;
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;

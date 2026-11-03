@@ -20,7 +20,7 @@ function Chevron({ open }: { open: boolean }) {
 function useGenerationMs(store: ThreadStore, generation?: number): number | undefined {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   return useSyncExternalStore(subscribe, () =>
-    generation === undefined ? undefined : store.generations[generation]?.generationMs,
+    generation === undefined ? undefined : store.generation(generation)?.generationMs,
   );
 }
 
