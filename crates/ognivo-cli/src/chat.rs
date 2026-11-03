@@ -775,7 +775,12 @@ impl Approver for Ask {
                 self.screen.line(&note, Paint::Dim);
                 return Verdict::Allow;
             }
-            let question = format!("? {} {}", req.tool, printable(&req.action));
+            let who = req
+                .agent
+                .as_deref()
+                .map(|title| format!("subagent «{}»: ", printable(title)))
+                .unwrap_or_default();
+            let question = format!("? {who}{} {}", req.tool, printable(&req.action));
             self.screen.line(&question, Paint::Bold);
             self.screen.line(&format!("  {}", req.reason), Paint::Plain);
             if !req.unreviewed.is_empty() {

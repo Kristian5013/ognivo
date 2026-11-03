@@ -1,0 +1,25 @@
+# One search finds all three: a task subagents do not make faster.
+category = "parallel"
+prompt = "What port does each of the three services listen on: billing, shipping and inventory? Each sets PORT in its own settings.py under services/. Answer with one line per service."
+max_steps = 20
+
+[[generated]]
+path = "services/billing/settings.py"
+lines = 1200
+line = "OPTION_{n} = {n}"
+replace = { "731" = "PORT = 8411" }
+
+[[generated]]
+path = "services/shipping/settings.py"
+lines = 1200
+line = "OPTION_{n} = {n}"
+replace = { "214" = "PORT = 8452" }
+
+[[generated]]
+path = "services/inventory/settings.py"
+lines = 1200
+line = "OPTION_{n} = {n}"
+replace = { "1066" = "PORT = 8493" }
+
+[expect]
+answer = ["8411", "8452", "8493"]

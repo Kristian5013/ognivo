@@ -69,6 +69,12 @@ that is not loaded the router is asked to load. Requests are not pinned to a slo
 into whichever slot the conversation comes to. When the server's slots are all busy, the
 next step goes by priority, the user's agent first, across ognivo sessions too.
 
+With `--subagents` the agent may hand tasks to subagents (`delegate`): each works on its
+task in a context of its own, at the same time as the others, at medium reasoning, and
+reports back. A read task changes no file; a write task only the files it lists. What
+they change is the session's to review, and each one's conversation is kept as a session
+of its own.
+
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 
 ```sh

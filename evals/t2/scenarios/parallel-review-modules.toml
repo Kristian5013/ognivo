@@ -1,0 +1,60 @@
+# One wrong function in each of three modules: three reviews that do not need each other.
+category = "parallel"
+prompt = "Each of src/limits.py, src/text.py and src/lists.py has exactly one function that does not do what its docstring says. Name that function for each file, one line per file. Change nothing."
+max_steps = 20
+
+[files]
+"src/limits.py" = '''
+def clamp(value, low, high):
+    """Returns value limited to the range from low to high."""
+    if value < low:
+        return low
+    if value > high:
+        return low
+    return value
+
+
+def mean(values):
+    """The average of the values."""
+    return sum(values) / len(values)
+
+
+def spread(values):
+    """The largest value minus the smallest."""
+    return max(values) - min(values)
+'''
+"src/text.py" = '''
+def shout(text):
+    """The text in capitals, with an exclamation mark."""
+    return text.upper() + "!"
+
+
+def count_words(text):
+    """The number of words in the text, separated by single spaces."""
+    return len(text.split(" ")) + 1
+
+
+def initials(name):
+    """The first letter of each word of the name."""
+    return "".join(word[0] for word in name.split())
+'''
+"src/lists.py" = '''
+def first_item(items):
+    """The first item, or None for an empty list."""
+    return items[0] if items else None
+
+
+def last_item(items):
+    """The last item, or None for an empty list."""
+    if not items:
+        return None
+    return items[len(items) - 2]
+
+
+def pairs(items):
+    """Each item with the one after it."""
+    return list(zip(items, items[1:]))
+'''
+
+[expect]
+answer = ["clamp", "count_words", "last_item"]

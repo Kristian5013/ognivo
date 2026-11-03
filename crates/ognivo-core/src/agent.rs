@@ -19,9 +19,14 @@
 //! - A turn may have a time limit (M0 requirement 4). The model is told the limit, the
 //!   elapsed half and 80%; a command never runs past it, and at the limit the loop stops
 //!   the generation or the command and ends the turn itself.
+//! - With subagents, `delegate` hands tasks to agents of their own that work at the same
+//!   time ([`delegate`]).
+
+mod delegate;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -34,8 +39,8 @@ use ognivo_models::{
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
-pub use ognivo_tools::projection::Layout;
 use ognivo_tools::projection::{self, Call};
+pub use ognivo_tools::projection::{Layout, Toolset};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -49,6 +54,8 @@ use crate::repeats::{Check, Fingerprint, Repeats};
 use crate::rules::{Rules, Ruling};
 use crate::session::{Notes, Resumed, Session};
 use crate::verify::{self, Ledger, Run, Verification};
+
+pub use delegate::{SameModel, Subagents};
 
 /// How many generations in a row may end without usable calls before the turn stops.
 const MAX_UNUSABLE_IN_A_ROW: u32 = 3;
@@ -69,6 +76,8 @@ pub struct ApprovalRequest {
     /// What the model changes files with, for a refusal to point there: `the edit and
     /// write tools`, or `apply_patch` with the tools of gpt-oss's training.
     pub edit_with: &'static str,
+    /// The subagent that asks, by its task's title; `None`: the user's agent.
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,6 +194,27 @@ pub enum AgentEvent {
         /// The model's summary; `None` when it wrote none.
         summary: Option<String>,
     },
+    /// `delegate` started a subagent on the task numbered `index` (from 0).
+    SubagentStarted {
+        index: usize,
+        title: String,
+        /// The files of a write task; `None` for a read task.
+        write: Option<Vec<String>>,
+    },
+    /// An event of a subagent's turn.
+    Subagent {
+        index: usize,
+        event: Box<AgentEvent>,
+    },
+    /// A subagent's turn ended: `end` is `answer`, `step_limit`, `stuck`, `time_limit` or
+    /// `error`.
+    SubagentFinished {
+        index: usize,
+        end: String,
+        steps: u32,
+        /// The files it changed.
+        changed: Vec<String>,
+    },
 }
 
 /// Counters behind the M1 exit metrics.
@@ -220,6 +250,10 @@ pub struct Stats {
     pub prompt_tokens_processed: u64,
     pub prompt_tokens_cached: u64,
     pub completion_tokens: u64,
+    /// Subagents `delegate` started, their steps and the tokens they generated.
+    pub subagents: u32,
+    pub subagent_steps: u32,
+    pub subagent_tokens: u64,
 }
 
 /// The accepted final answer and what the turn's facts say about it.
@@ -267,6 +301,13 @@ pub struct AgentOptions {
     pub rules: Rules,
     /// Which tools the model gets ([`Layout::Priors`]: gpt-oss's own, on the Native path).
     pub layout: Layout,
+    /// Which of the layout's tools: [`Toolset::Delegating`] gives `delegate` too, when
+    /// there are `subagents`.
+    pub toolset: Toolset,
+    /// A subagent's write task: the only files it may change.
+    pub writable: Option<Vec<PathBuf>>,
+    /// Where the subagents of `delegate` come from.
+    pub subagents: Option<Arc<dyn Subagents>>,
 }
 
 /// The time limit of the running turn.
@@ -330,6 +371,9 @@ fn about(d: Duration) -> String {
 pub struct Agent {
     driver: Box<dyn ModelDriver>,
     family: Family,
+    /// The tools it has: those of its options, without `delegate` when there are no
+    /// subagents.
+    toolset: Toolset,
     tools: Vec<ToolDecl>,
     opts: AgentOptions,
     approver: Box<dyn Approver>,
@@ -439,12 +483,17 @@ impl Agent {
         let cwd = opts.root.clone();
         let mut instructions = Instructions::new(opts.root.clone(), opts.user_instructions.clone());
         let prompt_instructions = instructions.start();
+        let toolset = match (opts.toolset, &opts.subagents) {
+            (Toolset::Delegating, None) => Toolset::All,
+            (t, _) => t,
+        };
         Self {
             messages: vec![
                 ChatMessage::System(system_prompt(opts.layout)),
                 ChatMessage::User(project_context(&opts.root, &prompt_instructions.text)),
             ],
-            tools: projection::declarations(family, opts.layout),
+            tools: projection::declarations_for(family, opts.layout, toolset),
+            toolset,
             driver,
             family,
             approver,
@@ -1204,7 +1253,13 @@ impl Agent {
     ) -> String {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
-        let parsed = projection::parse(self.family, self.opts.layout, &call.name, &call.arguments);
+        let parsed = projection::parse_for(
+            self.family,
+            self.opts.layout,
+            self.toolset,
+            &call.name,
+            &call.arguments,
+        );
         self.emit(
             on,
             AgentEvent::ToolStarted {
@@ -1401,6 +1456,9 @@ impl Agent {
                         text
                     }
                     Ok(EditPlan::Change(change)) => {
+                        if let Some(refusal) = self.outside_task(&[&p]) {
+                            return refusal;
+                        }
                         let decision = approval::decide_edit(
                             &[FileEdit {
                                 path: &change.path,
@@ -1441,6 +1499,9 @@ impl Agent {
                     self.seen.contains(&p),
                 ) {
                     Ok(change) => {
+                        if let Some(refusal) = self.outside_task(&[&p]) {
+                            return refusal;
+                        }
                         let decision = approval::decide_edit(
                             &[FileEdit {
                                 path: &change.path,
@@ -1468,6 +1529,7 @@ impl Agent {
                     Err(e) => error_text(&e),
                 }
             }
+            Call::Delegate { tasks } => self.delegate(tasks, on).await,
             Call::Patch { patch } => {
                 let seen = &self.seen;
                 let planned =
@@ -1481,6 +1543,10 @@ impl Agent {
                         return error_text(&e);
                     }
                 };
+                let paths: Vec<&Path> = changes.iter().map(|c| c.path.as_path()).collect();
+                if let Some(refusal) = self.outside_task(&paths) {
+                    return refusal;
+                }
                 let edits: Vec<FileEdit> = changes
                     .iter()
                     .map(|c| FileEdit {
@@ -1619,6 +1685,38 @@ impl Agent {
         }
     }
 
+    /// The result for a change to `paths` when one is outside a subagent's write task.
+    fn outside_task(&self, paths: &[&Path]) -> Option<String> {
+        let files = self.opts.writable.as_ref()?;
+        let outside: Vec<String> = paths
+            .iter()
+            .filter(|p| !files.iter().any(|f| f == *p))
+            .map(|p| {
+                p.strip_prefix(&self.opts.root)
+                    .unwrap_or(p)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        if outside.is_empty() {
+            return None;
+        }
+        let allowed: Vec<String> = files
+            .iter()
+            .map(|f| {
+                f.strip_prefix(&self.opts.root)
+                    .unwrap_or(f)
+                    .display()
+                    .to_string()
+            })
+            .collect();
+        Some(format!(
+            "[error] not changed: {} is outside this task, which may change only {}. Say in your report what else needs changing.",
+            outside.join(", "),
+            allowed.join(", ")
+        ))
+    }
+
     /// Time a command may take before the turn's limit (`None`: no limit), or the result
     /// for a command that cannot start any more.
     fn room(&self) -> Result<Option<Duration>, String> {
@@ -1701,6 +1799,7 @@ impl Agent {
                 Layout::Standard => "the edit and write tools",
                 Layout::Priors => "apply_patch",
             },
+            agent: None,
         };
         match ruling {
             Ruling::Allow => return None,
@@ -1896,6 +1995,9 @@ mod tests {
             user_instructions: UserInstructions::default(),
             rules: Rules::default(),
             layout: Layout::Standard,
+            toolset: Toolset::All,
+            writable: None,
+            subagents: None,
         }
     }
 
@@ -3490,5 +3592,209 @@ mod tests {
             steps[2]["extra"]["prompt_hash"],
             steps[3]["extra"]["prompt_hash"]
         );
+    }
+
+    /// What each subagent was sent, in the order they were made.
+    type Seen = Arc<Mutex<Vec<Arc<Mutex<Vec<StepRequest>>>>>>;
+
+    /// Subagents whose drivers play prepared steps, one script per subagent in the order
+    /// they are made, and keep what each was sent.
+    #[derive(Debug)]
+    struct Scripts {
+        scripts: Mutex<Vec<Vec<ChatCompletion>>>,
+        seen: Seen,
+    }
+
+    impl Subagents for Scripts {
+        fn driver(&self) -> Box<dyn ModelDriver> {
+            let steps = self.scripts.lock().unwrap().remove(0);
+            let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
+            self.seen.lock().unwrap().push(seen);
+            Box::new(driver)
+        }
+
+        fn level(&self) -> Option<String> {
+            Some("medium".into())
+        }
+    }
+
+    /// The main agent playing `main` in a project with a.txt and b.txt, its subagents
+    /// playing `scripts`; and what each subagent was sent.
+    fn delegating(main: Vec<ChatCompletion>, scripts: Vec<Vec<ChatCompletion>>) -> (Run, Seen) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        std::fs::write(root.join("b.txt"), "b\n").unwrap();
+        let (driver, seen) = played(main.into_iter().map(Step::from).collect());
+        let subagents = Arc::new(Mutex::new(Vec::new()));
+        // a tree with unreviewed changes: nobody may run the project's code, so no answer
+        // goes back for a build
+        let mut opts = options(&root, WorkspaceState::DIRTY, None);
+        opts.toolset = Toolset::Delegating;
+        opts.subagents = Some(Arc::new(Scripts {
+            scripts: Mutex::new(scripts),
+            seen: subagents.clone(),
+        }));
+        let agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        let r = Run {
+            agent,
+            seen,
+            root,
+            _dir: dir,
+        };
+        (r, subagents)
+    }
+
+    fn edit(path: &str, old: &str, new: &str) -> ChatCompletion {
+        calls(
+            &[(
+                "edit",
+                json!({"path": path, "old_string": old, "new_string": new}),
+            )],
+            FinishReason::ToolCalls,
+        )
+    }
+
+    #[tokio::test]
+    async fn delegate_runs_tasks_on_subagents_whose_changes_become_the_session_s() {
+        let tasks = json!({"tasks": [
+            {"title": "Find", "goal": "What does b.txt say?", "mode": "read"},
+            {"title": "Change a", "goal": "Make a.txt say two", "mode": "write", "files": ["a.txt"]}
+        ]});
+        let (mut r, subagents) = delegating(
+            vec![
+                calls(&[("delegate", tasks)], FinishReason::ToolCalls),
+                answer("Done."),
+            ],
+            vec![
+                vec![
+                    calls(
+                        &[("read", json!({"path": "b.txt"}))],
+                        FinishReason::ToolCalls,
+                    ),
+                    answer("b.txt says b."),
+                ],
+                vec![
+                    // outside its task first
+                    edit("b.txt", "b", "c"),
+                    edit("a.txt", "one", "two"),
+                    answer("Changed it."),
+                ],
+            ],
+        );
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("a.txt")).unwrap(),
+            "two\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("b.txt")).unwrap(),
+            "b\n"
+        );
+        // the main agent has delegate; its result is the reports
+        let main = r.seen.lock().unwrap();
+        assert_eq!(main[0].tools.last().unwrap().name, "delegate");
+        let report = tool_results(&r.agent)
+            .into_iter()
+            .find(|t| t.starts_with("[delegate]"))
+            .unwrap();
+        assert!(report.starts_with("[delegate] 2 of 2 tasks done:\n\n1. Find (read) answered after 2 steps:\nb.txt says b.\n\n2. Change a (write) answered after 3 steps:\nChanged it.\n[ognivo] NOT verified: a.txt changed"), "{report}");
+        assert!(report.ends_with("\nChanged: a.txt (+1 -1)."), "{report}");
+        // a reading subagent has no tool that changes files, and both know what they are
+        let subs = subagents.lock().unwrap();
+        let read = subs[0].lock().unwrap();
+        let names: Vec<&str> = read[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["read", "shell", "grep", "glob"]);
+        let ChatMessage::System(system) = &read[0].messages[0] else {
+            panic!()
+        };
+        assert!(system.contains("You are a subagent"), "{system}");
+        let ChatMessage::User(task) = &read[0].messages[2] else {
+            panic!()
+        };
+        assert!(task.starts_with("Task from the main agent: Find\n\nGoal: What does b.txt say?\n\nThis is a read task"), "{task}");
+        // the write task's edit outside its files did not happen
+        let write = subs[1].lock().unwrap();
+        let ChatMessage::Tool { content, .. } = write[1].messages.last().unwrap() else {
+            panic!()
+        };
+        assert!(
+            content.starts_with(
+                "[error] not changed: b.txt is outside this task, which may change only a.txt."
+            ),
+            "{content}"
+        );
+        // what it changed is the session's to review
+        let changes = r.agent.changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].shown, "a.txt");
+        assert_eq!(
+            (r.agent.stats.subagents, r.agent.stats.subagent_steps),
+            (2, 5)
+        );
+        let started: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SubagentStarted { index, write, .. } => Some((*index, write.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(started, [(0, None), (1, Some(vec!["a.txt".to_owned()]))]);
+        let finished: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::SubagentFinished {
+                    index,
+                    end,
+                    changed,
+                    ..
+                } => Some((*index, end.as_str(), changed.clone())),
+                _ => None,
+            })
+            .collect();
+        assert!(finished.contains(&(0, "answer", vec![])));
+        assert!(finished.contains(&(1, "answer", vec!["a.txt".to_owned()])));
+        assert!(events.iter().any(|e| matches!(e,
+            AgentEvent::Subagent { index: 1, event } if matches!(**event, AgentEvent::FileChanged { .. }))));
+    }
+
+    #[tokio::test]
+    async fn write_tasks_on_one_file_take_turns() {
+        let tasks = json!({"tasks": [
+            {"title": "First", "goal": "one to two", "mode": "write", "files": ["a.txt"]},
+            {"title": "Second", "goal": "two to three", "mode": "write", "files": ["./a.txt"]}
+        ]});
+        let (mut r, _) = delegating(
+            vec![
+                calls(&[("delegate", tasks)], FinishReason::ToolCalls),
+                answer("Done."),
+            ],
+            vec![
+                vec![edit("a.txt", "one", "two"), answer("Two.")],
+                vec![edit("a.txt", "two", "three"), answer("Three.")],
+            ],
+        );
+        let (end, _) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("a.txt")).unwrap(),
+            "three\n"
+        );
+    }
+
+    #[test]
+    fn without_subagents_there_is_no_delegate() {
+        let r = agent(vec![], WorkspaceState::CLEAN);
+        let mut opts = r.agent.opts.clone();
+        opts.toolset = Toolset::Delegating;
+        let a = Agent::new(
+            Box::new(played(vec![]).0),
+            Family::Harmony,
+            Box::new(NoUser),
+            opts,
+        );
+        assert!(a.tools.iter().all(|t| t.name != "delegate"));
     }
 }

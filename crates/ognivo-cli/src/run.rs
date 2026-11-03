@@ -260,7 +260,59 @@ fn show(e: &AgentEvent, jsonl: bool) {
         } => eprintln!("{}", compacted(*replaced, *kept, summary.as_deref()).0),
         AgentEvent::Refused { tool, reason } => eprintln!("✗ {tool}: {reason}"),
         AgentEvent::Notice { text } => eprintln!("· {text}"),
+        AgentEvent::SubagentStarted {
+            index,
+            title,
+            write,
+        } => {
+            let mode = match write {
+                Some(files) => format!("write {}", files.join(", ")),
+                None => "read".to_owned(),
+            };
+            eprintln!("\n⇉ {} {title} ({mode})", index + 1);
+        }
+        AgentEvent::Subagent { index, event } => {
+            if let Some(line) = subagent_line(event) {
+                eprintln!("  {}│ {line}", index + 1);
+            }
+        }
+        AgentEvent::SubagentFinished {
+            index,
+            end,
+            steps,
+            changed,
+        } => {
+            let changed = if changed.is_empty() {
+                String::new()
+            } else {
+                format!(", changed {}", changed.join(", "))
+            };
+            eprintln!("⇇ {} {end} after {steps} steps{changed}", index + 1);
+        }
     }
+}
+
+/// A subagent's event as a line of its own: its words come in its report.
+fn subagent_line(e: &AgentEvent) -> Option<String> {
+    Some(match e {
+        AgentEvent::ToolStarted {
+            tool, arguments, ..
+        } => {
+            let args: String = arguments.chars().take(120).collect();
+            format!("→ {tool} {args}")
+        }
+        AgentEvent::ToolFinished { result, .. } => {
+            format!("← {}", result.lines().next().unwrap_or_default())
+        }
+        AgentEvent::FileChanged { path, hunks, .. } => {
+            let removed: usize = hunks.iter().map(|h| h.removed.len()).sum();
+            let added: usize = hunks.iter().map(|h| h.added.len()).sum();
+            format!("· {path}: +{added} -{removed}")
+        }
+        AgentEvent::Refused { tool, reason } => format!("✗ {tool}: {reason}"),
+        AgentEvent::Notice { text } => format!("· {text}"),
+        _ => return None,
+    })
 }
 
 /// Podman and Docker mark their containers with these files.

@@ -215,6 +215,31 @@ impl Journal {
         self.unsaved_rest = true;
     }
 
+    /// Takes in what another journal of the same project holds, a subagent's: its changes
+    /// count as this one's, from before the first of them on both sides.
+    pub fn absorb(&mut self, other: Journal) {
+        for (path, theirs) in other.files {
+            self.unsaved_files.insert(path.clone());
+            match self.files.entry(path) {
+                Slot::Occupied(mut slot) => {
+                    let e = slot.get_mut();
+                    e.drifted |=
+                        theirs.drifted || theirs.base.as_deref() != Some(e.current.as_slice());
+                    e.current = theirs.current;
+                    if e.base.as_deref() == Some(e.current.as_slice()) {
+                        slot.remove();
+                    }
+                }
+                Slot::Vacant(slot) => {
+                    slot.insert(theirs);
+                }
+            }
+        }
+        self.unsaved_rest |= !other.created_dirs.is_empty() || !other.side_effects.is_empty();
+        self.created_dirs.extend(other.created_dirs);
+        self.side_effects.extend(other.side_effects);
+    }
+
     /// Nothing is unreviewed: every file the agent changed is as it was, no command with
     /// side effects ran, and nothing came from before the session.
     pub fn is_clean(&self) -> bool {
@@ -433,6 +458,27 @@ mod tests {
             p.journal.revert(&a, false),
             Err(JournalError::NotChanged(_))
         ));
+    }
+
+    #[test]
+    fn a_subagent_s_changes_become_the_session_s_from_before_either_touched_them() {
+        let mut p = Project::new();
+        p.write("a.txt", "one\nTWO\n");
+        // a subagent's own journal, with a change to the same file and a new one
+        let main = std::mem::replace(&mut p.journal, Journal::new(false));
+        p.write("a.txt", "one\nTWO\nthree\n");
+        p.write("b.txt", "b\n");
+        p.journal.side_effect("touch c");
+        let sub = std::mem::replace(&mut p.journal, main);
+        p.journal.absorb(sub);
+        let changes = p.journal.changes();
+        let shown: Vec<&str> = changes.iter().map(|c| c.shown.as_str()).collect();
+        assert_eq!(shown, ["a.txt", "b.txt"]);
+        // a.txt reverts to what it had before the session's first edit, not the subagent's
+        assert!(!changes[0].drifted);
+        p.journal.revert(&p.root.join("a.txt"), false).unwrap();
+        assert_eq!(p.read("a.txt").as_deref(), Some("one\ntwo\n"));
+        assert_eq!(p.journal.side_effects(), ["touch c"]);
     }
 
     #[test]

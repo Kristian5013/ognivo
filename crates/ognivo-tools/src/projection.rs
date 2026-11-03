@@ -16,6 +16,10 @@
 //! `container.exec` with an argument list, and `repo_browser.open_file`, `search`,
 //! `print_tree` and `apply_patch`, the layout that reproduced OpenAI's SWE-bench score
 //! (docs/research/2026-10-29/gpt-oss.md §D, layout A). They map to the same calls.
+//!
+//! An agent gets all of a layout's tools or some of them ([`Toolset`]): the user's agent
+//! with subagents also gets `delegate`, and a subagent that only reads none that changes
+//! files.
 
 use std::time::Duration;
 
@@ -60,6 +64,24 @@ pub enum Call {
         pattern: String,
         path: Option<String>,
     },
+    /// Tasks for subagents, which work on them at the same time.
+    Delegate {
+        tasks: Vec<Task>,
+    },
+}
+
+/// One task of `delegate`, for one subagent.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Task {
+    pub title: String,
+    /// What to find out or do, and what the report must say.
+    pub goal: String,
+    /// What the subagent needs to know, which it does not see otherwise.
+    pub context: Option<String>,
+    /// It may change files: those in `files`, and no others.
+    pub write: bool,
+    /// For a write task the files it may change; for a read task where to start.
+    pub files: Vec<String>,
 }
 
 impl Call {
@@ -72,6 +94,7 @@ impl Call {
             Call::Shell { .. } => ToolId::Bash,
             Call::Grep { .. } => ToolId::Grep,
             Call::Glob { .. } => ToolId::Glob,
+            Call::Delegate { .. } => ToolId::Delegate,
         }
     }
 }
@@ -96,6 +119,8 @@ pub enum ArgError {
         arg: String,
         want: &'static str,
     },
+    #[error("{tool}: {why}")]
+    Invalid { tool: String, why: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +161,69 @@ pub enum Layout {
     /// with a namespace is one of the model's built-in tools, which the Native path declares
     /// in the system message; gpt-oss only, and the Native path only.
     Priors,
+}
+
+/// Which of a layout's tools an agent gets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Toolset {
+    /// Every tool: the user's agent, or a subagent that may change files.
+    #[default]
+    All,
+    /// Every tool and `delegate`: the user's agent with subagents.
+    Delegating,
+    /// None that changes files: a subagent that only reads. Its commands still run, under
+    /// the same approvals.
+    Reading,
+}
+
+impl Toolset {
+    fn has(self, id: &ToolId) -> bool {
+        match self {
+            Toolset::All | Toolset::Delegating => true,
+            Toolset::Reading => !matches!(id, ToolId::Edit | ToolId::Write | ToolId::Patch),
+        }
+    }
+}
+
+/// Tasks one `delegate` call may give.
+pub const MAX_TASKS: usize = 6;
+
+const DELEGATE_DOC: &str = "Give tasks to subagents. They work at the same time, each in a fresh context with your tools but this one, and each returns a report of what it found or did; you get the reports together. Worth it for independent pieces of work: finding things in different parts of the project, reviewing, running tests. A subagent knows only what its task says, so give it the goal and everything it needs. A read task changes no file; a write task may change only the files it lists, and tasks that list the same file run one after another.";
+
+/// `delegate`'s parameters, in the order the model writes them.
+fn delegate_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "tasks": {
+                "type": "array",
+                "description": format!("The tasks, at most {MAX_TASKS}."),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "A few words naming the task."},
+                        "goal": {"type": "string", "description": "What to find out or do, and what the report must say."},
+                        "context": {"type": "string", "description": "What the subagent needs to know: file paths, findings so far, constraints."},
+                        "mode": {"type": "string", "enum": ["read", "write"], "description": "read: it reads and runs commands but changes no file; write: it may also change the files listed."},
+                        "files": {"type": "array", "items": {"type": "string"}, "description": "write: the only files it may change; read: where to start looking."}
+                    },
+                    "required": ["title", "goal", "mode"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["tasks"],
+        "additionalProperties": false
+    })
+}
+
+/// `delegate` by the name each family knows such a tool by: Claude Code's for Qwen.
+fn delegate_name(family: Family) -> &'static str {
+    match family {
+        Family::QwenXml => "Task",
+        Family::Harmony | Family::Gemma4 => "delegate",
+    }
 }
 
 /// One argument: the model-facing name, the canonical field it fills, and its doc line.
@@ -711,8 +799,14 @@ fn table(family: Family, layout: Layout) -> &'static [Tool] {
 /// The tool declarations for `family` in `layout`, in declaration order (sent with
 /// serde_json's `preserve_order`, so the order on the wire is this order).
 pub fn declarations(family: Family, layout: Layout) -> Vec<ToolDecl> {
-    table(family, layout)
+    declarations_for(family, layout, Toolset::All)
+}
+
+/// The declarations of `toolset`'s tools, `delegate` last.
+pub fn declarations_for(family: Family, layout: Layout, toolset: Toolset) -> Vec<ToolDecl> {
+    let mut decls: Vec<ToolDecl> = table(family, layout)
         .iter()
+        .filter(|t| toolset.has(&t.id))
         .map(|t| {
             let mut props = Map::new();
             for a in t.args {
@@ -737,7 +831,15 @@ pub fn declarations(family: Family, layout: Layout) -> Vec<ToolDecl> {
                 }),
             }
         })
-        .collect()
+        .collect();
+    if toolset == Toolset::Delegating {
+        decls.push(ToolDecl {
+            name: delegate_name(family).into(),
+            description: DELEGATE_DOC.into(),
+            parameters: delegate_parameters(),
+        });
+    }
+    decls
 }
 
 /// The model-facing name of a tool, for messages about it.
@@ -755,10 +857,30 @@ pub fn parse(
     name: &str,
     arguments: &str,
 ) -> Result<Call, ArgError> {
-    let tools = table(family, layout);
+    parse_for(family, layout, Toolset::All, name, arguments)
+}
+
+/// [`parse`] for an agent with `toolset`: a tool it does not have is unknown.
+pub fn parse_for(
+    family: Family,
+    layout: Layout,
+    toolset: Toolset,
+    name: &str,
+    arguments: &str,
+) -> Result<Call, ArgError> {
+    if toolset == Toolset::Delegating && name == delegate_name(family) {
+        return delegate(name, arguments);
+    }
+    let tools: Vec<&Tool> = table(family, layout)
+        .iter()
+        .filter(|t| toolset.has(&t.id))
+        .collect();
     let Some(tool) = tools.iter().find(|t| t.name == name) else {
-        let known = tools.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
-        return Err(ArgError::UnknownTool(name.into(), known));
+        let mut known: Vec<&str> = tools.iter().map(|t| t.name).collect();
+        if toolset == Toolset::Delegating {
+            known.push(delegate_name(family));
+        }
+        return Err(ArgError::UnknownTool(name.into(), known.join(", ")));
     };
     let tname = || tool.name.to_owned();
     let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(arguments) else {
@@ -871,6 +993,86 @@ pub fn parse(
     })
 }
 
+/// `delegate`'s tasks, checked: each has a title and a goal, a write task its files.
+fn delegate(tool: &str, arguments: &str) -> Result<Call, ArgError> {
+    let invalid = |why: String| ArgError::Invalid {
+        tool: tool.to_owned(),
+        why,
+    };
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(arguments) else {
+        return Err(ArgError::NotObject { tool: tool.into() });
+    };
+    if let Some(key) = obj.keys().find(|k| *k != "tasks") {
+        return Err(ArgError::Unknown {
+            tool: tool.into(),
+            arg: key.clone(),
+            known: "tasks".into(),
+        });
+    }
+    let Some(Value::Array(list)) = obj.get("tasks") else {
+        return Err(ArgError::Missing {
+            tool: tool.into(),
+            arg: "tasks".into(),
+        });
+    };
+    if list.is_empty() || list.len() > MAX_TASKS {
+        return Err(invalid(format!(
+            "give 1 to {MAX_TASKS} tasks, not {}",
+            list.len()
+        )));
+    }
+    let mut tasks = Vec::new();
+    for (i, t) in list.iter().enumerate() {
+        let n = i + 1;
+        let Value::Object(t) = t else {
+            return Err(invalid(format!("task {n} is not an object")));
+        };
+        let text = |key: &str| {
+            t.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        let (Some(title), Some(goal)) = (text("title"), text("goal")) else {
+            return Err(invalid(format!("task {n} needs a title and a goal")));
+        };
+        let write = match t.get("mode").and_then(Value::as_str) {
+            Some("read") | None => false,
+            Some("write") => true,
+            Some(other) => {
+                return Err(invalid(format!(
+                    "task {n}: mode is read or write, not {other:?}"
+                )));
+            }
+        };
+        let files: Vec<String> = match t.get("files") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) if a.iter().all(Value::is_string) => a
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            Some(_) => return Err(invalid(format!("task {n}: files is a list of paths"))),
+        };
+        if write && files.is_empty() {
+            return Err(invalid(format!(
+                "task {n} is a write task: list the files it may change"
+            )));
+        }
+        tasks.push(Task {
+            title,
+            goal,
+            context: text("context"),
+            write,
+            files,
+        });
+    }
+    Ok(Call::Delegate { tasks })
+}
+
 /// The words that call apply_patch in a command line.
 const PATCH_WORDS: [&str; 3] = ["apply_patch", "applypatch", "repo_browser.apply_patch"];
 
@@ -967,6 +1169,77 @@ fn coerce(v: &Value, kind: Kind) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegate_comes_only_with_subagents_and_its_tasks_are_checked() {
+        let h = Family::Harmony;
+        let names = |t: Toolset| -> Vec<String> {
+            declarations_for(h, Layout::Standard, t)
+                .into_iter()
+                .map(|d| d.name)
+                .collect()
+        };
+        assert_eq!(names(Toolset::Delegating).last().unwrap(), "delegate");
+        assert!(!names(Toolset::All).iter().any(|n| n == "delegate"));
+        // a subagent that only reads has no tool that changes files
+        assert_eq!(names(Toolset::Reading), ["read", "shell", "grep", "glob"]);
+        assert!(matches!(
+            parse_for(h, Layout::Standard, Toolset::Reading, "edit", "{}"),
+            Err(ArgError::UnknownTool(..))
+        ));
+        assert!(matches!(
+            parse(h, Layout::Standard, "delegate", r#"{"tasks":[]}"#),
+            Err(ArgError::UnknownTool(..))
+        ));
+        let args = r#"{"tasks":[
+            {"title":"Find the loader","goal":"Where is the config read?","mode":"read","files":["src"]},
+            {"title":"Rename","goal":"Rename x to y","context":"x is in a.rs","mode":"write","files":["src/a.rs"]}
+        ]}"#;
+        let call = parse_for(h, Layout::Standard, Toolset::Delegating, "delegate", args).unwrap();
+        assert_eq!(
+            call,
+            Call::Delegate {
+                tasks: vec![
+                    Task {
+                        title: "Find the loader".into(),
+                        goal: "Where is the config read?".into(),
+                        context: None,
+                        write: false,
+                        files: vec!["src".into()],
+                    },
+                    Task {
+                        title: "Rename".into(),
+                        goal: "Rename x to y".into(),
+                        context: Some("x is in a.rs".into()),
+                        write: true,
+                        files: vec!["src/a.rs".into()],
+                    },
+                ]
+            }
+        );
+        for bad in [
+            r#"{"tasks":[]}"#,
+            r#"{"tasks":[{"title":"t","goal":"g","mode":"write"}]}"#,
+            r#"{"tasks":[{"title":" ","goal":"g","mode":"read"}]}"#,
+            r#"{"tasks":[{"title":"t","goal":"g","mode":"fast"}]}"#,
+        ] {
+            let e = parse_for(h, Layout::Standard, Toolset::Delegating, "delegate", bad);
+            assert!(matches!(e, Err(ArgError::Invalid { .. })), "{bad}: {e:?}");
+        }
+        let many = format!(
+            r#"{{"tasks":[{}]}}"#,
+            [r#"{"title":"t","goal":"g","mode":"read"}"#; MAX_TASKS + 1].join(",")
+        );
+        assert!(parse_for(h, Layout::Standard, Toolset::Delegating, "delegate", &many).is_err());
+        // Qwen knows the tool by Claude Code's name
+        assert_eq!(
+            declarations_for(Family::QwenXml, Layout::Standard, Toolset::Delegating)
+                .last()
+                .unwrap()
+                .name,
+            "Task"
+        );
+    }
 
     #[test]
     fn gemma_keys_sort_into_generation_order() {

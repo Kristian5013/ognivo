@@ -1,0 +1,26 @@
+# Three slow suites: one after another they take 24 s of commands, at the same time 8 s.
+category = "parallel"
+prompt = "The project has three test suites: tests/storage.sh, tests/network.sh and tests/parser.sh. Run each of them and tell me which fail, with the message they fail with."
+max_steps = 20
+
+[files]
+"tests/storage.sh" = '''
+#!/bin/sh
+sleep 8
+echo "storage: 12 tests passed"
+'''
+"tests/network.sh" = '''
+#!/bin/sh
+sleep 8
+echo "network: 9 tests passed, 1 failed: timeout_retry expected 3 got 4"
+exit 1
+'''
+"tests/parser.sh" = '''
+#!/bin/sh
+sleep 8
+echo "parser: 20 tests passed"
+'''
+
+[expect]
+answer = ["network", "timeout_retry"]
+tools = ["Bash"]

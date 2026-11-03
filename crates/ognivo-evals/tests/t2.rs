@@ -85,6 +85,8 @@ async fn a_scripted_model_passes_and_fails_and_is_counted() {
         n_ctx: None,
         native: false,
         layout: Default::default(),
+        subagents: false,
+        slots: 1,
     };
     let good = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(good.passed, "{:?}", good.failures);
@@ -169,6 +171,8 @@ async fn a_cut_generation_counts_against_parse_ok_and_runs_nothing() {
         n_ctx: None,
         native: false,
         layout: Default::default(),
+        subagents: false,
+        slots: 1,
     };
     let r = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(r.passed, "{:?}", r.failures);
@@ -205,6 +209,8 @@ async fn a_refused_call_is_not_a_tool_that_ran() {
         n_ctx: None,
         native: false,
         layout: Default::default(),
+        subagents: false,
+        slots: 1,
     };
     let ran = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(ran.passed, "{:?}", ran.failures);

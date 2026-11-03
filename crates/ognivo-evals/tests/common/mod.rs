@@ -255,6 +255,9 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         user_instructions: UserInstructions::default(),
         rules: Rules::default(),
         layout: Default::default(),
+        toolset: Default::default(),
+        writable: None,
+        subagents: None,
     }
 }
 

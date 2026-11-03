@@ -1,8 +1,10 @@
 //! How `ognivo chat` shows a turn (docs/architecture.md §10): the model's words as they
 //! stream, one line per call with what came of it, the diff of each change, and a line for
-//! each long stretch of thinking. Text from the model and the tools goes through
-//! [`printable`] first.
+//! each long stretch of thinking. Subagents work at the same time, so each of their calls
+//! is one line, numbered by its task, once it is done. Text from the model and the tools
+//! goes through [`printable`] first.
 
+use std::collections::HashMap;
 use std::io::{IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -36,6 +38,15 @@ pub struct View {
     thinking: Option<(Instant, Option<u64>)>,
     /// The call that is running.
     call: Option<Running>,
+    /// The subagents of the running `delegate`, by their tasks' numbers.
+    subagents: HashMap<usize, Subagent>,
+}
+
+#[derive(Debug, Default)]
+struct Subagent {
+    title: String,
+    /// The tool and the line of its running call.
+    call: Option<(String, String)>,
 }
 
 #[derive(Debug)]
@@ -57,6 +68,7 @@ impl View {
             show_reasoning,
             thinking: None,
             call: None,
+            subagents: HashMap::new(),
         }
     }
 
@@ -121,8 +133,106 @@ impl View {
                 let (line, paint) = compacted(replaced, kept, summary.as_deref());
                 self.screen.line(&line, paint);
             }
+            AgentEvent::SubagentStarted {
+                index,
+                title,
+                write,
+            } => {
+                let mode = match &write {
+                    Some(files) => format!("write {}", files.join(", ")),
+                    None => "read".to_owned(),
+                };
+                let line = format!("⇉ {} «{}» · {mode}", index + 1, printable(&title));
+                self.screen.line(&short(&line, LINE_CHARS), Paint::Plain);
+                self.subagents.insert(index, Subagent { title, call: None });
+            }
+            AgentEvent::Subagent { index, event } => self.subagent(index, *event),
+            AgentEvent::SubagentFinished {
+                index,
+                end,
+                steps,
+                changed,
+            } => {
+                let title = self
+                    .subagents
+                    .remove(&index)
+                    .map(|s| s.title)
+                    .unwrap_or_default();
+                let how = match end.as_str() {
+                    "answer" => format!("reported after {steps} steps"),
+                    "step_limit" => format!("ran out of its {steps} steps"),
+                    "time_limit" => "out of time".to_owned(),
+                    "stuck" => format!("stopped after {steps} steps"),
+                    _ => "failed".to_owned(),
+                };
+                let mut line = format!("⇇ {} «{}» · {how}", index + 1, printable(&title));
+                if !changed.is_empty() {
+                    line.push_str(&format!(" · changed {}", changed.join(", ")));
+                }
+                let paint = if end == "answer" {
+                    Paint::Plain
+                } else {
+                    Paint::Yellow
+                };
+                self.screen.line(&short(&line, LINE_CHARS), paint);
+            }
             AgentEvent::Reasoning { .. } => {}
         }
+    }
+
+    /// A subagent's event: a line for each call once it is done, its changes, refusals
+    /// and notes; its words come in its report.
+    fn subagent(&mut self, index: usize, e: AgentEvent) {
+        let n = index + 1;
+        let line = match e {
+            AgentEvent::ToolStarted {
+                tool,
+                arguments,
+                call,
+                ..
+            } => {
+                let name = match &call {
+                    Some(c) => name_of(c).to_owned(),
+                    None => tool,
+                };
+                let line = self.title(&name, &arguments, call.as_ref());
+                self.subagents.entry(index).or_default().call = Some((name, line));
+                return;
+            }
+            AgentEvent::ToolFinished { result, .. } => {
+                let Some((name, line)) = self.subagents.entry(index).or_default().call.take()
+                else {
+                    return;
+                };
+                let (status, paint) = match Status::of(&name, &result) {
+                    Status::Refused => ("refused".to_owned(), Paint::Yellow),
+                    Status::Error(e) => (format!("✗ {e}"), Paint::Yellow),
+                    Status::Done(s) | Status::Note(s) => (s.to_owned(), Paint::Dim),
+                    Status::Failed { status, .. } => (status.to_owned(), Paint::Yellow),
+                };
+                (format!("{line} · {status}"), paint)
+            }
+            AgentEvent::FileChanged {
+                path,
+                created,
+                hunks,
+            } => (
+                format!("  {path} · {}", counts(created, &hunks)),
+                Paint::Dim,
+            ),
+            AgentEvent::Refused { reason, .. } => (format!("✗ {reason}"), Paint::Yellow),
+            AgentEvent::Notice { text } => (
+                format!("· {}", text.strip_prefix("[ognivo] ").unwrap_or(&text)),
+                Paint::Dim,
+            ),
+            AgentEvent::Compacting { .. } => ("· compacting".to_owned(), Paint::Dim),
+            _ => return,
+        };
+        let (text, paint) = line;
+        self.screen.line(
+            &short(&format!("  {n}│ {}", printable(&text)), LINE_CHARS),
+            paint,
+        );
     }
 
     fn reasoning(&mut self, text: &str) {
@@ -206,6 +316,11 @@ impl View {
                 Some(p) => format!("{pattern} in {}", self.path(p)),
                 None => pattern.clone(),
             },
+            Some(Call::Delegate { tasks }) => tasks
+                .iter()
+                .map(|t| format!("«{}»", t.title))
+                .collect::<Vec<_>>()
+                .join(", "),
             // the files a patch names, from its headers
             Some(Call::Patch { patch }) => patch
                 .lines()
@@ -304,6 +419,7 @@ fn name_of(call: &Call) -> &'static str {
         Call::Shell { .. } => "shell",
         Call::Grep { .. } => "grep",
         Call::Glob { .. } => "glob",
+        Call::Delegate { .. } => "delegate",
     }
 }
 
@@ -335,6 +451,9 @@ impl<'a> Status<'a> {
         }
         if first.starts_with("[edit: already applied]") {
             return Status::Done("already applied");
+        }
+        if let Some(done) = first.strip_prefix("[delegate] ") {
+            return Status::Done(done.trim_end_matches(':'));
         }
         let Some(inside) = first
             .strip_prefix('[')

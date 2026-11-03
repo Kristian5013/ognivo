@@ -203,6 +203,11 @@ impl Builder {
                 json!({"files": d["files"], "skipped": d["skipped"]}),
             ),
             "restarted" => self.attach("restarts", d["reason"].clone()),
+            // the session a subagent of the step's delegate is kept in, with its own trace
+            "subagent_session" => self.attach(
+                "subagents",
+                json!({"session": d["session"], "task": d["task"]}),
+            ),
             "compacted" => {
                 let note = self
                     .steps
@@ -225,8 +230,8 @@ impl Builder {
                 }
                 self.turns.push(end);
             }
-            // tool_started, refused, compacting, and streamed text or reasoning: the
-            // generation and its results say it all
+            // tool_started, refused, compacting, the subagents' start and end, and streamed
+            // text or reasoning: the generation and its results say it all
             _ => {}
         }
     }

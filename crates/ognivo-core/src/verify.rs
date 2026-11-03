@@ -89,6 +89,11 @@ impl Ledger {
         self.entries.push(Entry::Refused(command.to_owned()));
     }
 
+    /// What happened in another ledger since, a subagent's turn.
+    pub fn extend(&mut self, other: Ledger) {
+        self.entries.extend(other.entries);
+    }
+
     /// The builds and tests of the turn, in order.
     pub fn runs(&self) -> impl Iterator<Item = &Run> {
         self.entries.iter().filter_map(|e| match e {

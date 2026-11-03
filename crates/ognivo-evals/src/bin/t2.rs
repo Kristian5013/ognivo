@@ -1,11 +1,13 @@
 //! T2-mini against a running llama-server:
 //!
 //!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]
+//!      [--subagents]
 //!
 //! Runs every scenario of `evals/t2/scenarios` (or those whose id or category holds TEXT)
 //! with each seed, one line per run, then the summary; `--native` runs them on the Native
 //! path, and the summary names the profile `ID+native`. `--priors` gives gpt-oss the tools
-//! of its training (`ID+native+priors`). DIR keeps the results
+//! of its training (`ID+native+priors`), `--subagents` lets the agent delegate
+//! (`…+subagents`). DIR keeps the results
 //! (`results.jsonl`, one run per line), the summary (`summary.json`), the sessions
 //! (`sessions.db`), their trajectories (`traces/`) and the projects of failed runs
 //! (`work/`). Runs already in `results.jsonl` are not run again, so an interrupted suite
@@ -30,12 +32,13 @@ struct Args {
     only: Option<String>,
     native: bool,
     priors: bool,
+    subagents: bool,
 }
 
 fn args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut url, mut profile, mut out, mut seeds, mut only) = (None, None, None, vec![1], None);
-    let (mut native, mut priors) = (false, false);
+    let (mut native, mut priors, mut subagents) = (false, false, false);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -45,6 +48,7 @@ fn args() -> Result<Args, String> {
             "--only" => only = Some(value()?),
             "--native" => native = true,
             "--priors" => priors = true,
+            "--subagents" => subagents = true,
             "--seeds" => {
                 seeds = value()?
                     .split(',')
@@ -70,6 +74,7 @@ fn args() -> Result<Args, String> {
         only,
         native,
         priors,
+        subagents,
     })
 }
 
@@ -79,7 +84,7 @@ async fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]"
+                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]] [--subagents]"
             );
             return ExitCode::from(2);
         }
@@ -157,13 +162,18 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         } else {
             Layout::Standard
         },
+        subagents: a.subagents,
+        slots: props.total_slots.unwrap_or(1),
     };
     // the night report tells the paths apart by this name
-    let name = match (a.native, a.priors) {
+    let mut name = match (a.native, a.priors) {
         (true, true) => format!("{}+native+priors", p.id),
         (true, false) => format!("{}+native", p.id),
         _ => p.id.clone(),
     };
+    if a.subagents {
+        name.push_str("+subagents");
+    }
     let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
     let ambiguous = t2::ambiguous(&scenarios);
     for s in &scenarios {

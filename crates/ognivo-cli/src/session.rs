@@ -5,10 +5,11 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::Args;
-use ognivo_core::agent::{Agent, AgentOptions, Approver, Layout};
+use ognivo_core::agent::{Agent, AgentOptions, Approver, Layout, SameModel, Subagents, Toolset};
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
@@ -70,6 +71,10 @@ pub struct SessionArgs {
     /// repo_browser with apply_patch, instead of ognivo's own
     #[arg(long, requires = "native")]
     pub priors: bool,
+    /// Let the agent hand tasks to subagents (delegate): they work at the same time, at
+    /// medium reasoning, each step taking its turn at the server's slots
+    #[arg(long)]
+    pub subagents: bool,
 }
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
@@ -286,18 +291,36 @@ impl SessionArgs {
             }],
             Some(data_dir.join("slots")),
         );
-        let (driver, answer_now): (Box<dyn ModelDriver>, _) = if self.native {
-            // the system message holds the day the session began, and must keep it
+        // the system message holds the day the session began, and must keep it
+        let date = self.native.then(|| {
             let began = stored.map_or_else(native::now, |r| r.created.max(0) as u64 / 1000);
-            let date = native::utc_date(began);
-            let d = NativeDriver::new(server, profile, level.as_deref(), self.slot, &date)
-                .map_err(Failure::usage)?;
-            let answer_now = d.answer_now();
-            (Box::new(d), Some(answer_now))
+            native::utc_date(began)
+        });
+        let subagents: Option<Arc<dyn Subagents>> = if self.subagents {
+            let model = SameModel::new(
+                server.clone(),
+                profile.clone(),
+                date.clone(),
+                level.as_deref(),
+                router.clone(),
+            )
+            .map_err(Failure::usage)?;
+            Some(Arc::new(model))
         } else {
-            let d = ChatDriver::new(server, profile, level.as_deref(), self.slot)
-                .map_err(Failure::usage)?;
-            (Box::new(d), None)
+            None
+        };
+        let (driver, answer_now): (Box<dyn ModelDriver>, _) = match &date {
+            Some(date) => {
+                let d = NativeDriver::new(server, profile, level.as_deref(), self.slot, date)
+                    .map_err(Failure::usage)?;
+                let answer_now = d.answer_now();
+                (Box::new(d), Some(answer_now))
+            }
+            None => {
+                let d = ChatDriver::new(server, profile, level.as_deref(), self.slot)
+                    .map_err(Failure::usage)?;
+                (Box::new(d), None)
+            }
         };
         // the user's agent: its steps never wait for a turn
         let driver: Box<dyn ModelDriver> =
@@ -337,6 +360,13 @@ impl SessionArgs {
                 } else {
                     Layout::Standard
                 },
+                toolset: if subagents.is_some() {
+                    Toolset::Delegating
+                } else {
+                    Toolset::All
+                },
+                writable: None,
+                subagents,
             },
             changed,
             pending: loaded.pending,

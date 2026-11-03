@@ -10,15 +10,21 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, Layout, NoUser, Stats, TurnEnd};
+use ognivo_core::agent::{
+    Agent, AgentEvent, AgentOptions, Layout, NoUser, SameModel, Stats, Subagents, Toolset, TurnEnd,
+};
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::Rules;
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
-use ognivo_models::{ChatDriver, DriverError, ModelDriver, ModelProfile, NativeDriver, native};
+use ognivo_models::{
+    ChatDriver, DriverError, Endpoint, ModelDriver, ModelProfile, NativeDriver, Priority, Router,
+    Scheduled, native,
+};
 use ognivo_store::{NewSession, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,6 +59,8 @@ pub enum Category {
     Context,
     /// The project's own commands.
     Shell,
+    /// A task of independent parts, which subagents can do at the same time.
+    Parallel,
 }
 
 impl Category {
@@ -66,6 +74,7 @@ impl Category {
             Category::Loop => "loop",
             Category::Context => "context",
             Category::Shell => "shell",
+            Category::Parallel => "parallel",
         }
     }
 }
@@ -271,6 +280,9 @@ pub struct Target {
     pub native: bool,
     /// Which tools the model gets.
     pub layout: Layout,
+    /// The agent may hand tasks to subagents, which share the server's `slots`.
+    pub subagents: bool,
+    pub slots: u32,
 }
 
 /// One scenario run with one seed.
@@ -352,13 +364,49 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     };
     let session = Session::create(store, &new).map_err(|e| e.to_string())?;
     let server = LlamaServer::new(&t.url, None).map_err(|e| e.to_string())?;
-    let driver: Box<dyn ModelDriver> = if t.native {
-        let date = native::utc_date(native::now());
-        let d = NativeDriver::new(server, t.profile.clone(), None, Some(0), &date);
-        Box::new(d.map_err(|e| e.to_string())?)
+    let date = t.native.then(|| native::utc_date(native::now()));
+    // alone the agent keeps slot 0, as it always did; with subagents the server places
+    // every request, and its prompt cache keeps each conversation (docs/architecture.md §4)
+    let slot = (!t.subagents).then_some(0);
+    let router = Router::new(
+        vec![Endpoint {
+            server: server.clone(),
+            profile: t.profile.id.clone(),
+            slots: t.slots,
+        }],
+        None,
+    );
+    let subagents: Option<Arc<dyn Subagents>> = if t.subagents {
+        let model = SameModel::new(
+            server.clone(),
+            t.profile.clone(),
+            date.clone(),
+            None,
+            router.clone(),
+        );
+        Some(Arc::new(model.map_err(|e| e.to_string())?))
     } else {
-        let d = ChatDriver::new(server, t.profile.clone(), None, Some(0));
-        Box::new(d.map_err(|e| e.to_string())?)
+        None
+    };
+    let driver: Box<dyn ModelDriver> = match &date {
+        Some(date) => {
+            let d = NativeDriver::new(server, t.profile.clone(), None, slot, date);
+            Box::new(d.map_err(|e| e.to_string())?)
+        }
+        None => {
+            let d = ChatDriver::new(server, t.profile.clone(), None, slot);
+            Box::new(d.map_err(|e| e.to_string())?)
+        }
+    };
+    let driver: Box<dyn ModelDriver> = if t.subagents {
+        Box::new(Scheduled::new(
+            driver,
+            router,
+            &t.profile.id,
+            Priority::Main,
+        ))
+    } else {
+        driver
     };
     let opts = AgentOptions {
         root: root.clone(),
@@ -372,6 +420,13 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         user_instructions: UserInstructions::default(),
         rules: Rules::default(),
         layout: t.layout,
+        toolset: if subagents.is_some() {
+            Toolset::Delegating
+        } else {
+            Toolset::All
+        },
+        writable: None,
+        subagents,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);
@@ -408,11 +463,26 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         let store = Store::open(&db).map_err(|e| e.to_string())?;
         let events = store.events(id).map_err(|e| e.to_string())?;
         counts.add(&count(&events));
-        if let Ok(trace) = ognivo_core::trace::atif(&store, id) {
-            let dir = out.join("traces");
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let text = serde_json::to_string_pretty(&trace).unwrap_or_default();
-            std::fs::write(dir.join(format!("{name}.json")), text).map_err(|e| e.to_string())?;
+        // the subagents' sessions, which the session's log names: their generations count
+        // too, and each has a trajectory of its own
+        let children: Vec<i64> = events
+            .iter()
+            .filter(|e| e.kind == "subagent_session")
+            .filter_map(|e| serde_json::from_str::<Value>(&e.data).ok()?["session"].as_i64())
+            .collect();
+        let dir = out.join("traces");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut traces = vec![(id, format!("{name}.json"))];
+        for (n, child) in children.into_iter().enumerate() {
+            let events = store.events(child).map_err(|e| e.to_string())?;
+            counts.add(&count(&events));
+            traces.push((child, format!("{name}.sub{}.json", n + 1)));
+        }
+        for (session, file) in traces {
+            if let Ok(trace) = ognivo_core::trace::atif(&store, session) {
+                let text = serde_json::to_string_pretty(&trace).unwrap_or_default();
+                std::fs::write(dir.join(file), text).map_err(|e| e.to_string())?;
+            }
         }
     }
     let passed = failures.is_empty();

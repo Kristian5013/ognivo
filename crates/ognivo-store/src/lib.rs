@@ -304,6 +304,15 @@ impl Store {
         Self::init(Connection::open(path)?)
     }
 
+    /// Another connection to this store's file, for a session kept beside this one's;
+    /// `None` for a store in memory.
+    pub fn reopen(&self) -> Result<Option<Self>, StoreError> {
+        match self.conn.path() {
+            Some(path) if !path.is_empty() => Self::open(Path::new(path)).map(Some),
+            _ => Ok(None),
+        }
+    }
+
     /// A store that lives in memory, for tests.
     pub fn memory() -> Result<Self, StoreError> {
         Self::init(Connection::open_in_memory()?)

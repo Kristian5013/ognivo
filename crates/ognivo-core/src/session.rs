@@ -172,6 +172,32 @@ impl Session {
         self.failure.take()
     }
 
+    /// A session of its own for a subagent of this one, in the same store: its kind is
+    /// `subagent`, its project, profile and server this one's. Each names the other in its
+    /// log. `None` when the store is in memory or fails.
+    pub(crate) fn subagent(
+        &mut self,
+        level: Option<String>,
+        seed: u32,
+        task: &str,
+    ) -> Option<Session> {
+        let row = self.store.session(self.id).ok()??;
+        let store = self.store.reopen().ok()??;
+        let new = NewSession {
+            kind: "subagent".into(),
+            root: row.root,
+            profile: row.profile,
+            level: level.or(row.level),
+            server: row.server,
+            seed,
+        };
+        let mut child = Session::create(store, &new).ok()?;
+        child.append(json!({"type": "parent", "session": self.id, "task": task}));
+        self.flush();
+        self.append(json!({"type": "subagent_session", "session": child.id, "task": task}));
+        Some(child)
+    }
+
     /// Ends the keeping of the session: one without a turn leaves nothing behind.
     pub fn close(mut self) {
         self.flush();
