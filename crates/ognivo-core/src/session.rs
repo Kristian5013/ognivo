@@ -181,11 +181,13 @@ impl Session {
         }
     }
 
-    /// Starts the next conversation with its first messages; `reason`: `start`, `clear`
-    /// or `compaction`.
+    /// Starts the next conversation with its first messages, of which `head` start every
+    /// conversation (the system prompt and the project's context); `reason`: `start`,
+    /// `clear` or `compaction`.
     pub(crate) fn start_conversation(
         &mut self,
         messages: &[ChatMessage],
+        head: usize,
         notes: &Notes,
         reason: &str,
     ) {
@@ -201,8 +203,11 @@ impl Session {
             "reason": reason,
             "system": text(messages.first()),
         });
+        if head > 1 {
+            event["context"] = json!(text(messages.get(1)));
+        }
         if reason == "compaction" {
-            event["note"] = json!(text(messages.get(1)));
+            event["note"] = json!(text(messages.get(head)));
         }
         self.append(event);
         self.saved = 0;

@@ -122,10 +122,12 @@ async fn a_stopped_turn_leaves_what_was_sent_as_it_was() {
     assert_eq!((c.restarts, c.dropped), (vec![], vec![]));
     // the model learns of each stop with the next message
     let last = bodies[2]["messages"].as_array().unwrap();
+    // the user's messages, after the project's context
     let users: Vec<&str> = last
         .iter()
         .filter(|m| m["role"] == "user")
         .map(|m| m["content"].as_str().unwrap())
+        .skip(1)
         .collect();
     assert_eq!(
         users,

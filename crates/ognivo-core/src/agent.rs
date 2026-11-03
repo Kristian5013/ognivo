@@ -386,10 +386,12 @@ impl std::fmt::Debug for Agent {
     }
 }
 
-/// The fixed instructions of every session, then the text of the user's and the project's
-/// instruction files. Short on purpose: the reference agents that work best with small
-/// models keep their prefix small (docs/research/2026-10-29).
-pub fn system_prompt(root: &Path, instructions: &str, layout: Layout) -> String {
+/// The fixed instructions of every session. Short on purpose: the reference agents that
+/// work best with small models keep their prefix small (docs/research/2026-10-29). Nothing
+/// of the project is in it, so every session on a server starts with the same tokens and
+/// the slot's cache serves them; the project comes in the next message
+/// ([`project_context`]).
+pub fn system_prompt(layout: Layout) -> String {
     // the tools by the names the model has for them
     let (tools, edit, run) = match layout {
         Layout::Standard => (
@@ -403,20 +405,28 @@ pub fn system_prompt(root: &Path, instructions: &str, layout: Layout) -> String 
             "container.exec",
         ),
     };
-    let fixed = format!(
-        "You are ognivo, a coding agent. You work in the project at {} through tools: {tools}.\n\
+    format!(
+        "You are ognivo, a coding agent. You work in the user's project through tools: {tools}.\n\
          - {edit}\n\
          - Change only what the task needs.\n\
          - After changing code, run the project's build or tests with {run}.\n\
          - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
-         - Commands run without a terminal; do not start interactive programs.",
-        root.display()
-    );
-    if instructions.is_empty() {
-        fixed
-    } else {
-        format!("{fixed}\n\n{instructions}")
+         - Commands run without a terminal; do not start interactive programs."
+    )
+}
+
+/// How the message that follows the system prompt begins: where the project is.
+const PROJECT_AT: &str = "[ognivo] The project is at ";
+
+/// The project's part of a conversation's start, the message after the system prompt:
+/// where the project is, and the text of the user's and the project's instruction files.
+pub fn project_context(root: &Path, instructions: &str) -> String {
+    let mut text = format!("{PROJECT_AT}{}.", root.display());
+    if !instructions.is_empty() {
+        text.push_str("\n\n");
+        text.push_str(instructions);
     }
+    text
 }
 
 impl Agent {
@@ -430,11 +440,10 @@ impl Agent {
         let mut instructions = Instructions::new(opts.root.clone(), opts.user_instructions.clone());
         let prompt_instructions = instructions.start();
         Self {
-            messages: vec![ChatMessage::System(system_prompt(
-                &opts.root,
-                &prompt_instructions.text,
-                opts.layout,
-            ))],
+            messages: vec![
+                ChatMessage::System(system_prompt(opts.layout)),
+                ChatMessage::User(project_context(&opts.root, &prompt_instructions.text)),
+            ],
             tools: projection::declarations(family, opts.layout),
             driver,
             family,
@@ -465,9 +474,19 @@ impl Agent {
         }
     }
 
+    /// The messages that start the conversation: the system prompt, and the project's
+    /// context after it (a conversation of an older ognivo has the project in its system
+    /// prompt and starts with that alone).
+    fn head(&self) -> usize {
+        match self.messages.get(1) {
+            Some(ChatMessage::User(t)) if t.starts_with(PROJECT_AT) => 2,
+            _ => 1,
+        }
+    }
+
     /// Keeps this new agent's session in `session` from now on.
     pub fn keep_in(&mut self, mut session: Session) {
-        session.start_conversation(&self.messages, &self.notes(), "start");
+        session.start_conversation(&self.messages, self.head(), &self.notes(), "start");
         self.session = Some(session);
         self.save();
     }
@@ -498,7 +517,7 @@ impl Agent {
         }
         agent.stats = stats;
         if messages.is_empty() {
-            session.start_conversation(&agent.messages, &agent.notes(), "start");
+            session.start_conversation(&agent.messages, agent.head(), &agent.notes(), "start");
         } else {
             agent.messages = messages;
             agent.prompt_instructions = Load {
@@ -674,18 +693,20 @@ impl Agent {
     pub fn clear(&mut self) {
         self.prompt_instructions = self.instructions.start();
         self.stopped = None;
-        self.messages = vec![ChatMessage::System(system_prompt(
-            &self.opts.root,
-            &self.prompt_instructions.text,
-            self.opts.layout,
-        ))];
+        self.messages = vec![
+            ChatMessage::System(system_prompt(self.opts.layout)),
+            ChatMessage::User(project_context(
+                &self.opts.root,
+                &self.prompt_instructions.text,
+            )),
+        ];
         self.seen.clear();
         self.context = 0;
         self.counted = 0;
         self.requests.clear();
-        let notes = self.notes();
+        let (notes, head) = (self.notes(), self.head());
         if let Some(s) = self.session.as_mut() {
-            s.start_conversation(&self.messages, &notes, "clear");
+            s.start_conversation(&self.messages, head, &notes, "clear");
         }
         self.save();
     }
@@ -888,11 +909,12 @@ impl Agent {
             .filter(|m| matches!(m, ChatMessage::Assistant { .. }))
             .count();
         let note = compact::note(&self.requests, summary.as_deref(), &facts, steps > 0);
-        let replaced = self.messages.len() - 1;
-        self.messages.truncate(1);
+        let head = self.head();
+        let replaced = self.messages.len() - head;
+        self.messages.truncate(head);
         self.messages.push(ChatMessage::User(note));
         self.messages.extend(kept);
-        self.turn_start = 1;
+        self.turn_start = head;
         self.context = 0;
         self.counted = 0;
         // its memory of results is gone with them
@@ -902,7 +924,7 @@ impl Agent {
         // a new cache epoch: the session's next conversation
         let notes = self.notes();
         if let Some(s) = self.session.as_mut() {
-            s.start_conversation(&self.messages, &notes, "compaction");
+            s.start_conversation(&self.messages, head, &notes, "compaction");
         }
         self.save();
         self.emit(
@@ -1958,11 +1980,14 @@ mod tests {
         }
     }
 
+    /// ognivo's notes to the model, the project's context aside.
     fn notes(a: &Agent) -> Vec<String> {
         a.messages()
             .iter()
             .filter_map(|m| match m {
-                ChatMessage::User(t) if t.starts_with("[ognivo]") => Some(t.clone()),
+                ChatMessage::User(t) if t.starts_with("[ognivo]") && !t.starts_with(PROJECT_AT) => {
+                    Some(t.clone())
+                }
                 _ => None,
             })
             .collect()
@@ -2038,7 +2063,7 @@ mod tests {
         assert_eq!((r.agent.stats.edits_applied, r.agent.stats.steps), (1, 3));
         // each step sends the whole history and the gpt-oss tool set; seeds advance
         let seen = r.seen.lock().unwrap();
-        assert_eq!(seen[2].messages.len(), 6); // system, user, (assistant, tool) x 2
+        assert_eq!(seen[2].messages.len(), 7); // system, project, user, (assistant, tool) x 2
         assert_eq!(seen[0].tools.len(), 6);
         assert_eq!((seen[0].seed, seen[2].seed), (2, 4));
     }
@@ -2082,7 +2107,7 @@ mod tests {
                 ChatMessage::Tool { .. } => "tool",
             })
             .collect();
-        assert_eq!(roles, ["system", "user", "user", "assistant"]);
+        assert_eq!(roles, ["system", "user", "user", "user", "assistant"]);
     }
 
     #[tokio::test]
@@ -2299,7 +2324,7 @@ mod tests {
         let (end, _) = turn(&mut r).await;
         assert_eq!(end, TurnEnd::TimeLimit);
         assert!(t.elapsed() < limit * 3, "{:?}", t.elapsed());
-        let ChatMessage::User(task) = &r.agent.messages()[1] else {
+        let ChatMessage::User(task) = &r.agent.messages()[2] else {
             panic!()
         };
         assert!(
@@ -2560,7 +2585,7 @@ mod tests {
         r.agent.turn("go on", &mut on).await.unwrap();
         let seen = r.seen.lock().unwrap();
         assert_eq!(
-            seen[1].messages[1..],
+            seen[1].messages[2..],
             [
                 ChatMessage::User("fix it".into()),
                 ChatMessage::User("go on\n\n[ognivo] The user stopped the last turn.".into())
@@ -2590,7 +2615,8 @@ mod tests {
         assert_eq!(r.agent.context_tokens(), 120);
         assert!(r.agent.unreviewed_changes());
         r.agent.clear();
-        assert_eq!(r.agent.messages().len(), 1);
+        // the system prompt and the project
+        assert_eq!(r.agent.messages().len(), 2);
         assert_eq!(r.agent.context_tokens(), 0);
         assert!(r.agent.unreviewed_changes());
     }
@@ -2754,10 +2780,17 @@ mod tests {
         let ChatMessage::System(system) = &r.agent.messages()[0] else {
             panic!("{:?}", r.agent.messages()[0]);
         };
+        // the files come with the project, after a system prompt that has nothing of it
         assert!(system.starts_with("You are ognivo"), "{system}");
+        assert!(!system.contains("<instructions"), "{system}");
+        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+            panic!("{:?}", r.agent.messages()[1]);
+        };
         assert!(
-            system.contains("<instructions file=\"AGENTS.md\">\nUse tabs.\n</instructions>"),
-            "{system}"
+            project.starts_with(PROJECT_AT)
+                && project
+                    .contains("<instructions file=\"AGENTS.md\">\nUse tabs.\n</instructions>"),
+            "{project}"
         );
         assert!(
             r.agent
@@ -2967,7 +3000,7 @@ mod tests {
         let (agent, _) = resumed(&root, id, vec![]);
         // the last conversation is the one that goes on
         assert_eq!(agent.messages(), now.as_slice());
-        assert_eq!(now.len(), 3);
+        assert_eq!(now.len(), 4);
     }
 
     /// A turn that reads two files of 20 KB, under the limit, and then a small one, after
@@ -3012,16 +3045,16 @@ mod tests {
         let ask = &seen[3];
         assert_eq!(ask.tool_choice, ToolChoice::None);
         assert_eq!(ask.tools, seen[2].tools);
-        assert_eq!(&ask.messages[..6], &seen[2].messages[..]);
-        assert_eq!(ask.messages.len(), 6 + 2 + 1);
+        assert_eq!(&ask.messages[..7], &seen[2].messages[..]);
+        assert_eq!(ask.messages.len(), 7 + 2 + 1);
         assert_eq!(
             ask.messages.last(),
             Some(&ChatMessage::User(compact::SUMMARY_REQUEST.into()))
         );
-        // then: the system message, the note, and the last step as it was
-        let next = &seen[4].messages;
+        // then: the system message, the project, the note, and the last step as it was
+        let next = &seen[4].messages[1..];
         assert_eq!(next.len(), 4);
-        assert_eq!(next[0], seen[2].messages[0]);
+        assert_eq!(seen[4].messages[..2], seen[2].messages[..2]);
         let ChatMessage::User(note) = &next[1] else {
             panic!("{next:?}");
         };
@@ -3085,7 +3118,7 @@ mod tests {
             }
         )));
         let seen = r.seen.lock().unwrap();
-        let ChatMessage::User(note) = &seen[4].messages[1] else {
+        let ChatMessage::User(note) = &seen[4].messages[2] else {
             panic!();
         };
         assert!(
@@ -3392,12 +3425,18 @@ mod tests {
         assert_eq!(t["agent"]["name"], "ognivo");
         assert_eq!(t["agent"]["model_name"], "gpt-oss-20b");
         assert!(t["agent"]["tool_definitions"].as_array().unwrap().len() >= 5);
-        let steps = t["steps"].as_array().unwrap();
+        let mut steps = t["steps"].as_array().unwrap().clone();
         let sources: Vec<&str> = steps
             .iter()
             .map(|s| s["source"].as_str().unwrap())
             .collect();
-        assert_eq!(sources, ["system", "user", "agent", "agent", "agent"]);
+        assert_eq!(
+            sources,
+            ["system", "system", "user", "agent", "agent", "agent"]
+        );
+        // after the system prompt, the project's context, an ognivo note to the model
+        let project = steps.remove(1);
+        assert!(project["message"].as_str().unwrap().starts_with(PROJECT_AT));
         assert!(
             steps[0]["message"]
                 .as_str()
@@ -3444,7 +3483,7 @@ mod tests {
         assert_eq!(steps[4]["message"], "done");
         assert_eq!(t["final_metrics"]["total_prompt_tokens"], 2050);
         assert_eq!(t["final_metrics"]["total_cached_tokens"], 1100);
-        assert_eq!(t["final_metrics"]["total_steps"], 5);
+        assert_eq!(t["final_metrics"]["total_steps"], 6);
         assert_eq!(t["extra"]["ognivo"]["turns"][0]["end"], "answer");
         // the same request asks for the same hash; another one does not
         assert_ne!(

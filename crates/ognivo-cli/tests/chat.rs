@@ -115,12 +115,12 @@ async fn asks_runs_and_remembers_always_for_the_session() {
     );
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 9);
-    // after /clear the conversation starts over: system and the new message
+    // after /clear the conversation starts over: system, the project and the new message
     assert_eq!(
-        bodies[3]["messages"][1],
+        bodies[3]["messages"][2],
         json!({"role": "user", "content": "once more"})
     );
-    assert_eq!(bodies[3]["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(bodies[3]["messages"].as_array().unwrap().len(), 3);
     let history = data.join("chat_history");
     let text = std::fs::read_to_string(&history).unwrap();
     assert!(
@@ -324,7 +324,7 @@ async fn a_declined_command_tells_the_model_why() {
     assert!(stdout.contains("OK, not touching it."), "{stdout}");
     let bodies = bodies.lock().unwrap();
     assert_eq!(
-        bodies[0]["messages"][1],
+        bodies[0]["messages"][2],
         json!({"role": "user", "content": "first line\nsecond line"})
     );
     let last = bodies[1]["messages"]
@@ -370,10 +370,10 @@ async fn ctrl_c_stops_the_turn_and_the_chat_goes_on() {
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2);
     let m = &bodies[1]["messages"];
-    assert_eq!(m[1], bodies[0]["messages"][1]);
-    assert_eq!(m[1], json!({"role": "user", "content": "hello"}));
+    assert_eq!(m[2], bodies[0]["messages"][2]);
+    assert_eq!(m[2], json!({"role": "user", "content": "hello"}));
     assert_eq!(
-        m[2],
+        m[3],
         json!({"role": "user", "content": "go on\n\n[ognivo] The user stopped the last turn."})
     );
 }
@@ -418,10 +418,14 @@ async fn instruction_files_are_named_and_reach_the_model() {
     assert!(at("\n· instructions: sub/AGENTS.md\n") < at("Read it."));
 
     let bodies = bodies.lock().unwrap();
+    // the files come with the project, after the system prompt, which has nothing of it
     let system = bodies[0]["messages"][0]["content"].as_str().unwrap();
+    assert!(!system.contains("<instructions"), "{system}");
+    let project = bodies[0]["messages"][1]["content"].as_str().unwrap();
     assert!(
-        system.contains("<instructions file=\"~/.claude/CLAUDE.md\">\nBe brief.\n</instructions>\n\n<instructions file=\"AGENTS.md\">\nAnswer in one word.\n</instructions>"),
-        "{system}"
+        project.starts_with("[ognivo] The project is at ")
+            && project.contains("<instructions file=\"~/.claude/CLAUDE.md\">\nBe brief.\n</instructions>\n\n<instructions file=\"AGENTS.md\">\nAnswer in one word.\n</instructions>"),
+        "{project}"
     );
     assert!(!system.contains("the secret"), "{system}");
     let read = bodies[1]["messages"]
@@ -542,7 +546,7 @@ async fn a_session_is_kept_and_goes_on_with_its_changes() {
         let bodies = bodies.lock().unwrap();
         let messages = bodies[0]["messages"].as_array().unwrap();
         assert_eq!(
-            messages[1],
+            messages[2],
             json!({"role": "user", "content": "make two loud"})
         );
         assert_eq!(
@@ -687,10 +691,11 @@ async fn a_full_context_is_compacted_and_the_turn_goes_on() {
         ask.len(),
         bodies[3]["messages"].as_array().unwrap().len() + 3
     );
-    // the next step: the system message, the note, the kept steps ending with the small read
+    // the next step: the system message, the project, the note, the kept steps ending with
+    // the small read
     let next = bodies[5]["messages"].as_array().unwrap();
-    assert_eq!(next[0], ask[0]);
-    let note = next[1]["content"].as_str().unwrap();
+    assert_eq!(next[..2], ask[..2]);
+    let note = next[2]["content"].as_str().unwrap();
     assert!(
         note.starts_with("[ognivo] The conversation was compacted to fit the context")
             && note.contains("\n1. read all the files\n")

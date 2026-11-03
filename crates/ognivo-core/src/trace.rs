@@ -104,6 +104,8 @@ struct Builder {
     agent: Option<usize>,
     /// The last system prompt given.
     system: Option<String>,
+    /// The last project's context given.
+    context: Option<String>,
     turns: Vec<Value>,
     prompt: u64,
     completion: u64,
@@ -129,6 +131,14 @@ impl Builder {
                 {
                     self.system = Some(system.to_owned());
                     let step = json!({"source": "system", "message": system, "extra": extra});
+                    self.push(step, at);
+                }
+                // the project's part, an ognivo note to the model
+                if let Some(context) = d["context"].as_str()
+                    && self.context.as_deref() != Some(context)
+                {
+                    self.context = Some(context.to_owned());
+                    let step = json!({"source": "system", "message": context, "extra": extra});
                     self.push(step, at);
                 }
                 if let Some(note) = d["note"].as_str() {

@@ -89,28 +89,29 @@ async fn reads_edits_and_answers() {
 
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 3);
-    // the project's instructions follow the fixed ones; the prompt from stdin is the user
-    // message; the second request carries the first step's call, its verbatim reasoning
-    // and the read result
-    let system = bodies[0]["messages"][0]["content"].as_str().unwrap();
+    // the project and its instructions follow the fixed system prompt; the prompt from
+    // stdin is the user message; the second request carries the first step's call, its
+    // verbatim reasoning and the read result
+    let project = bodies[0]["messages"][1]["content"].as_str().unwrap();
     assert!(
-        system.ends_with(
-            "\n\n<instructions file=\"AGENTS.md\">\nKeep the greeting short.\n</instructions>"
-        ),
-        "{system}"
+        project.starts_with("[ognivo] The project is at ")
+            && project.ends_with(
+                "\n\n<instructions file=\"AGENTS.md\">\nKeep the greeting short.\n</instructions>"
+            ),
+        "{project}"
     );
     assert_eq!(
-        bodies[0]["messages"][1],
+        bodies[0]["messages"][2],
         json!({"role": "user", "content": "Say hello instead of hi."})
     );
     let m = &bodies[1]["messages"];
-    assert_eq!(m[2]["reasoning_content"], json!("next step"));
+    assert_eq!(m[3]["reasoning_content"], json!("next step"));
     assert_eq!(
-        m[2]["tool_calls"][0]["function"]["arguments"],
+        m[3]["tool_calls"][0]["function"]["arguments"],
         json!(r#"{"path":"main.rs"}"#)
     );
-    assert_eq!(m[3]["role"], json!("tool"));
-    assert!(m[3]["content"].as_str().unwrap().starts_with("[read: "));
+    assert_eq!(m[4]["role"], json!("tool"));
+    assert!(m[4]["content"].as_str().unwrap().starts_with("[read: "));
     assert_eq!(
         (bodies[0]["seed"].clone(), bodies[2]["seed"].clone()),
         (json!(6), json!(8))
@@ -127,8 +128,18 @@ async fn reads_edits_and_answers() {
         .iter()
         .map(|s| s["source"].as_str().unwrap())
         .collect();
-    assert_eq!(sources, ["system", "user", "agent", "agent", "agent"]);
-    assert_eq!(t["steps"][4]["message"], json!("Changed the greeting."));
+    // the system prompt, then the project's context, an ognivo note to the model
+    assert_eq!(
+        sources,
+        ["system", "system", "user", "agent", "agent", "agent"]
+    );
+    assert!(
+        t["steps"][1]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("[ognivo] The project is at ")
+    );
+    assert_eq!(t["steps"][5]["message"], json!("Changed the greeting."));
     let later = Command::new(env!("CARGO_BIN_EXE_ognivo"))
         .args(["sessions", "--atif", "1", "--data-dir"])
         .arg(_dir.path().join("data"))
@@ -275,7 +286,7 @@ async fn the_time_limit_ends_the_run_with_exit_124() {
     );
     assert_eq!(end["verification"], json!({"status": "no_changes"}));
     assert_eq!(
-        bodies.lock().unwrap()[0]["messages"][1]["content"],
+        bodies.lock().unwrap()[0]["messages"][2]["content"],
         json!("hello\n\n[ognivo] Time limit: 2 s. ognivo stops the turn when it runs out."),
         "the model was not told the limit"
     );
