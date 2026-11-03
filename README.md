@@ -29,7 +29,7 @@ the `trajectory.json` Harbor reads.
 | Path | What |
 |---|---|
 | `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`) |
-| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards, Harmony rendering for the Native path |
+| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards, Harmony rendering and reading for the Native path |
 | `crates/ognivo-core` | agent loop and approvals |
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell) and their per-model shapes |
 | `crates/ognivo-protocol` | core ⇄ client event types |

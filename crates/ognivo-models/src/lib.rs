@@ -15,7 +15,8 @@
 //! - [`doctor`]: server checks behind `ognivo doctor`;
 //! - [`template`]: chat templates in the form servers report them.
 //!
-//! - [`harmony`]: gpt-oss's format, rendered as its reference does, for the Native path (M2).
+//! - [`harmony`]: gpt-oss's format, rendered as its reference does and read back
+//!   tolerantly, for the Native path (M2).
 //!
 //! The Native driver and the codecs of Gemma 4 and Qwen XML arrive in M2–M3.
 

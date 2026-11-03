@@ -10,10 +10,16 @@
 //! A prompt is a list of pieces: control tokens by id, and text that is tokenized as
 //! content, never with special-token parsing (§5.3). Pieces are not merged: the reference
 //! tokenizes each piece on its own, and the ids at a piece's edges depend on it.
+//!
+//! What the model writes back is read by [`parse`], token by token and tolerantly.
+
+pub mod parse;
 
 use std::collections::HashSet;
 
 use serde_json::Value;
+
+use crate::engine::TokenId;
 
 /// The control tokens of Harmony and their ids in o200k_harmony.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -38,6 +44,20 @@ impl Special {
             Special::Call => 200_012,
             Special::Return => 200_002,
         }
+    }
+
+    pub const ALL: [Special; 7] = [
+        Special::Start,
+        Special::End,
+        Special::Message,
+        Special::Channel,
+        Special::Constrain,
+        Special::Call,
+        Special::Return,
+    ];
+
+    pub fn from_id(id: TokenId) -> Option<Special> {
+        Special::ALL.into_iter().find(|s| s.id() == id)
     }
 
     /// The token's text, put together here so that no control token stands in the
@@ -184,7 +204,7 @@ pub struct Message {
     pub name: Option<String>,
     pub recipient: Option<String>,
     pub channel: Option<String>,
-    /// `<|constrain|>json` (its control token written out) or plain text such as `json`.
+    /// The constrain token's text followed by `json`, or plain text such as `json`.
     pub content_type: Option<String>,
     pub content: Content,
 }
