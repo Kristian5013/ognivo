@@ -95,10 +95,11 @@ export interface NoticeItem extends Base {
   text: string;
 }
 
-/** A generation that ran nothing: calls that did not parse, an empty answer. */
+/** A generation that ran nothing: calls that did not parse, an empty answer, one cut at its
+ * token limit or stopped for repeating itself, or one the server's format check restarted. */
 export interface VoidItem extends Base {
   kind: "void";
-  why: "malformed" | "empty";
+  why: "malformed" | "empty" | "truncated" | "repeating" | "restarted";
   /** The calls as the model wrote them, for `malformed`. */
   calls: { name: string; arguments: string }[];
 }

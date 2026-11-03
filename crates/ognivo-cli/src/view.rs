@@ -137,6 +137,7 @@ impl View {
                 index,
                 title,
                 write,
+                ..
             } => {
                 let mode = match &write {
                     Some(files) => format!("write {}", files.join(", ")),
@@ -176,7 +177,11 @@ impl View {
                 };
                 self.screen.line(&short(&line, LINE_CHARS), paint);
             }
-            AgentEvent::Reasoning { .. } => {}
+            AgentEvent::Reasoning { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::TurnEnded { .. }
+            | AgentEvent::Generation { .. }
+            | AgentEvent::Approval { .. } => {}
         }
     }
 

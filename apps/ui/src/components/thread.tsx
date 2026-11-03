@@ -59,6 +59,13 @@ function Void({ item }: { item: VoidItem }) {
   if (item.why === "empty") {
     return <p className="text-warn">The model stopped inside its reasoning: nothing ran.</p>;
   }
+  if (item.why === "restarted") {
+    return <p className="text-warn">The server rejected the output's format, and the step started over.</p>;
+  }
+  if (item.why === "truncated" || item.why === "repeating") {
+    const how = item.why === "truncated" ? "reached its token limit" : "kept repeating itself and was stopped";
+    return <p className="text-warn">The generation {how}: nothing ran.</p>;
+  }
   return (
     <div className="rounded-md border border-warn/40 px-3 py-2">
       <p className="text-warn">The calls of this generation could not be used, so none ran.</p>

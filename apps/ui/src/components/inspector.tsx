@@ -218,7 +218,9 @@ export function Inspector({
                 <p className="text-warn">
                   {v.why === "empty"
                     ? "It stopped inside its reasoning and is not in the history."
-                    : "Its calls could not be used; it is not in the history."}
+                    : v.why === "malformed"
+                      ? "Its calls could not be used; it is not in the history."
+                      : "It ran nothing and is not in the history."}
                 </p>
                 {v.calls.map((c, i) => (
                   <Block key={i} text={`${c.name} ${c.arguments}`} profile={profile} />

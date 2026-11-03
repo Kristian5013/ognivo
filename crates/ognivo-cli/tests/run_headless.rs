@@ -291,3 +291,82 @@ async fn the_time_limit_ends_the_run_with_exit_124() {
         "the model was not told the limit"
     );
 }
+
+/// `--events`: the run in the clients' event model, as the GUI gets a session.
+#[tokio::test]
+async fn events_are_the_run_in_the_clients_model() {
+    let (url, _) = fake_server(vec![
+        call_stream("r1", "read", r#"{"path":"a.txt"}"#),
+        answer_stream("It says one."),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    let data = dir.path().join("data");
+    let bin = env!("CARGO_BIN_EXE_ognivo");
+    let out = tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(bin)
+            .args([
+                "run",
+                "--url",
+                &url,
+                "--profile",
+                "gpt-oss-20b",
+                "--events",
+                "--seed",
+                "1",
+                "--data-dir",
+            ])
+            .arg(&data)
+            .arg("--cwd")
+            .arg(dir.path())
+            .env("HOME", dir.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"What does a.txt say?")
+            .unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let events: Vec<Value> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let seqs: Vec<i64> = events.iter().map(|e| e["seq"].as_i64().unwrap()).collect();
+    assert_eq!(seqs, (1..=events.len() as i64).collect::<Vec<_>>());
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|e| e["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds[..2], ["thread_started", "turn_started"]);
+    assert_eq!(kinds.last(), Some(&"turn_completed"));
+    assert_eq!(events[0]["info"]["profile"], json!("gpt-oss-20b"));
+    assert_eq!(events[1]["user"], json!("What does a.txt say?"));
+    // the call completes with its result, and the answer is the turn's
+    let read = events
+        .iter()
+        .find(|e| e["event"] == "item_completed" && e["item"]["kind"] == "tool_call")
+        .unwrap();
+    assert_eq!(read["item"]["call"]["name"], json!("Read"));
+    assert_eq!(read["item"]["result"]["outcome"], json!("ok"));
+    let end = events.last().unwrap();
+    assert_eq!(
+        (end["end"].as_str(), end["answer"].as_str()),
+        (Some("answer"), Some("It says one."))
+    );
+    assert_eq!(kinds.iter().filter(|k| **k == "generation").count(), 2);
+}

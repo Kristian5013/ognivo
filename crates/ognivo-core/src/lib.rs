@@ -4,13 +4,15 @@
 //! edit journal ([`journal`]), AGENTS.md and CLAUDE.md ([`instructions`]), the session in
 //! the store ([`session`]), compaction in the middle of a turn ([`compact`]), permission
 //! rules ([`rules`]), traces in ATIF ([`trace`]), the record of what a turn verified
-//! ([`verify`]) and the detector of repeated calls ([`repeats`]).
+//! ([`verify`]), the detector of repeated calls ([`repeats`]) and the clients' event model
+//! made of the agent's events ([`protocol`]).
 
 pub mod agent;
 pub mod approval;
 pub mod compact;
 pub mod instructions;
 pub mod journal;
+pub mod protocol;
 pub mod repeats;
 pub mod rules;
 pub mod session;

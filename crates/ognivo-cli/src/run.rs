@@ -10,6 +10,9 @@
 //! signal N (TERM from `timeout`, INT from ^C): the turn is dropped, which kills the process
 //! group of a running command, and the end event is still written. Without an answer the
 //! end event carries the verification status of what was done.
+//!
+//! `--events` writes the run in the clients' event model instead (ognivo-protocol, version
+//! 1), one event a line: what the GUI gets of a session.
 
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -18,7 +21,9 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use ognivo_core::agent::{AgentEvent, AllowAll, Approver, NoUser, TurnEnd};
+use ognivo_core::protocol::{Out, Projector};
 use ognivo_core::verify;
+use ognivo_protocol as wire;
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::session::{Failure, SessionArgs};
@@ -37,8 +42,12 @@ pub struct RunArgs {
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     time_limit: Option<u64>,
     /// Events as JSON lines on stdout instead of text
-    #[arg(long)]
+    #[arg(long, conflicts_with = "events")]
     jsonl: bool,
+    /// The run in the clients' event model (ognivo-protocol, version 1), one event a line on
+    /// stdout
+    #[arg(long)]
+    events: bool,
     /// Write the run's trajectory in ATIF (Harbor's trajectory.json) to this file at the end
     #[arg(long, value_name = "FILE")]
     atif: Option<PathBuf>,
@@ -98,6 +107,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     }
     let seed = s.opts.seed;
     s.opts.time_limit = a.time_limit.map(Duration::from_secs);
+    let (profile, level, model) = (s.profile.clone(), s.level.clone(), s.model.clone());
     let mut agent = match s.new_agent("run", &a.session.url, store, approver) {
         Ok(agent) => agent,
         Err(f) => return fail(f),
@@ -105,14 +115,49 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     let session = agent.session_id();
     let jsonl = a.jsonl;
     let start = agent.instructions();
+    let mut first = None;
     if !start.files.is_empty() || !start.skipped.is_empty() {
         let e = AgentEvent::Instructions {
             files: start.files.clone(),
             skipped: start.skipped.clone(),
         };
-        show(&e, jsonl);
+        if a.events {
+            // an item of the first turn
+            first = Some(e);
+        } else {
+            show(&e, jsonl);
+        }
     }
-    let mut on = move |e: AgentEvent| show(&e, jsonl);
+    let mut events = a.events.then(|| {
+        let info = wire::ThreadInfo {
+            kind: "run".into(),
+            project: root.display().to_string(),
+            profile: profile.clone(),
+            level: level.clone(),
+            server: a.session.url.clone(),
+            model: model.clone(),
+            parent: None,
+        };
+        let mut stream = Stream {
+            projector: Projector::new(wire::ThreadId(session.unwrap_or(0)), info),
+            seq: 0,
+        };
+        let started = stream.projector.started();
+        stream.write(started);
+        stream
+    });
+    let mut on = |e: AgentEvent| match events.as_mut() {
+        Some(stream) => {
+            let turn = matches!(e, AgentEvent::TurnStarted { .. });
+            let out = stream.projector.event(e);
+            stream.write(out);
+            if let (true, Some(e)) = (turn, first.take()) {
+                let out = stream.projector.event(e);
+                stream.write(out);
+            }
+        }
+        None => show(&e, jsonl),
+    };
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     let end = {
@@ -126,6 +171,10 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     };
     if let Err((name, _)) = &end {
         agent.abandon_turn(&format!("ognivo was stopped by {name}."));
+        if let Some(stream) = events.as_mut() {
+            let out = stream.projector.interrupted();
+            stream.write(out);
+        }
     }
     if let Some(e) = agent.store_failure() {
         eprintln!("ognivo run: the session store failed: {e}; the session is not saved in full");
@@ -139,7 +188,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         Ok(end) => end,
         Err((name, code)) => {
             eprintln!("ognivo run: stopped by {name}");
-            if jsonl {
+            if jsonl && !a.events {
                 let end = serde_json::json!({"type": "end", "exit": code, "answer": null, "stopped": name, "verification": verification, "session": session, "seed": seed, "stats": stats});
                 println!("{end}");
             }
@@ -168,7 +217,9 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             (3, None, Some("server_error"))
         }
     };
-    if jsonl {
+    if a.events {
+        // the stream said it all
+    } else if jsonl {
         let mut end = serde_json::json!({"type": "end", "exit": code, "answer": answer, "session": session, "seed": seed, "stats": stats});
         if let Some(why) = stopped {
             end["stopped"] = why.into();
@@ -191,6 +242,30 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         );
     }
     Ok(ExitCode::from(code))
+}
+
+/// The run's events in the clients' model, numbered as they go to stdout.
+struct Stream {
+    projector: Projector,
+    seq: u64,
+}
+
+impl Stream {
+    fn write(&mut self, out: Out) {
+        let mut stdout = std::io::stdout().lock();
+        for (thread, kind) in out {
+            self.seq += 1;
+            let e = wire::Event {
+                seq: self.seq,
+                thread,
+                kind,
+            };
+            if let Ok(line) = serde_json::to_string(&e) {
+                let _ = writeln!(stdout, "{line}");
+            }
+        }
+        let _ = stdout.flush();
+    }
 }
 
 /// Writes the trajectory of session `id`; a failure is reported and changes no exit code.
@@ -264,6 +339,7 @@ fn show(e: &AgentEvent, jsonl: bool) {
             index,
             title,
             write,
+            ..
         } => {
             let mode = match write {
                 Some(files) => format!("write {}", files.join(", ")),
@@ -289,6 +365,11 @@ fn show(e: &AgentEvent, jsonl: bool) {
             };
             eprintln!("⇇ {} {end} after {steps} steps{changed}", index + 1);
         }
+        // the question shows as the approver asks it, the rest at the end of the run
+        AgentEvent::TurnStarted { .. }
+        | AgentEvent::TurnEnded { .. }
+        | AgentEvent::Generation { .. }
+        | AgentEvent::Approval { .. } => {}
     }
 }
 

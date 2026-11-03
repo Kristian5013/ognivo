@@ -275,15 +275,19 @@ impl Agent {
                 .into_iter()
                 .map(|f| locks.entry(f).or_default().clone())
                 .collect();
+            let brief = brief(task);
             self.emit(
                 on,
                 AgentEvent::SubagentStarted {
                     index: i,
                     title: task.title.clone(),
                     write: task.write.then(|| task.files.clone()),
+                    session: sub.session_id(),
+                    brief: brief.clone(),
+                    level: subagents.level(),
                 },
             );
-            let (tx, brief) = (tx.clone(), brief(task));
+            let tx = tx.clone();
             runs.push(async move {
                 let mut guards = Vec::new();
                 for lock in held {

@@ -69,6 +69,9 @@ that is not loaded the router is asked to load. Requests are not pinned to a slo
 into whichever slot the conversation comes to. When the server's slots are all busy, the
 next step goes by priority, the user's agent first, across ognivo sessions too.
 
+`run --events` writes the session in the clients' event model (`ognivo-protocol`, frozen as
+version 1): what the GUI gets of a session, one JSON event a line.
+
 With `--subagents` the agent may hand tasks to subagents (`delegate`): each works on its
 task in a context of its own, at the same time as the others, at medium reasoning, and
 reports back. A read task changes no file; a write task only the files it lists. What

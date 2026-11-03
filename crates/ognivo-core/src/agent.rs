@@ -33,8 +33,8 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
-    Channel, ChatMessage, DriverError, DriverEvent, Family, Finished, ModelDriver, Outcome,
-    StepRequest, ToolCall, ToolChoice, ToolDecl,
+    Channel, ChatMessage, DriverError, DriverEvent, Family, FinishReason, Finished, ModelDriver,
+    Outcome, StepRequest, ToolCall, ToolChoice, ToolDecl,
 };
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
@@ -132,6 +132,10 @@ impl Approver for AllowAll {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    /// A turn began: the user's message, or a subagent's task.
+    TurnStarted {
+        user: String,
+    },
     Reasoning {
         text: String,
     },
@@ -200,6 +204,11 @@ pub enum AgentEvent {
         title: String,
         /// The files of a write task; `None` for a read task.
         write: Option<Vec<String>>,
+        /// The session it is kept in, if the session is kept.
+        session: Option<i64>,
+        /// Its user's message: the task as it gets it.
+        brief: String,
+        level: Option<String>,
     },
     /// An event of a subagent's turn.
     Subagent {
@@ -214,6 +223,40 @@ pub enum AgentEvent {
         steps: u32,
         /// The files it changed.
         changed: Vec<String>,
+    },
+    /// A generation ended, a compaction's summary too: how, and what it cost. `outcome`:
+    /// `calls`, `answer`, `empty`, `truncated`, `repeating` or `malformed`.
+    Generation {
+        purpose: String,
+        outcome: String,
+        finish: Option<String>,
+        seed: u32,
+        /// With those the server took from its cache.
+        prompt_tokens: u32,
+        cached_tokens: u32,
+        completion_tokens: u32,
+        prompt_ms: Option<f64>,
+        generation_ms: Option<f64>,
+        prompt_hash: String,
+        /// The calls of a generation that ran nothing, as the model wrote them.
+        rejected: Vec<ToolCall>,
+    },
+    /// A question to the user (`allowed` is `None`), then the answer.
+    Approval {
+        tool: String,
+        action: String,
+        reason: String,
+        unreviewed: Vec<String>,
+        agent: Option<String>,
+        allowed: Option<bool>,
+    },
+    /// The turn ended: `end` as [`AgentEvent::SubagentFinished`] has it.
+    TurnEnded {
+        end: String,
+        why: Option<String>,
+        answer: Option<String>,
+        /// What the facts of the turn say of the answer.
+        verification: Option<String>,
     },
 }
 
@@ -770,8 +813,48 @@ impl Agent {
         if let Some(s) = self.session.as_mut() {
             s.user(user);
         }
+        // the session keeps the user's message and the turn's end on its own
+        on(AgentEvent::TurnStarted {
+            user: user.to_owned(),
+        });
         let end = self.steps(user, on).await;
         self.in_turn = false;
+        let facts = || verify::summary(&self.ledger.status(&self.opts.root));
+        on(match &end {
+            Ok(TurnEnd::Answer(a)) => AgentEvent::TurnEnded {
+                end: "answer".into(),
+                why: None,
+                answer: Some(a.text.clone()),
+                verification: verify::summary(&a.verification),
+            },
+            Ok(TurnEnd::StepLimit) => AgentEvent::TurnEnded {
+                end: "step_limit".into(),
+                why: Some(format!(
+                    "the step limit ({}) came first",
+                    self.opts.max_steps
+                )),
+                answer: None,
+                verification: facts(),
+            },
+            Ok(TurnEnd::Stuck(why)) => AgentEvent::TurnEnded {
+                end: "stuck".into(),
+                why: Some(why.clone()),
+                answer: None,
+                verification: facts(),
+            },
+            Ok(TurnEnd::TimeLimit) => AgentEvent::TurnEnded {
+                end: "time_limit".into(),
+                why: None,
+                answer: None,
+                verification: facts(),
+            },
+            Err(e) => AgentEvent::TurnEnded {
+                end: "error".into(),
+                why: Some(e.to_string()),
+                answer: None,
+                verification: None,
+            },
+        });
         let (end_data, answer) = match &end {
             Ok(TurnEnd::Answer(a)) => (
                 json!({"end": "answer", "verification": a.verification, "unsupported_claim": a.unsupported_claim}),
@@ -834,16 +917,17 @@ impl Agent {
     }
 
     /// Runs one generation to its end, showing its text and reasoning through `on` when
-    /// given, and keeps it in the session's log under `purpose`. `None`: the deadline
+    /// `shown`, and keeps it in the session's log under `purpose`. `None`: the deadline
     /// passed, and dropping the stream cancelled it.
     async fn generate(
         &mut self,
         req: StepRequest,
         deadline: Option<Instant>,
-        mut on: Option<&mut (dyn FnMut(AgentEvent) + Send)>,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+        shown: bool,
         purpose: &str,
     ) -> Result<Option<Finished>, DriverError> {
-        let prompt_hash = self.session.is_some().then(|| prompt_hash(&req));
+        let prompt_hash = prompt_hash(&req);
         let started = Instant::now();
         let mut events = self.driver.step(req);
         let mut finished = None;
@@ -856,7 +940,7 @@ impl Agent {
                 None => events.next().await,
             };
             let Some(ev) = next else { break };
-            let shown = match ev? {
+            let ev = match ev? {
                 DriverEvent::Reasoning(text) => AgentEvent::Reasoning { text },
                 DriverEvent::Text(text) => AgentEvent::Text { text },
                 DriverEvent::ToolCallDelta { .. } => continue,
@@ -869,8 +953,8 @@ impl Agent {
                     continue;
                 }
             };
-            if let Some(on) = on.as_deref_mut() {
-                self.emit(on, shown);
+            if shown {
+                self.emit(on, ev);
             }
         }
         let f = finished.ok_or_else(|| {
@@ -879,9 +963,36 @@ impl Agent {
         self.stats.prompt_tokens_processed += u64::from(f.usage.prompt_n.unwrap_or(0));
         self.stats.prompt_tokens_cached += u64::from(f.usage.cache_n.unwrap_or(0));
         self.stats.completion_tokens += u64::from(f.usage.predicted_n.unwrap_or(0));
-        if let (Some(s), Some(hash)) = (self.session.as_mut(), prompt_hash) {
-            s.generation(purpose, &f, &hash, started.elapsed());
+        if let Some(s) = self.session.as_mut() {
+            s.generation(purpose, &f, &prompt_hash, started.elapsed());
         }
+        // the session keeps the generation on its own
+        let (outcome, rejected): (&str, &[ToolCall]) = match &f.outcome {
+            Outcome::Calls(_) => ("calls", &[]),
+            Outcome::Answer if f.content.trim().is_empty() => ("empty", &[]),
+            Outcome::Answer => ("answer", &[]),
+            Outcome::Truncated { partial } => ("truncated", partial),
+            Outcome::Repeating { partial, .. } => ("repeating", partial),
+            Outcome::Malformed { calls, .. } => ("malformed", calls),
+        };
+        on(AgentEvent::Generation {
+            purpose: purpose.to_owned(),
+            outcome: outcome.to_owned(),
+            finish: f.finish.as_ref().map(|r| match r {
+                FinishReason::Stop => "stop".to_owned(),
+                FinishReason::ToolCalls => "tool_calls".to_owned(),
+                FinishReason::Length => "length".to_owned(),
+                FinishReason::Other(other) => other.clone(),
+            }),
+            seed: f.seed,
+            prompt_tokens: f.usage.prompt_n.unwrap_or(0) + f.usage.cache_n.unwrap_or(0),
+            cached_tokens: f.usage.cache_n.unwrap_or(0),
+            completion_tokens: f.usage.predicted_n.unwrap_or(0),
+            prompt_ms: f.usage.prompt_ms,
+            generation_ms: f.usage.predicted_ms,
+            prompt_hash,
+            rejected: rejected.to_vec(),
+        });
         Ok(Some(f))
     }
 
@@ -943,7 +1054,7 @@ impl Agent {
         let mut messages = self.messages.clone();
         messages.push(ChatMessage::User(compact::SUMMARY_REQUEST.to_owned()));
         let req = self.request(ToolChoice::None, messages);
-        let summary = match self.generate(req, deadline, None, "summary").await? {
+        let summary = match self.generate(req, deadline, on, false, "summary").await? {
             None => return Ok(Some(TurnEnd::TimeLimit)),
             Some(f) => match f.outcome {
                 Outcome::Answer if !f.content.trim().is_empty() => Some(f.content),
@@ -1098,7 +1209,7 @@ impl Agent {
                 return Ok(end);
             }
             let req = self.request(ToolChoice::Auto, self.messages.clone());
-            let Some(f) = self.generate(req, deadline, Some(&mut *on), "step").await? else {
+            let Some(f) = self.generate(req, deadline, on, true, "step").await? else {
                 return Ok(TurnEnd::TimeLimit);
             };
             if let Some(prompt) = f.usage.prompt_n {
@@ -1822,10 +1933,21 @@ impl Agent {
                 return Some(format!("[refused] {text}"));
             }
         }
+        // the session keeps the answer on its own
+        let asked = |allowed| AgentEvent::Approval {
+            tool: req.tool.clone(),
+            action: req.action.clone(),
+            reason: req.reason.clone(),
+            unreviewed: req.unreviewed.clone(),
+            agent: req.agent.clone(),
+            allowed,
+        };
+        on(asked(None));
         let verdict = self.approver.approve(&req).await;
         if let Some(s) = self.session.as_mut() {
             s.approval(&req, verdict == Verdict::Allow);
         }
+        on(asked(Some(verdict == Verdict::Allow)));
         match verdict {
             Verdict::Allow => None,
             Verdict::Refuse(text) => {
@@ -2129,9 +2251,24 @@ mod tests {
             matches!(&end, TurnEnd::Answer(a) if a.text == "done"),
             "{end:?}"
         );
+        // the turn starts, its first generation ends with its usage, then the call runs
+        let first: Vec<&str> = events
+            .iter()
+            .take(3)
+            .map(|e| match e {
+                AgentEvent::TurnStarted { .. } => "turn",
+                AgentEvent::Generation { .. } => "generation",
+                AgentEvent::ToolStarted { .. } => "call",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(first, ["turn", "generation", "call"]);
+        assert!(
+            matches!(events.last(), Some(AgentEvent::TurnEnded { end, .. }) if end == "answer")
+        );
         // the UI gets the parsed call and, for a change, the diff
         assert!(matches!(
-            &events[0],
+            &events[2],
             AgentEvent::ToolStarted { call: Some(Call::Read { path, .. }), .. } if path == "lib.rs"
         ));
         let changed: Vec<_> = events

@@ -1,84 +1,358 @@
-//! Event model shared by the ognivo core and every client (Electron GUI, VS Code
-//! extension, CLI).
+//! The event model of ognivo: what the core tells its clients (the Electron GUI, the VS
+//! Code extension, `ognivo run --jsonl`) about its threads (docs/architecture.md §3).
 //!
-//! A thread holds turns, a turn holds items, and an item goes `started` → deltas →
-//! `completed` (docs/architecture.md §3). Events are append-only and numbered by `seq`,
-//! so a client reconnects by replaying from the last `seq` it saw. The model freezes at
-//! the end of M2; until then it is expected to change.
+//! - A thread is a session: the user's, or a subagent's, whose thread names the item of
+//!   the thread it works for.
+//! - A thread holds turns, a turn holds items in the order they start, and an item starts,
+//!   may get deltas, and completes. `started` and `completed` carry the whole item as it is
+//!   then, so a client that missed deltas has it all at the end.
+//! - Each generation's usage and timings come as an event of their own.
+//! - Events are numbered by `seq` across all threads: a client that comes back asks for
+//!   what came after the last one it saw.
+//!
+//! Frozen at the end of M2 as version 1. From here on it changes only by additions: a new
+//! event, a new item kind, a new field. A client ignores what it does not know.
 
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-/// One conversation, bound to one model for its whole life.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The version of the event model.
+pub const VERSION: u32 = 1;
+
+/// A thread, by its session's id in the store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-pub struct ThreadId(pub String);
+#[ts(type = "number")]
+pub struct ThreadId(pub i64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// A turn of a thread, from 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-pub struct TurnId(pub u64);
+pub struct TurnId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// An item of a thread, from 1 in the order items start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(transparent)]
-pub struct ItemId(pub u64);
+pub struct ItemId(pub u32);
 
-/// Position in the append-only event log. Global and dense across all threads: a client
-/// replays everything after the last seq it saw and filters by thread.
-pub type Seq = u64;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One event of the stream.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct Event {
-    pub seq: Seq,
+    /// Its place in the core's stream, growing across all threads.
+    #[ts(type = "number")]
+    pub seq: u64,
     pub thread: ThreadId,
-    pub turn: TurnId,
     #[serde(flatten)]
     pub kind: EventKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum EventKind {
-    TurnStarted,
-    ItemStarted { item: ItemId, kind: ItemKind },
-    ItemDelta { item: ItemId, delta: Delta },
-    ItemCompleted { item: ItemId },
-    TurnCompleted { stop: StopReason },
+    /// The thread's session began, or was picked up again.
+    ThreadStarted {
+        info: ThreadInfo,
+    },
+    TurnStarted {
+        turn: TurnId,
+        /// The user's message, as the user wrote it; for a subagent, its task.
+        user: String,
+    },
+    ItemStarted {
+        item: Item,
+    },
+    ItemDelta {
+        item: ItemId,
+        delta: Delta,
+    },
+    ItemCompleted {
+        item: Item,
+    },
+    /// A generation of the model ended.
+    Generation {
+        generation: Generation,
+    },
+    TurnCompleted {
+        turn: TurnId,
+        end: TurnEnd,
+        /// Why it ended so, when it did not end with an answer.
+        why: Option<String>,
+        /// The accepted answer.
+        answer: Option<String>,
+        /// What the facts of the turn say of the answer, e.g. `NOT verified: …`.
+        verification: Option<String>,
+    },
 }
 
-/// What an item is; its payload arrives through deltas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ThreadInfo {
+    /// `chat`, `run` or `subagent`.
+    pub kind: String,
+    /// The project's root.
+    pub project: String,
+    /// The profile, e.g. `gpt-oss-20b`.
+    pub profile: String,
+    /// The reasoning level, where the profile has levels.
+    pub level: Option<String>,
+    /// The server's URL.
+    pub server: String,
+    /// The model each request names, for llama-server in router mode.
+    pub model: Option<String>,
+    /// For a subagent: the thread and the item it works for.
+    pub parent: Option<Parent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Parent {
+    pub thread: ThreadId,
+    pub item: ItemId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Item {
+    pub id: ItemId,
+    pub turn: TurnId,
+    /// The generation it came from, by its number in the thread (from 1); `None` for what
+    /// is ognivo's.
+    pub generation: Option<u32>,
+    #[serde(flatten)]
+    pub body: ItemBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ItemBody {
+    /// Text the model shows the user: a preamble, or an answer.
+    AgentMessage { text: String },
+    /// Its chain of thought: Harmony analysis, Gemma's thought channel, Qwen's `<think>`.
+    Reasoning { text: String },
+    ToolCall {
+        /// The model's id for the call.
+        call_id: String,
+        /// The tool by the model's name for it.
+        tool: String,
+        /// The arguments as the model wrote them.
+        arguments: String,
+        /// The call as ognivo runs it; `None` when the arguments do not make one.
+        call: Option<Call>,
+        /// `None` while it runs.
+        result: Option<ToolResult>,
+        /// The files it changed, each against what it was.
+        changes: Vec<FileChange>,
+    },
+    /// What ognivo told the model between generations: limits, corrections, notes.
+    Notice { text: String },
+    /// A generation that ran nothing.
+    Void {
+        why: VoidReason,
+        /// Its calls as the model wrote them, which did not run.
+        calls: Vec<RawCall>,
+    },
+    /// The history became one message (docs/architecture.md §5.6): the prompt would
+    /// have held about `tokens`, over the `limit`.
+    Compaction {
+        tokens: u32,
+        limit: u32,
+        /// Messages it replaced; `None` while the model writes its summary.
+        replaced: Option<u32>,
+        /// Steps kept as they were.
+        kept: Option<u32>,
+        summary: Option<String>,
+    },
+    /// A question to the user, and the answer once there is one.
+    Approval {
+        tool: String,
+        /// What would happen: the command line, the file path.
+        action: String,
+        reason: String,
+        /// For running project code: what is unreviewed.
+        unreviewed: Vec<String>,
+        /// The subagent that asks, by its task's title.
+        agent: Option<String>,
+        allowed: Option<bool>,
+    },
+    /// Instruction files (AGENTS.md, CLAUDE.md) the model got, and those it did not.
+    Instructions {
+        files: Vec<String>,
+        skipped: Vec<Skipped>,
+    },
+    /// A task of `delegate`, worked on in a thread of its own.
+    Subagent {
+        /// Its number among the call's tasks, from 0.
+        index: u32,
+        title: String,
+        /// The files of a write task; `None` for a read task.
+        write: Option<Vec<String>>,
+        thread: Option<ThreadId>,
+        /// How its turn ended, as [`EventKind::TurnCompleted`] says; `None` while it works.
+        end: Option<TurnEnd>,
+        steps: Option<u32>,
+        /// The files it changed.
+        changed: Vec<String>,
+    },
+}
+
+/// A call as ognivo runs it, by Claude Code's name for the tool, with ognivo's names for
+/// the arguments whatever the model's were.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "name")]
+pub enum Call {
+    Read {
+        path: String,
+        offset: Option<u32>,
+        limit: Option<u32>,
+    },
+    Edit {
+        path: String,
+        old: String,
+        new: String,
+        replace_all: bool,
+    },
+    Write {
+        path: String,
+        content: String,
+    },
+    ApplyPatch {
+        patch: String,
+    },
+    Bash {
+        command: String,
+        timeout_ms: Option<u32>,
+    },
+    Grep {
+        pattern: String,
+        path: Option<String>,
+        glob: Option<String>,
+    },
+    Glob {
+        pattern: String,
+        path: Option<String>,
+    },
+    /// `delegate`.
+    Task {
+        tasks: Vec<Task>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Task {
+    pub title: String,
+    pub goal: String,
+    pub context: Option<String>,
+    pub write: bool,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ToolResult {
+    pub outcome: Outcome,
+    /// The result as the model got it.
+    pub text: String,
+    /// A command's exit code; `None` for a command a signal killed, and for other tools.
+    pub exit_code: Option<i32>,
+    #[ts(type = "number")]
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum ItemKind {
-    UserMessage,
-    /// Text the model shows the user: a Harmony preamble or the final answer.
-    AgentMessage,
-    /// Chain of thought: Harmony analysis, the Gemma thought channel, Qwen `<think>`.
-    Reasoning,
-    ToolCall,
-    CommandExecution,
-    FileChange,
-    Plan,
-    ApprovalRequest,
-    Compaction,
-    Usage,
-    Notice,
+pub enum Outcome {
+    /// It ran; a command may still have failed, as its exit code says.
+    Ok,
+    Error,
+    /// It needed an approval and did not get it, or a rule denies it.
+    Refused,
+    /// ognivo did not run it: a repeat with nothing changed, or past the turn's end.
+    Skipped,
 }
 
-/// Raw token ids are not part of the client protocol: the store keeps them, sealed, next
-/// to the event (ognivo-store `Record`), and the Inspector fetches them on demand.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A file a call wrote, as a line diff against what was there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FileChange {
+    /// Relative to the project root inside it, absolute outside.
+    pub path: String,
+    pub created: bool,
+    pub hunks: Vec<Hunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Hunk {
+    /// The first line in the old and the new text, from 1.
+    pub old_start: u32,
+    pub new_start: u32,
+    pub removed: Vec<String>,
+    pub added: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum VoidReason {
+    /// Its calls did not parse.
+    Malformed,
+    /// Neither a call nor an answer: it stopped inside its reasoning.
+    Empty,
+    /// It reached the step's token limit.
+    Truncated,
+    /// It kept repeating itself and was stopped.
+    Repeating,
+    /// The server rejected its format, and the step started over: what it showed is void.
+    Restarted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RawCall {
+    pub name: String,
+    pub arguments: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Skipped {
+    pub path: String,
+    pub why: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Generation {
+    /// Its number in the thread, from 1.
+    pub index: u32,
+    pub turn: TurnId,
+    /// `step`, or `summary` for a compaction's.
+    pub purpose: String,
+    /// `calls`, `answer`, `truncated`, `repeating` or `malformed`.
+    pub outcome: String,
+    /// The server's finish reason: `tool_calls`, `stop`, `length`.
+    pub finish: Option<String>,
+    pub seed: u32,
+    pub prompt_tokens: u32,
+    /// Of `prompt_tokens`, those the server took from its KV cache.
+    pub cached_tokens: u32,
+    pub completion_tokens: u32,
+    pub prompt_ms: Option<f64>,
+    pub generation_ms: Option<f64>,
+    /// sha256 of the request's messages and tools.
+    pub prompt_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Delta {
+    /// More text of an agent message or of reasoning.
     Text { text: String },
-    Json { value: serde_json::Value },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum StopReason {
-    Completed,
-    Interrupted,
-    WaitingForApproval,
+pub enum TurnEnd {
+    Answer,
+    /// The step limit came before an answer.
+    StepLimit,
+    /// Generations without usable calls, or a call that kept repeating.
+    Stuck,
+    TimeLimit,
+    /// The server failed.
     Error,
+    /// The user stopped it.
+    Interrupted,
 }
 
 #[cfg(test)]
@@ -86,13 +360,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn event_wire_shape() {
+    fn an_event_is_its_place_its_thread_and_what_happened() {
         let ev = Event {
             seq: 7,
-            thread: ThreadId("t1".into()),
-            turn: TurnId(2),
+            thread: ThreadId(3),
             kind: EventKind::ItemDelta {
-                item: ItemId(3),
+                item: ItemId(2),
                 delta: Delta::Text { text: "hi".into() },
             },
         };
@@ -100,8 +373,7 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!({
-                "seq": 7, "thread": "t1", "turn": 2,
-                "event": "item_delta", "item": 3,
+                "seq": 7, "thread": 3, "event": "item_delta", "item": 2,
                 "delta": {"type": "text", "text": "hi"}
             })
         );
