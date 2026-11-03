@@ -17,10 +17,12 @@ use crate::template::sha256_hex;
 /// Upper bound for the stream probe, queueing included.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DoctorOptions {
     /// Run a short generation to see whether every token id is streamed (uses the GPU).
     pub probe_stream: bool,
+    /// The model to check behind llama-server in router mode.
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -50,11 +52,23 @@ pub struct SpecialTokenCheck {
     pub survives_guard: Option<bool>,
 }
 
+/// A model of llama-server in router mode, and the profile its names point to.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutedModel {
+    pub id: String,
+    pub status: String,
+    pub profile: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
     pub url: String,
     pub reachable: bool,
     pub kind: Option<ServerKind>,
+    /// The models of a router, when the server is one.
+    pub router_models: Vec<RoutedModel>,
+    /// The router's model these checks are of.
+    pub model: Option<String>,
     pub build_info: Option<String>,
     pub model_path: Option<String>,
     pub n_ctx: Option<u32>,
@@ -75,6 +89,8 @@ impl DoctorReport {
             url: url.to_owned(),
             reachable: false,
             kind: None,
+            router_models: Vec::new(),
+            model: None,
             build_info: None,
             model_path: None,
             n_ctx: None,
@@ -113,7 +129,7 @@ pub async fn diagnose(
     opts: DoctorOptions,
 ) -> DoctorReport {
     let mut report = DoctorReport::new(url);
-    let server = match LlamaServer::new(url, api_key) {
+    let mut server = match LlamaServer::new(url, api_key) {
         Ok(s) => s,
         Err(e) => {
             report.note(Level::Error, format!("cannot create HTTP client: {e}"));
@@ -152,7 +168,7 @@ pub async fn diagnose(
     }
 
     // ik_llama.cpp is inferred only from a successful /props without build_info
-    let props = match server.get("/props").await {
+    let mut props = match server.get("/props").await {
         Ok((200, v)) if v.is_object() => {
             let p = Props::from_json(&v);
             report.kind = Some(ServerKind::from_props(
@@ -188,20 +204,44 @@ pub async fn diagnose(
     };
     let kind = report.kind.clone().unwrap_or(ServerKind::Unknown);
     report.build_info = props.build_info.clone();
+
+    if matches!(kind, ServerKind::Router { .. }) {
+        match server.models().await {
+            Ok(models) => {
+                report.router_models = models
+                    .iter()
+                    .map(|m| RoutedModel {
+                        id: m.id.clone(),
+                        status: m.status.clone(),
+                        profile: profile_by_name(&m.names(), profiles).map(|p| p.id.clone()),
+                    })
+                    .collect();
+            }
+            Err(e) => report.note(Level::Error, format!("/models failed: {e}")),
+        }
+        let Some(model) = opts.model.clone() else {
+            report.note(
+                Level::Info,
+                "llama-server router: every request names a model; pass --model to check one",
+            );
+            report.class = Some(caps::classify(&kind, StreamIds::NotProbed));
+            return report;
+        };
+        // the model's own server behind the router, which starts it if it loads on demand
+        server = server.for_model(&model);
+        props = match server.props().await {
+            Ok(p) => p,
+            Err(e) => {
+                report.note(Level::Error, format!("{model}: /props failed: {e}"));
+                return report;
+            }
+        };
+        report.model = Some(model);
+    }
     report.model_path = props.model_path.clone();
     report.n_ctx = props.n_ctx;
     report.total_slots = props.total_slots;
     report.chat_template_sha256 = props.chat_template.as_deref().map(sha256_hex);
-
-    if matches!(kind, ServerKind::Router { .. }) {
-        report.note(
-            Level::Warn,
-            "router endpoint: every request must name a model; per-model checks arrive with router support in M1 \
-             (point doctor at one model's server meanwhile)",
-        );
-        report.class = Some(caps::classify(&kind, StreamIds::NotProbed));
-        return report;
-    }
 
     let (profile, by_name) = match detect_profile(&server, &props, profiles).await {
         Ok(Some(found)) => found,
@@ -319,6 +359,28 @@ pub async fn identify<'p>(
 ) -> Result<Option<(&'p ModelProfile, bool)>, EngineError> {
     let props = server.props().await?;
     detect_profile(server, &props, profiles).await
+}
+
+/// The profile with the longest name hint in one of `names` (lowercase), as a model of a
+/// router is matched before anything of it is loaded.
+pub fn profile_by_name<'p>(
+    names: &[String],
+    profiles: &'p [ModelProfile],
+) -> Option<&'p ModelProfile> {
+    profiles
+        .iter()
+        .filter_map(|p| {
+            let best = p
+                .detect
+                .name_hints
+                .iter()
+                .filter(|h| names.iter().any(|n| n.contains(h.as_str())))
+                .map(|h| h.len())
+                .max()?;
+            Some((best, p))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, p)| p)
 }
 
 /// Picks the profile whose probe text is a single token with the expected id. Within a

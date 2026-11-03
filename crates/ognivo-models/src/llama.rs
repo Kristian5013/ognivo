@@ -23,14 +23,76 @@ pub struct LlamaServer {
     base: String,
     http: reqwest::Client,
     api_key: Option<String>,
+    /// The model every request names, for llama-server in router mode.
+    model: Option<String>,
 }
 
 impl fmt::Debug for LlamaServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LlamaServer")
             .field("base", &self.base)
+            .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .finish_non_exhaustive()
+    }
+}
+
+/// A model of llama-server in router mode, as its `/models` lists it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouterModel {
+    pub id: String,
+    pub aliases: Vec<String>,
+    /// `loaded`, `loading`, `unloaded`, `sleeping`, ...
+    pub status: String,
+    /// Its last start failed.
+    pub failed: bool,
+    /// The GGUF file the router runs it from, when its arguments say (once it was loaded).
+    pub path: Option<String>,
+}
+
+impl RouterModel {
+    fn from_json(v: &Value) -> Option<Self> {
+        let strings = |v: &Value| -> Vec<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let args = strings(&v["status"]["args"]);
+        let path = args
+            .iter()
+            .position(|a| a == "-m" || a == "--model")
+            .and_then(|i| args.get(i + 1))
+            .cloned();
+        Some(Self {
+            id: v["id"].as_str()?.to_owned(),
+            aliases: strings(&v["aliases"]),
+            status: v["status"]["value"]
+                .as_str()
+                .unwrap_or("unknown")
+                .to_owned(),
+            failed: v["status"]["failed"].as_bool() == Some(true),
+            path,
+        })
+    }
+
+    /// The names it goes by, lowercase: its id, aliases and file name.
+    pub fn names(&self) -> Vec<String> {
+        let file = self.path.as_deref().and_then(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_owned)
+        });
+        std::iter::once(&self.id)
+            .chain(&self.aliases)
+            .chain(file.as_ref())
+            .map(|n| n.to_lowercase())
+            .collect()
     }
 }
 
@@ -150,6 +212,7 @@ impl LlamaServer {
             base: base_url.trim_end_matches('/').to_owned(),
             http,
             api_key,
+            model: None,
         })
     }
 
@@ -157,11 +220,45 @@ impl LlamaServer {
         &self.base
     }
 
+    /// This server's `model` behind its router: every request names it, a GET with
+    /// `?model=` and a POST in its body, and the router passes it to that model's server.
+    /// Only `/health` stays the router's own.
+    pub fn for_model(&self, model: &str) -> Self {
+        Self {
+            model: Some(model.to_owned()),
+            ..self.clone()
+        }
+    }
+
+    /// The model every request names (router mode).
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
     fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
-        let rb = self.http.request(method, format!("{}{}", self.base, path));
+        let url = format!("{}{}", self.base, path);
+        let rb = match (&self.model, reqwest::Url::parse(&url)) {
+            (Some(model), Ok(mut named)) if method == Method::GET && path != "/health" => {
+                named.query_pairs_mut().append_pair("model", model);
+                self.http.request(method, named)
+            }
+            _ => self.http.request(method, url),
+        };
         match &self.api_key {
             Some(key) => rb.bearer_auth(key),
             None => rb,
+        }
+    }
+
+    /// `body` naming this server's model, if it has one.
+    fn named<'b>(&self, body: &'b Value) -> std::borrow::Cow<'b, Value> {
+        match (&self.model, body) {
+            (Some(model), Value::Object(fields)) if !fields.contains_key("model") => {
+                let mut body = body.clone();
+                body["model"] = json!(model);
+                std::borrow::Cow::Owned(body)
+            }
+            _ => std::borrow::Cow::Borrowed(body),
         }
     }
 
@@ -188,7 +285,7 @@ impl LlamaServer {
         let resp = self
             .request(Method::POST, path)
             .timeout(timeout)
-            .json(body)
+            .json(&self.named(body))
             .send()
             .await
             .map_err(http_err)?;
@@ -203,6 +300,29 @@ impl LlamaServer {
     pub async fn props(&self) -> Result<Props, EngineError> {
         match self.get("/props").await? {
             (200, v) if v.is_object() => Ok(Props::from_json(&v)),
+            (status, v) => Err(status_err(status, &v)),
+        }
+    }
+
+    /// The models of llama-server in router mode.
+    pub async fn models(&self) -> Result<Vec<RouterModel>, EngineError> {
+        match self.get("/models").await? {
+            (200, v) => Ok(v["data"]
+                .as_array()
+                .map(|a| a.iter().filter_map(RouterModel::from_json).collect())
+                .unwrap_or_default()),
+            (status, v) => Err(status_err(status, &v)),
+        }
+    }
+
+    /// Asks llama-server in router mode to start `model`; [`models`](Self::models) says
+    /// when it runs.
+    pub async fn load(&self, model: &str) -> Result<(), EngineError> {
+        match self
+            .post("/models/load", &json!({ "model": model }), META_TIMEOUT)
+            .await?
+        {
+            (200, _) => Ok(()),
             (status, v) => Err(status_err(status, &v)),
         }
     }
@@ -363,7 +483,7 @@ impl LlamaServer {
         body: &Value,
         total: Option<Duration>,
     ) -> Result<BoxStream<'static, Result<SseEvent, EngineError>>, EngineError> {
-        let mut rb = self.request(Method::POST, path).json(body);
+        let mut rb = self.request(Method::POST, path).json(&self.named(body));
         if let Some(t) = total {
             rb = rb.timeout(t);
         }
@@ -411,27 +531,92 @@ mod tests {
         assert_eq!((r.role.as_deref(), r.n_ctx), (Some("router"), None));
     }
 
-    /// Reads one request, headers and a Content-Length body; false at the end of the
-    /// connection.
-    async fn read_request(sock: &mut tokio::net::TcpStream) -> bool {
+    /// Reads one request, headers and a Content-Length body: its request line and body;
+    /// `None` at the end of the connection.
+    async fn read_request(sock: &mut tokio::net::TcpStream) -> Option<(String, Vec<u8>)> {
         use tokio::io::AsyncReadExt;
         let (mut buf, mut chunk) = (Vec::new(), [0u8; 4096]);
         loop {
             if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                let head = String::from_utf8_lossy(&buf[..end]).into_owned();
                 let len = head
+                    .to_ascii_lowercase()
                     .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .find_map(|l| l.strip_prefix("content-length:").map(str::to_owned))
                     .map_or(0, |v| v.trim().parse().unwrap());
                 if buf.len() >= end + 4 + len {
-                    return true;
+                    let line = head.lines().next().unwrap_or_default().to_owned();
+                    return Some((line, buf[end + 4..end + 4 + len].to_vec()));
                 }
             }
             match sock.read(&mut chunk).await {
-                Ok(0) | Err(_) => return false,
+                Ok(0) | Err(_) => return None,
                 Ok(n) => buf.extend_from_slice(&chunk[..n]),
             }
         }
+    }
+
+    /// llama-server in router mode reads the model from a GET's `?model=` and from a POST's
+    /// body; its `/health` is its own.
+    #[tokio::test]
+    async fn a_server_behind_a_router_names_its_model_in_every_request() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let Some((line, body)) = read_request(&mut sock).await else {
+                    continue;
+                };
+                let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                log.lock().unwrap().push((line, body));
+                let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            }
+        });
+        let server = LlamaServer::new(&url, None)
+            .unwrap()
+            .for_model("gpt oss/20b");
+        assert_eq!(server.model(), Some("gpt oss/20b"));
+        let limit = Duration::from_secs(5);
+        server.get("/health").await.unwrap();
+        server.get("/props").await.unwrap();
+        server
+            .post("/tokenize", &json!({"content": "x"}), limit)
+            .await
+            .unwrap();
+        // a body that names a model keeps it
+        let other = json!({"content": "x", "model": "other"});
+        server.post("/tokenize", &other, limit).await.unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].0, "GET /health HTTP/1.1");
+        assert_eq!(seen[1].0, "GET /props?model=gpt+oss%2F20b HTTP/1.1");
+        assert_eq!(seen[2].1, json!({"content": "x", "model": "gpt oss/20b"}));
+        assert_eq!(seen[3].1, other);
+    }
+
+    #[test]
+    fn a_router_lists_its_models_with_the_files_they_run_from() {
+        let m = RouterModel::from_json(&json!({
+            "id": "oss",
+            "aliases": ["GPT-OSS-20B"],
+            "status": {"value": "loaded", "args": ["llama-server", "-m", "/m/gpt-oss-20b-F16.gguf", "--port", "1"]}
+        }))
+        .unwrap();
+        assert_eq!(
+            (m.status.as_str(), m.path.as_deref()),
+            ("loaded", Some("/m/gpt-oss-20b-F16.gguf"))
+        );
+        assert_eq!(m.names(), ["oss", "gpt-oss-20b", "gpt-oss-20b-f16.gguf"]);
+        // before its first load a model has no arguments
+        let m = RouterModel::from_json(
+            &json!({"id": "q", "status": {"value": "unloaded", "args": []}}),
+        )
+        .unwrap();
+        assert_eq!((m.path.as_deref(), m.names()), (None, vec!["q".to_owned()]));
     }
 
     /// llama-server closes the connection after every stream although its headers offer
@@ -449,7 +634,7 @@ mod tests {
             loop {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 tokio::spawn(async move {
-                    if !read_request(&mut sock).await {
+                    if read_request(&mut sock).await.is_none() {
                         return;
                     }
                     let chunk = json!({"choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": "stop"}]});

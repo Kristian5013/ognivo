@@ -15,11 +15,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 toml.workspace = true
 
 [dev-dependencies]
 regex.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

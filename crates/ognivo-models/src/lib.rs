@@ -14,7 +14,9 @@
 //!   streams);
 //! - [`doctor`]: server checks behind `ognivo doctor`;
 //! - [`template`]: chat templates in the form servers report them;
-//! - [`grammar`]: GBNF for llama.cpp, JSON Schema turned into rules.
+//! - [`grammar`]: GBNF for llama.cpp, JSON Schema turned into rules;
+//! - [`router`]: the servers and their models, and whose step goes next at their slots,
+//!   by priority.
 //!
 //! - [`harmony`]: gpt-oss's format, rendered as its reference does and read back
 //!   tolerantly, for the Native path (M2);
@@ -35,6 +37,7 @@ pub mod llama;
 pub mod native;
 pub mod profile;
 pub mod repeat;
+pub mod router;
 pub mod sse;
 pub mod template;
 
@@ -49,3 +52,4 @@ pub use generic::{
 pub use guard::Guard;
 pub use native::{AnswerNow, NativeDriver};
 pub use profile::ModelProfile;
+pub use router::{Endpoint, Health, Lease, Priority, Router, RouterError, Scheduled};

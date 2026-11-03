@@ -109,10 +109,14 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     let max_steps = s.opts.max_steps;
     screen.line(
         &format!(
-            "ognivo chat · {} · {}{}",
+            "ognivo chat · {} · {}{}{}",
             s.profile,
             a.session.url,
-            n_ctx.map(|n| format!(" · n_ctx {n}")).unwrap_or_default()
+            n_ctx.map(|n| format!(" · n_ctx {n}")).unwrap_or_default(),
+            s.model
+                .as_deref()
+                .map(|m| format!(" · {m}"))
+                .unwrap_or_default()
         ),
         Paint::Plain,
     );

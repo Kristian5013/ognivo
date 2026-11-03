@@ -42,6 +42,9 @@ enum Command {
         /// Also run a short generation to verify that every token id is streamed (uses the GPU)
         #[arg(long)]
         probe: bool,
+        /// For llama-server in router mode: the model to check (its id or alias)
+        #[arg(long)]
+        model: Option<String>,
         /// Print the reports as JSON
         #[arg(long)]
         json: bool,
@@ -61,6 +64,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             urls,
             api_key,
             probe,
+            model,
             json,
         } => {
             let profiles = profile::builtin()?;
@@ -73,6 +77,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                     &profiles,
                     DoctorOptions {
                         probe_stream: probe,
+                        model: model.clone(),
                     },
                 );
                 let report = tokio::time::timeout(DOCTOR_TIMEOUT, check)
@@ -141,6 +146,24 @@ fn print_report(r: &DoctorReport) {
             r.n_ctx.map_or("?".into(), |n| n.to_string()),
             r.total_slots.map_or("?".into(), |n| n.to_string())
         );
+        if !r.router_models.is_empty() {
+            let models: Vec<String> = r
+                .router_models
+                .iter()
+                .map(|m| {
+                    format!(
+                        "{} ({}) → {}",
+                        m.id,
+                        m.status,
+                        m.profile.as_deref().unwrap_or("no profile")
+                    )
+                })
+                .collect();
+            println!("  models    {}", models.join(" · "));
+        }
+        if let Some(model) = &r.model {
+            println!("  checked   {model}, through the router");
+        }
         if r.profile.is_some() || r.model_path.is_some() {
             println!(
                 "  model     {} ({}) · {}",

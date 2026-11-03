@@ -29,7 +29,7 @@ the `trajectory.json` Harbor reads.
 | Path | What |
 |---|---|
 | `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`) |
-| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards, Harmony rendering and reading for the Native path |
+| `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the router (whose step goes next at a server's slots), the model driver and its guards, Harmony rendering and reading for the Native path |
 | `crates/ognivo-core` | agent loop and approvals |
 | `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell, apply_patch) and their per-model shapes |
 | `crates/ognivo-patch` | the apply_patch (V4A) format, after OpenAI Codex (Apache-2.0) |
@@ -61,6 +61,13 @@ actions that would need approval are refused and explained to the model. With `-
 generates: the Native path of M2, in progress. In `chat` on that path, ^\ ends the model's
 reasoning where it stands and asks for the answer, and `--priors` gives gpt-oss the tools of
 its training (container.exec, repo_browser with apply_patch) instead of ognivo's own.
+
+llama-server in router mode works as well: every request names the model, which is
+`--model` (for `doctor` too), else the one model of `--profile`, else the one loaded; one
+that is not loaded the router is asked to load. Requests are not pinned to a slot unless
+`--slot` says so: llama-server's prompt cache keeps each conversation's KV and puts it back
+into whichever slot the conversation comes to. When the server's slots are all busy, the
+next step goes by priority, the user's agent first, across ognivo sessions too.
 
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 

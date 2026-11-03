@@ -1,5 +1,6 @@
 //! A fake llama-server for the CLI tests: `/props`, and recorded-shape SSE streams for
-//! `/v1/chat/completions` in order. No GPU, no network.
+//! `/v1/chat/completions` in order; or llama-server's router in front of it. No GPU, no
+//! network.
 
 // each test binary uses its own part of it
 #![allow(dead_code)]
@@ -50,47 +51,85 @@ pub fn sse(events: &[Value]) -> String {
     )
 }
 
-/// Serves `/props` (n_ctx 4096) whenever asked and `responses` to the chat requests in
-/// order; returns its URL and the bodies of the chat requests.
+/// Serves `/props` (n_ctx 4096, one slot) whenever asked and `responses` to the chat
+/// requests in order; returns its URL and the bodies of the chat requests.
 pub async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let (url, bodies, _) = serve(None, responses).await;
+    (url, bodies)
+}
+
+/// llama-server's router with `models` (its `/models` list) in front of a fake server with
+/// two slots; returns its URL, the bodies of the chat requests, and the GET request lines.
+pub async fn fake_router(
+    models: Value,
+    responses: Vec<String>,
+) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
+    serve(Some(models), responses).await
+}
+
+fn json_response(v: &Value) -> String {
+    let body = v.to_string();
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+async fn serve(
+    router: Option<Value>,
+    responses: Vec<String>,
+) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let bodies = Arc::new(Mutex::new(Vec::new()));
-    let seen = bodies.clone();
+    let gets = Arc::new(Mutex::new(Vec::new()));
+    let (seen, got) = (bodies.clone(), gets.clone());
     tokio::spawn(async move {
         let mut responses = responses.into_iter();
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
             let (head, body) = read_request(&mut sock).await;
-            let resp = if head.starts_with("GET /props") {
-                let props =
-                    json!({"default_generation_settings": {"n_ctx": 4096}, "total_slots": 1})
-                        .to_string();
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{props}",
-                    props.len()
-                )
-            } else {
-                seen.lock()
-                    .unwrap()
-                    .push(serde_json::from_slice(&body).unwrap());
-                match responses.next() {
-                    Some(r) if r == HANG => {
-                        tokio::spawn(async move {
-                            let _sock = sock;
-                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                        });
-                        continue;
+            if head.starts_with("GET ") {
+                let line = head.lines().next().unwrap_or_default().to_owned();
+                got.lock().unwrap().push(line);
+            }
+            let resp = match &router {
+                Some(_) if head.starts_with("GET /props?model=") => json_response(
+                    &json!({"default_generation_settings": {"n_ctx": 4096}, "total_slots": 2}),
+                ),
+                Some(_) if head.starts_with("GET /props") => json_response(&json!({
+                    "role": "router",
+                    "build_info": "b11924-12cc59ba4",
+                    "default_generation_settings": {"n_ctx": 0, "params": {}}
+                })),
+                Some(models) if head.starts_with("GET /models") => {
+                    json_response(&json!({"data": models, "object": "list"}))
+                }
+                None if head.starts_with("GET /props") => json_response(
+                    &json!({"default_generation_settings": {"n_ctx": 4096}, "total_slots": 1}),
+                ),
+                _ => {
+                    seen.lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).unwrap());
+                    match responses.next() {
+                        Some(r) if r == HANG => {
+                            tokio::spawn(async move {
+                                let _sock = sock;
+                                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                            });
+                            continue;
+                        }
+                        Some(r) => r,
+                        None => continue,
                     }
-                    Some(r) => r,
-                    None => continue,
                 }
             };
             sock.write_all(resp.as_bytes()).await.unwrap();
             sock.shutdown().await.unwrap();
         }
     });
-    (url, bodies)
+    (url, bodies, gets)
 }
 
 /// The request line with the headers, and the body.

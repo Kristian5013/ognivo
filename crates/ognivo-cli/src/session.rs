@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fmt::Display;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Args;
 use ognivo_core::agent::{Agent, AgentOptions, Approver, Layout};
@@ -13,17 +13,20 @@ use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
-use ognivo_models::llama::LlamaServer;
+use ognivo_models::llama::{LlamaServer, RouterModel};
 use ognivo_models::{
-    AnswerNow, ChatDriver, Family, ModelDriver, NativeDriver, doctor, native, profile,
+    AnswerNow, ChatDriver, Endpoint, Family, ModelDriver, ModelProfile, NativeDriver, Priority,
+    Router, Scheduled, doctor, native, profile,
 };
 use ognivo_store::{NewSession, SessionRow, Store};
 
 /// The session store, in the data directory.
 const STORE_FILE: &str = "ognivo.db";
 /// How long the start waits for the server's `/props`; without them only the profile's
-/// budget decides when to compact.
+/// budget decides when to compact, and the server places every request.
 const PROPS_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long the start waits while llama-server in router mode starts the model.
+const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
@@ -48,9 +51,14 @@ pub struct SessionArgs {
     /// Reasoning level from the profile (e.g. low/medium/high for gpt-oss)
     #[arg(long)]
     pub level: Option<String>,
-    /// Server slot to pin, so the session keeps its KV cache
+    /// Server slot to pin every request to; without it the server places them, and its
+    /// prompt cache keeps each conversation's KV (a pinned slot loses it with --kv-unified)
     #[arg(long)]
     pub slot: Option<u32>,
+    /// For llama-server in router mode: the model to work with (its id or alias); without
+    /// it, the one model of --profile, or the one model loaded
+    #[arg(long)]
+    pub model: Option<String>,
     /// Where sessions and logs go; ~/.ognivo/data by default
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
@@ -91,6 +99,8 @@ impl Failure {
 #[derive(Debug)]
 pub struct Connected {
     pub driver: Box<dyn ModelDriver>,
+    /// The model it names in every request (llama-server in router mode).
+    pub model: Option<String>,
     /// Ends the model's reasoning where it stands (the Native path only).
     pub answer_now: Option<AnswerNow>,
     pub family: Family,
@@ -121,7 +131,10 @@ impl Connected {
             root: self.opts.root.clone(),
             profile: self.profile,
             level: self.level,
-            server: url.to_owned(),
+            server: match &self.model {
+                Some(model) => format!("{url} {model}"),
+                None => url.to_owned(),
+            },
             seed: self.opts.seed,
         };
         let session = Session::create(store, &new).map_err(store_failure)?;
@@ -219,8 +232,17 @@ impl SessionArgs {
                 }
             }
         }
-        let server = LlamaServer::new(&self.url, self.api_key.clone()).map_err(Failure::usage)?;
+        let base = LlamaServer::new(&self.url, self.api_key.clone()).map_err(Failure::usage)?;
         let profiles = profile::builtin().map_err(Failure::usage)?;
+        let wanted = self
+            .profile
+            .as_deref()
+            .or(stored.map(|r| r.profile.as_str()));
+        let model = self.routed(&base, &profiles, wanted).await?;
+        let server = match &model {
+            Some(m) => base.for_model(m),
+            None => base,
+        };
         let chosen = match &self.profile {
             Some(id) => profiles.iter().find(|p| &p.id == id),
             None => {
@@ -250,11 +272,20 @@ impl SessionArgs {
             .or_else(|| stored.and_then(|r| r.level.clone()));
         let (family, id, context) = (profile.family, profile.id.clone(), profile.context);
         // the slot's context bounds when the history is compacted
-        let n_ctx = tokio::time::timeout(PROPS_TIMEOUT, server.props())
+        let props = tokio::time::timeout(PROPS_TIMEOUT, server.props())
             .await
             .ok()
-            .and_then(Result::ok)
-            .and_then(|p| p.n_ctx);
+            .and_then(Result::ok);
+        let n_ctx = props.as_ref().and_then(|p| p.n_ctx);
+        // the server's slots, which the session's agents and other sessions take turns at
+        let router = Router::new(
+            vec![Endpoint {
+                server: server.clone(),
+                profile: id.clone(),
+                slots: props.as_ref().and_then(|p| p.total_slots).unwrap_or(0),
+            }],
+            Some(data_dir.join("slots")),
+        );
         let (driver, answer_now): (Box<dyn ModelDriver>, _) = if self.native {
             // the system message holds the day the session began, and must keep it
             let began = stored.map_or_else(native::now, |r| r.created.max(0) as u64 / 1000);
@@ -268,6 +299,9 @@ impl SessionArgs {
                 .map_err(Failure::usage)?;
             (Box::new(d), None)
         };
+        // the user's agent: its steps never wait for a turn
+        let driver: Box<dyn ModelDriver> =
+            Box::new(Scheduled::new(driver, router, &id, Priority::Main));
         let seed = stored.map(|r| r.seed).or(self.seed).unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -282,6 +316,7 @@ impl SessionArgs {
         });
         Ok(Connected {
             driver,
+            model,
             answer_now,
             family,
             profile: id,
@@ -308,6 +343,102 @@ impl SessionArgs {
             rule_files: loaded.files,
             rule_problems: loaded.problems,
         })
+    }
+
+    /// The model to name in every request when the server is llama-server in router mode:
+    /// `--model`, or else the one model of `profile`, or else the one model loaded. The
+    /// start waits while the router starts it.
+    async fn routed(
+        &self,
+        base: &LlamaServer,
+        profiles: &[ModelProfile],
+        profile: Option<&str>,
+    ) -> Result<Option<String>, Failure> {
+        let role = tokio::time::timeout(PROPS_TIMEOUT, base.props())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .and_then(|p| p.role);
+        if role.as_deref() != Some("router") {
+            return match &self.model {
+                Some(_) => Err(Failure::usage(format!(
+                    "{} runs one model, not llama-server's router: drop --model",
+                    self.url
+                ))),
+                None => Ok(None),
+            };
+        }
+        let models = base
+            .models()
+            .await
+            .map_err(|e| Failure::server(format!("{}: /models: {e}", self.url)))?;
+        let all = || {
+            models
+                .iter()
+                .map(|m| format!("{} ({})", m.id, m.status))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let chosen: Vec<&RouterModel> = match (&self.model, profile) {
+            (Some(name), _) => models
+                .iter()
+                .filter(|m| &m.id == name || m.aliases.contains(name))
+                .collect(),
+            (None, Some(id)) => models
+                .iter()
+                .filter(|m| {
+                    doctor::profile_by_name(&m.names(), profiles).is_some_and(|p| p.id == id)
+                })
+                .collect(),
+            (None, None) => models.iter().filter(|m| m.status == "loaded").collect(),
+        };
+        let model = match (chosen.as_slice(), &self.model) {
+            ([one], _) => (*one).clone(),
+            ([], Some(name)) => {
+                return Err(Failure::usage(format!(
+                    "the router at {} has no model {name}; it has {}",
+                    self.url,
+                    all()
+                )));
+            }
+            _ => {
+                return Err(Failure::usage(format!(
+                    "{} is llama-server's router with {}: pass --model",
+                    self.url,
+                    all()
+                )));
+            }
+        };
+        if model.status == "unloaded" {
+            self.load(base, &model.id).await?;
+        }
+        Ok(Some(model.id))
+    }
+
+    /// Has the router start `model`, and waits until it runs.
+    async fn load(&self, base: &LlamaServer, model: &str) -> Result<(), Failure> {
+        let failed = |e: String| Failure::server(format!("{}: {model}: {e}", self.url));
+        eprintln!("ognivo: the router at {} starts {model}…", self.url);
+        base.load(model).await.map_err(|e| failed(e.to_string()))?;
+        let began = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            let models = base.models().await.map_err(|e| failed(e.to_string()))?;
+            match models.iter().find(|m| m.id == model) {
+                Some(m) if m.status == "loaded" || m.status == "sleeping" => return Ok(()),
+                Some(m) if m.failed => {
+                    return Err(failed("the router could not start it".into()));
+                }
+                Some(_) => {}
+                None => return Err(failed("the router no longer has it".into())),
+            }
+            if began.elapsed() > LOAD_TIMEOUT {
+                return Err(failed(format!(
+                    "not running after {} s",
+                    LOAD_TIMEOUT.as_secs()
+                )));
+            }
+        }
     }
 }
 
