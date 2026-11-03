@@ -29,13 +29,13 @@ use serde_json::{Value, json};
 use crate::Family;
 use crate::driver::{DriverError, DriverEvent, Finished, ModelDriver, StepRequest};
 use crate::engine::{
-    self, CompletionRequest, EngineError, SamplerSpec, Stop, TokenEvent, TokenId, Usage,
+    self, CompletionRequest, Constraint, EngineError, SamplerSpec, Stop, TokenEvent, TokenId, Usage,
 };
 use crate::generic::{
     Channel, ChatMessage, ExecutableCalls, FinishReason, Outcome, ToolCall, is_context_exceeded,
 };
 use crate::harmony::parse::{self, CONTROL, End, Event, Kind, Reader};
-use crate::harmony::{Effort, Message, Namespace, Piece, Prompt, Special, System, Tool};
+use crate::harmony::{self, Effort, Message, Namespace, Piece, Prompt, Special, System, Tool};
 use crate::llama::LlamaServer;
 use crate::profile::ModelProfile;
 use crate::repeat::{Loop, Repeats};
@@ -376,12 +376,14 @@ impl NativeDriver {
             seed: Some(req.seed),
             ..SamplerSpec::from(self.profile.sampling.main)
         };
+        // with tools, a call's arguments are one JSON object (§5.7)
+        let constraint = (!req.tools.is_empty()).then(harmony::arguments_constraint);
         let completion = CompletionRequest {
             prompt: ids.clone(),
             sampler,
             n_predict: req.max_tokens,
             slot: self.slot,
-            constraint: None,
+            constraint: constraint.clone(),
             banned: Vec::new(),
         };
         let payloads = self
@@ -405,6 +407,7 @@ impl NativeDriver {
             budget: req.max_tokens as usize * 3 / 4,
             request_start: 0,
             counts: Counts::default(),
+            constraint,
         };
         let events = stream::unfold(Some((self, g)), |state| async move {
             let (this, g) = state?;
@@ -460,7 +463,7 @@ impl NativeDriver {
             sampler: g.sampler,
             n_predict: g.max_tokens.saturating_sub(used).max(MIN_PREDICT),
             slot: self.slot,
-            constraint: None,
+            constraint: g.constraint.clone(),
             banned: Vec::new(),
         };
         let payloads = self
@@ -620,6 +623,7 @@ struct Generation {
     /// Where the generation of the request in progress began among the reader's ids.
     request_start: usize,
     counts: Counts,
+    constraint: Option<Constraint>,
 }
 
 /// The repetition guard over the streams of one generation.
@@ -1056,15 +1060,31 @@ mod tests {
     /// A llama-server with the fake vocabulary: `/tokenize` and `/completion`, a connection
     /// each; the prompts it was sent come back in order.
     async fn fake_server(completions: Vec<Completion>) -> (String, Arc<Mutex<Vec<Vec<TokenId>>>>) {
+        let (url, prompts, _) = fake_server_bodies(completions).await;
+        (url, prompts)
+    }
+
+    /// [`fake_server`], with the bodies of the `/completion` requests too.
+    #[allow(clippy::type_complexity)]
+    async fn fake_server_bodies(
+        completions: Vec<Completion>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Vec<TokenId>>>>,
+        Arc<Mutex<Vec<Value>>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let seen = prompts.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let kept = bodies.clone();
         let queue = Arc::new(Mutex::new(completions.into_iter()));
         tokio::spawn(async move {
             loop {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 let seen = seen.clone();
+                let kept = kept.clone();
                 let queue = queue.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
@@ -1124,6 +1144,7 @@ mod tests {
                             .map(|v| v.as_u64().unwrap() as TokenId)
                             .collect();
                         seen.lock().unwrap().push(prompt);
+                        kept.lock().unwrap().push(body.clone());
                         let c = queue.lock().unwrap().next().expect("a completion");
                         let mut events: String = c
                             .ids
@@ -1144,7 +1165,7 @@ mod tests {
                 });
             }
         });
-        (url, prompts)
+        (url, prompts, bodies)
     }
 
     fn driver(url: &str) -> NativeDriver {
@@ -1572,6 +1593,37 @@ mod tests {
         assert_eq!((f.reasoning.as_str(), f.content.as_str()), ("L", "Now."));
         // the press is spent
         assert!(!d.answer_now.take());
+    }
+
+    #[tokio::test]
+    async fn every_request_with_tools_keeps_the_arguments_json() {
+        let bare = "«channel»analysis«message»Hmm.«return»";
+        let (url, _, bodies) = fake_server_bodies(vec![
+            answer(bare),
+            answer("«channel»final«message»Ok.«return»"),
+        ])
+        .await;
+        let d = driver(&url);
+        run(&d, request(vec![ChatMessage::User("go".into())], 1)).await;
+        {
+            let bodies = bodies.lock().unwrap();
+            // the first request and the one that continues it
+            assert_eq!(bodies.len(), 2);
+            for b in bodies.iter() {
+                assert_eq!(b["grammar_lazy"], json!(true));
+                assert_eq!(b["grammar_triggers"][0]["type"], json!(2));
+                assert!(b["grammar"].as_str().unwrap().starts_with("root ::= "));
+            }
+        }
+        // a step without tools makes no calls, and has none
+        let (url, _, bodies) =
+            fake_server_bodies(vec![answer("«channel»final«message»Ok.«return»")]).await;
+        let req = StepRequest {
+            tools: Vec::new(),
+            ..request(vec![ChatMessage::User("go".into())], 1)
+        };
+        run(&driver(&url), req).await;
+        assert!(bodies.lock().unwrap()[0].get("grammar").is_none());
     }
 
     #[tokio::test]

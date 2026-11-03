@@ -1036,6 +1036,7 @@ name = "ognivo-models"
 version = "0.0.1"
 dependencies = [
  "futures",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

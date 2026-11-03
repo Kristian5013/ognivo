@@ -19,7 +19,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::engine::TokenId;
+use crate::engine::{Constraint, TokenId, Trigger};
 
 /// The control tokens of Harmony and their ids in o200k_harmony.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -195,6 +195,38 @@ pub enum Effort {
     Medium,
     High,
 }
+
+/// The grammar that keeps a call's arguments one JSON object (§5.7). It is lazy: it waits for
+/// the message token of a call to a function, at the start of the generation or of an
+/// assistant message as llama.cpp's own triggers for gpt-oss do, and from there admits one
+/// JSON object and then only the end of the generation. Headers stay free, and the reader
+/// takes them as they come ([`parse`]).
+///
+/// It keeps out JSON the model gets wrong (the first live run of the Native path had one
+/// stray quote in 195 generations, which the server's grammar keeps out on the Generic path),
+/// not control tokens inside a string: a grammar sees their text.
+pub fn arguments_constraint() -> Constraint {
+    let e = |s: Special| s.text().replace('|', r"\|");
+    let trigger = format!(
+        r"(?:^|{start}assistant)(?:{channel}[a-z]+)?\s*to=functions\.[A-Za-z0-9_]+(?:{channel}[a-z]+)?[ a-z]*(?:{constrain}[a-z]+)?({message})$",
+        start = e(Special::Start),
+        channel = e(Special::Channel),
+        constrain = e(Special::Constrain),
+        message = e(Special::Message),
+    );
+    let gbnf = format!("root ::= \"{}\" ws object\n{JSON}", Special::Message.text());
+    Constraint::new(gbnf, vec![Trigger::Pattern(trigger)])
+}
+
+/// JSON as llama.cpp's `grammars/json.gbnf` has it, with `\/` among the escapes, deeper
+/// indents, and the digits of an exponent as JSON has them.
+const JSON: &str = r#"object ::= "{" ws ( string ":" ws value ( "," ws string ":" ws value )* )? "}" ws
+value ::= object | array | string | number | ( "true" | "false" | "null" ) ws
+array ::= "[" ws ( value ( "," ws value )* )? "]" ws
+string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F]{4} ) )* "\"" ws
+number ::= "-"? ( "0" | [1-9] [0-9]{0,15} ) ( "." [0-9]+ )? ( [eE] [-+]? [0-9]{1,16} )? ws
+ws ::= | " " | "\n" [ \t]{0,40}
+"#;
 
 /// A tool as Harmony declares it.
 #[derive(Debug, Clone, PartialEq)]
@@ -768,6 +800,61 @@ mod tests {
             .collect();
         let golden_specials: Vec<u32> = ids.into_iter().filter(|&id| id >= 199_998).collect();
         assert_eq!(specials, golden_specials);
+    }
+
+    #[test]
+    fn the_grammar_wakes_at_a_call_header_and_nowhere_else() {
+        let c = arguments_constraint();
+        let [Trigger::Pattern(p)] = c.triggers.as_slice() else {
+            panic!("{:?}", c.triggers)
+        };
+        // llama.cpp searches what the generation wrote so far, control tokens as their text
+        let re = regex::Regex::new(p).unwrap();
+        let text = |f: &str| {
+            let mut out = f.to_owned();
+            for s in Special::ALL {
+                let name = s.text();
+                out = out.replace(&format!("«{}»", &name[2..name.len() - 2]), &name);
+            }
+            out
+        };
+        let wakes = [
+            // the first message, the recipient after the channel or after the role
+            "«channel»commentary to=functions.read_file «constrain»json«message»",
+            " to=functions.read_file«channel»commentary «constrain»json«message»",
+            // a later message, both orders
+            "«channel»analysis«message»Need it.«end»«start»assistant«channel»commentary to=functions.read_file «constrain»json«message»",
+            "«channel»analysis«message»Need it.«end»«start»assistant to=functions.read_file«channel»commentary «constrain»json«message»",
+            // a plain content type, a glued constrain, the analysis channel
+            "«channel»commentary to=functions.read_file json«message»",
+            "«channel»commentary to=functions.turn_on«constrain»json«message»",
+            " to=functions.special_function«channel»analysis«message»",
+            // after a junk header (llama.cpp #27720)
+            "«channel»commentary 2? Ask.«end»«start»assistant«channel»commentary to=functions.turn_on«constrain»json«message»",
+        ];
+        for w in wakes {
+            let t = text(w);
+            let m = re.captures(&t).unwrap_or_else(|| panic!("{w}"));
+            // the grammar starts at the message token
+            assert_eq!(m.get(1).unwrap().as_str(), Special::Message.text());
+        }
+        let sleeps = [
+            "«channel»analysis«message»",
+            // the text of a header inside a thought
+            "«channel»analysis«message»Call it as to=functions.read «constrain»json«message»",
+            // no function: the stray header, a namespace of the model's own
+            "«channel»commentary to=assistant«channel»analysis«message»",
+            "«channel»commentary to=container.exec «constrain»json«message»",
+            "«channel»commentary to=functions.read «constrain»json«message»{",
+        ];
+        for s in sleeps {
+            assert!(!re.is_match(&text(s)), "{s}");
+        }
+        // the grammar's root begins at that token: llama.cpp feeds it from there
+        assert!(c.gbnf.starts_with(&format!(
+            "root ::= \"{}\" ws object",
+            Special::Message.text()
+        )));
     }
 
     #[test]
