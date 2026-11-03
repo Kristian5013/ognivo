@@ -15,7 +15,9 @@
 //! - [`doctor`]: server checks behind `ognivo doctor`;
 //! - [`template`]: chat templates in the form servers report them.
 //!
-//! Format codecs (Harmony, Gemma 4, Qwen XML) and the Native driver arrive in M2–M3.
+//! - [`harmony`]: gpt-oss's format, rendered as its reference does, for the Native path (M2).
+//!
+//! The Native driver and the codecs of Gemma 4 and Qwen XML arrive in M2–M3.
 
 pub mod caps;
 pub mod doctor;
@@ -24,6 +26,7 @@ pub mod engine;
 pub mod family;
 pub mod generic;
 pub mod guard;
+pub mod harmony;
 pub mod llama;
 pub mod profile;
 pub mod repeat;
