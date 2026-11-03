@@ -13,7 +13,8 @@
 //! - [`llama`]: the HTTP client for llama-server and ik_llama.cpp ([`sse`] parses its
 //!   streams);
 //! - [`doctor`]: server checks behind `ognivo doctor`;
-//! - [`template`]: chat templates in the form servers report them.
+//! - [`template`]: chat templates in the form servers report them;
+//! - [`grammar`]: GBNF for llama.cpp, JSON Schema turned into rules.
 //!
 //! - [`harmony`]: gpt-oss's format, rendered as its reference does and read back
 //!   tolerantly, for the Native path (M2);
@@ -27,6 +28,7 @@ pub mod driver;
 pub mod engine;
 pub mod family;
 pub mod generic;
+pub mod grammar;
 pub mod guard;
 pub mod harmony;
 pub mod llama;

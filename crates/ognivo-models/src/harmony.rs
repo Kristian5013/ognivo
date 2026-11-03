@@ -196,37 +196,46 @@ pub enum Effort {
     High,
 }
 
-/// The grammar that keeps a call's arguments one JSON object (§5.7). It is lazy: it waits for
-/// the message token of a call to a function, at the start of the generation or of an
-/// assistant message as llama.cpp's own triggers for gpt-oss do, and from there admits one
-/// JSON object and then only the end of the generation. Headers stay free, and the reader
-/// takes them as they come ([`parse`]).
+/// The grammar of a call to the functions in `tools` (§5.7): from `to=functions` on, a
+/// declared function's name, the rest of its header in either order, and its arguments as
+/// its schema has them ([`grammar`](crate::grammar)), then only the end of the generation.
+/// llama.cpp's own grammar for gpt-oss keeps calls so on the Generic path: without it, the
+/// first runs of the Native path had gpt-oss call the tools of its training (`search`, 10
+/// times in 432 calls) and give one tool's arguments to another (`glob` to glob, 8 times).
 ///
-/// It keeps out JSON the model gets wrong (the first live run of the Native path had one
-/// stray quote in 195 generations, which the server's grammar keeps out on the Generic path),
-/// not control tokens inside a string: a grammar sees their text.
-pub fn arguments_constraint() -> Constraint {
+/// It is lazy. It wakes at `to=functions` in a header, at the start of the generation or of
+/// an assistant message, as llama.cpp's triggers for gpt-oss do: llama.cpp searches what the
+/// generation wrote so far, control tokens as their text, and feeds the grammar from the
+/// first group of the match. Reasoning stays free, and the reader takes the header as it
+/// comes ([`parse`]). A control token inside a string it lets through, since it sees its
+/// text; the reader keeps such a call from running.
+pub fn arguments_constraint(tools: &[crate::generic::ToolDecl]) -> Constraint {
     let e = |s: Special| s.text().replace('|', r"\|");
     let trigger = format!(
-        r"(?:^|{start}assistant)(?:{channel}[a-z]+)?\s*to=functions\.[A-Za-z0-9_]+(?:{channel}[a-z]+)?[ a-z]*(?:{constrain}[a-z]+)?({message})$",
+        r"(?:^|{start}assistant)(?:{channel}(?:commentary|analysis))?(\s*to=functions)",
         start = e(Special::Start),
         channel = e(Special::Channel),
-        constrain = e(Special::Constrain),
-        message = e(Special::Message),
     );
-    let gbnf = format!("root ::= \"{}\" ws object\n{JSON}", Special::Message.text());
+    let lit = |s: Special| crate::grammar::literal(&s.text());
+    let header = format!(
+        "( {channel} ( \"commentary\" | \"analysis\" ) )? \" \"? ( {constrain} \"json\" | \"json\" )? {message} ws",
+        channel = lit(Special::Channel),
+        constrain = lit(Special::Constrain),
+        message = lit(Special::Message),
+    );
+    let mut rules = crate::grammar::Rules::default();
+    let header = rules.add("header", header);
+    let calls: Vec<String> = tools
+        .iter()
+        .map(|t| {
+            let args = rules.schema(&t.parameters, &format!("args-{}", t.name));
+            format!("{} {header} {args}", crate::grammar::literal(&t.name))
+        })
+        .collect();
+    let call = rules.add("call", calls.join(" | "));
+    let gbnf = rules.grammar(&format!("[ \\t\\n]* \"to=functions.\" {call}"));
     Constraint::new(gbnf, vec![Trigger::Pattern(trigger)])
 }
-
-/// JSON as llama.cpp's `grammars/json.gbnf` has it, with `\/` among the escapes, deeper
-/// indents, and the digits of an exponent as JSON has them.
-const JSON: &str = r#"object ::= "{" ws ( string ":" ws value ( "," ws string ":" ws value )* )? "}" ws
-value ::= object | array | string | number | ( "true" | "false" | "null" ) ws
-array ::= "[" ws ( value ( "," ws value )* )? "]" ws
-string ::= "\"" ( [^"\\\x7F\x00-\x1F] | "\\" ( ["\\/bfnrt] | "u" [0-9a-fA-F]{4} ) )* "\"" ws
-number ::= "-"? ( "0" | [1-9] [0-9]{0,15} ) ( "." [0-9]+ )? ( [eE] [-+]? [0-9]{1,16} )? ws
-ws ::= | " " | "\n" [ \t]{0,40}
-"#;
 
 /// A tool as Harmony declares it.
 #[derive(Debug, Clone, PartialEq)]
@@ -804,7 +813,12 @@ mod tests {
 
     #[test]
     fn the_grammar_wakes_at_a_call_header_and_nowhere_else() {
-        let c = arguments_constraint();
+        let read = crate::generic::ToolDecl {
+            name: "read_file".into(),
+            description: "Read a file".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+        };
+        let c = arguments_constraint(&[read]);
         let [Trigger::Pattern(p)] = c.triggers.as_slice() else {
             panic!("{:?}", c.triggers)
         };
@@ -820,23 +834,23 @@ mod tests {
         };
         let wakes = [
             // the first message, the recipient after the channel or after the role
-            "«channel»commentary to=functions.read_file «constrain»json«message»",
-            " to=functions.read_file«channel»commentary «constrain»json«message»",
+            "«channel»commentary to=functions",
+            " to=functions",
+            "«channel»analysis to=functions",
             // a later message, both orders
-            "«channel»analysis«message»Need it.«end»«start»assistant«channel»commentary to=functions.read_file «constrain»json«message»",
-            "«channel»analysis«message»Need it.«end»«start»assistant to=functions.read_file«channel»commentary «constrain»json«message»",
-            // a plain content type, a glued constrain, the analysis channel
-            "«channel»commentary to=functions.read_file json«message»",
-            "«channel»commentary to=functions.turn_on«constrain»json«message»",
-            " to=functions.special_function«channel»analysis«message»",
+            "«channel»analysis«message»Need it.«end»«start»assistant«channel»commentary to=functions",
+            "«channel»analysis«message»Need it.«end»«start»assistant to=functions",
             // after a junk header (llama.cpp #27720)
-            "«channel»commentary 2? Ask.«end»«start»assistant«channel»commentary to=functions.turn_on«constrain»json«message»",
+            "«channel»commentary 2? Ask.«end»«start»assistant«channel»commentary to=functions",
         ];
         for w in wakes {
             let t = text(w);
             let m = re.captures(&t).unwrap_or_else(|| panic!("{w}"));
-            // the grammar starts at the message token
-            assert_eq!(m.get(1).unwrap().as_str(), Special::Message.text());
+            // the grammar starts at the recipient
+            assert!(
+                m.get(1).unwrap().as_str().trim_start() == "to=functions",
+                "{w}"
+            );
         }
         let sleeps = [
             "«channel»analysis«message»",
@@ -845,16 +859,20 @@ mod tests {
             // no function: the stray header, a namespace of the model's own
             "«channel»commentary to=assistant«channel»analysis«message»",
             "«channel»commentary to=container.exec «constrain»json«message»",
-            "«channel»commentary to=functions.read «constrain»json«message»{",
+            "«channel»final«message»Use to=functions there.",
         ];
         for s in sleeps {
             assert!(!re.is_match(&text(s)), "{s}");
         }
-        // the grammar's root begins at that token: llama.cpp feeds it from there
-        assert!(c.gbnf.starts_with(&format!(
-            "root ::= \"{}\" ws object",
-            Special::Message.text()
-        )));
+        // from there the grammar takes the function's name and the rest of the header
+        assert!(
+            c.gbnf
+                .starts_with("root ::= [ \\t\\n]* \"to=functions.\" call\n")
+        );
+        assert!(
+            c.gbnf
+                .contains("call ::= \"read_file\" header args-read-file\n")
+        );
     }
 
     #[test]

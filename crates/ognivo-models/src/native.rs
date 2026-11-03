@@ -376,8 +376,8 @@ impl NativeDriver {
             seed: Some(req.seed),
             ..SamplerSpec::from(self.profile.sampling.main)
         };
-        // with tools, a call's arguments are one JSON object (§5.7)
-        let constraint = (!req.tools.is_empty()).then(harmony::arguments_constraint);
+        // with tools, a call is one of them, with arguments as its schema has them (§5.7)
+        let constraint = (!req.tools.is_empty()).then(|| harmony::arguments_constraint(&req.tools));
         let completion = CompletionRequest {
             prompt: ids.clone(),
             sampler,

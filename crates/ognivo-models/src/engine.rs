@@ -77,6 +77,14 @@ impl Constraint {
             preserved_tokens,
         }
     }
+
+    pub fn gbnf(&self) -> &str {
+        &self.gbnf
+    }
+
+    pub fn triggers(&self) -> &[Trigger] {
+        &self.triggers
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
