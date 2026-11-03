@@ -94,6 +94,20 @@ impl Ledger {
         self.entries.extend(other.entries);
     }
 
+    /// Only its builds and tests, run or refused: what a read task did, which was to change
+    /// nothing. Its commands with side effects stay in the edit journal, for review; the
+    /// answer is not held back for a build after them (2026-11-03: an analysis in four read
+    /// tasks sent the user's agent to look for tests after `python - <<'PY'`).
+    pub fn runs_only(self) -> Ledger {
+        Ledger {
+            entries: self
+                .entries
+                .into_iter()
+                .filter(|e| matches!(e, Entry::Ran(_) | Entry::Refused(_)))
+                .collect(),
+        }
+    }
+
     /// The builds and tests of the turn, in order.
     pub fn runs(&self) -> impl Iterator<Item = &Run> {
         self.entries.iter().filter_map(|e| match e {
@@ -318,6 +332,30 @@ mod tests {
             "{s}"
         );
         assert!(s.ends_with("refused: `cargo test`"), "{s}");
+    }
+
+    #[test]
+    fn a_read_task_brings_its_builds_and_tests_and_nothing_it_changed() {
+        let root = Path::new("/p");
+        let mut main = Ledger::default();
+        main.changed("/p/src/a.rs".into());
+        let mut read = Ledger::default();
+        read.side_effect("python -m compileall .");
+        read.ran(run("cargo test", 0));
+        read.refused("make");
+        main.extend(read.clone().runs_only());
+        // its passing test counts for the change before it
+        assert_eq!(
+            main.status(root),
+            Verification::Passed {
+                command: "cargo test".into()
+            }
+        );
+        let mut analysis = Ledger::default();
+        let mut read = Ledger::default();
+        read.side_effect("python - <<'PY'");
+        analysis.extend(read.runs_only());
+        assert_eq!(analysis.status(root), Verification::NoChanges);
     }
 
     #[test]

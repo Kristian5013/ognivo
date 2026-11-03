@@ -353,7 +353,12 @@ impl Agent {
             self.changed();
         }
         self.journal.absorb(std::mem::take(&mut sub.journal));
-        self.ledger.extend(std::mem::take(&mut sub.ledger));
+        let ledger = std::mem::take(&mut sub.ledger);
+        self.ledger.extend(if task.write {
+            ledger
+        } else {
+            ledger.runs_only()
+        });
         sub.close();
         let (label, said) = match end {
             Ok(TurnEnd::Answer(a)) => {

@@ -416,6 +416,8 @@ impl NativeDriver {
             open: None,
             watch: Watch::default(),
             received: 0,
+            released: String::new(),
+            lost: false,
             seed: req.seed,
             call_id,
             prompt: ids,
@@ -518,8 +520,9 @@ async fn advance(
 ) -> Option<(Batch, Option<(NativeDriver, Generation)>)> {
     let mut batch = Vec::new();
     match g.events.next().await? {
-        Ok(TokenEvent::Tokens { ids, .. }) => {
+        Ok(TokenEvent::Tokens { ids, text }) => {
             g.received += ids.len();
+            g.released.push_str(&text);
             if g.reader.stopped() {
                 // past the call or the answer: only the end of the stream is wanted
                 return Some((batch, Some((this, g))));
@@ -566,14 +569,28 @@ async fn advance(
         }
         Ok(TokenEvent::Done { stop, usage }) => {
             let predicted = usage.predicted_n.and_then(|n| usize::try_from(n).ok());
-            if let Some(n) = predicted
-                && n != g.received
-            {
-                let e = EngineError::Protocol(format!(
-                    "the server streamed {} of {n} token ids; the Native path needs a server that streams them all (class A, §5.4)",
-                    g.received
-                ));
-                return Some((vec![Err(DriverError::Engine(e))], None));
+            match predicted {
+                // ids it did not generate cannot be read
+                Some(n) if n < g.received => {
+                    let e = EngineError::Protocol(format!(
+                        "the server streamed {} token ids for {n} it generated (class A, §5.4)",
+                        g.received
+                    ));
+                    return Some((vec![Err(DriverError::Engine(e))], None));
+                }
+                // seen on the GPU with the pinned build: a few ids missing, as many as the
+                // characters the reader could not decode, while the text had them all
+                Some(n) if n > g.received => {
+                    g.lost = true;
+                    if !g.mendable() {
+                        let e = EngineError::Protocol(format!(
+                            "the server streamed {} of {n} token ids, and its text does not show what the rest were (class A, §5.4)",
+                            g.received
+                        ));
+                        return Some((vec![Err(DriverError::Engine(e))], None));
+                    }
+                }
+                _ => {}
             }
             g.counts.finished(usage);
             let limit = matches!(stop, Stop::Limit | Stop::ContextFull);
@@ -629,6 +646,12 @@ struct Generation {
     watch: Watch,
     /// Ids the request's stream brought, those after reading stopped included.
     received: usize,
+    /// The text the server released with them, over the step's requests: whole even where
+    /// the stream lost ids.
+    released: String,
+    /// A request streamed fewer ids than it generated: the text is mended from `released`,
+    /// and the ids do not go back as they came.
+    lost: bool,
     seed: u32,
     call_id: String,
     /// The step's prompt, which every request of the step continues.
@@ -780,11 +803,26 @@ impl Generation {
     }
 
     /// The step as the agent gets it; `limit` when the server cut its generation.
+    /// Whether the messages, mended, are each whole in the text the server released: a lost
+    /// id of a character the reader could decode would leave a piece out unseen.
+    fn mendable(&self) -> bool {
+        mend(self.reader.messages(), &self.released)
+            .iter()
+            .all(|m| self.released.contains(&*m.text()))
+    }
+
     fn finish(&mut self, limit: bool) -> Finished {
         self.reader.finish();
-        let k = kept(self.reader.messages(), limit, &self.call_id, &self.names);
-        let tokens = (k.clean && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
-            .then(|| self.reader.ids().to_vec());
+        let messages = if self.lost {
+            mend(self.reader.messages(), &self.released)
+        } else {
+            self.reader.messages().to_vec()
+        };
+        let k = kept(&messages, limit, &self.call_id, &self.names);
+        // ids that are not all there do not go back as they came
+        let tokens =
+            (k.clean && !self.lost && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
+                .then(|| self.reader.ids().to_vec());
         Finished {
             content: k.content,
             reasoning: k.reasoning,
@@ -981,6 +1019,77 @@ fn same_json(a: &str, b: &str) -> bool {
     }
 }
 
+/// The messages of a generation whose stream lost ids, mended from the text the server
+/// released: where a character lost a byte, the content is not UTF-8, and the server's text
+/// has the character. The generation goes back as text, not as its ids: the server's cache
+/// serves the conversation up to it.
+fn mend(messages: &[parse::Message], released: &str) -> Vec<parse::Message> {
+    messages
+        .iter()
+        .map(|m| {
+            let mut m = m.clone();
+            if !m.valid_utf8() {
+                m.content = mended(&m.text(), released).into_bytes();
+            }
+            m
+        })
+        .collect()
+}
+
+/// `decoded` with each run of U+FFFD replaced by the one character of more than one byte
+/// that `released` has there; as it is when its parts do not lie in `released` in order
+/// around one such character each.
+fn mended(decoded: &str, released: &str) -> String {
+    const LOST: char = '\u{FFFD}';
+    if !decoded.contains(LOST) {
+        return decoded.to_owned();
+    }
+    let mut runs = String::with_capacity(decoded.len());
+    for ch in decoded.chars() {
+        if !(ch == LOST && runs.ends_with(LOST)) {
+            runs.push(ch);
+        }
+    }
+    let parts: Vec<&str> = runs.split(LOST).collect();
+    // where the first part may begin, the last place first: an answer comes last
+    let starts: Vec<usize> = match parts.as_slice() {
+        [first, ..] if !first.is_empty() => released.match_indices(first).map(|(i, _)| i).collect(),
+        [_, second, ..] if !second.is_empty() => released
+            .match_indices(second)
+            .filter_map(|(i, _)| released[..i].char_indices().next_back().map(|(j, _)| j))
+            .collect(),
+        _ => Vec::new(),
+    };
+    starts
+        .into_iter()
+        .rev()
+        .find_map(|start| laid(&parts, released, start))
+        .unwrap_or_else(|| decoded.to_owned())
+}
+
+/// `parts` laid over `released` from `start`, with one character of more than one byte
+/// between each two.
+fn laid(parts: &[&str], released: &str, start: usize) -> Option<String> {
+    let mut at = start;
+    let mut out = String::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            let ch = released.get(at..)?.chars().next()?;
+            if ch.len_utf8() < 2 {
+                return None;
+            }
+            out.push(ch);
+            at += ch.len_utf8();
+        }
+        if !released.get(at..)?.starts_with(part) {
+            return None;
+        }
+        out.push_str(part);
+        at += part.len();
+    }
+    Some(out)
+}
+
 /// A generation's ids as they go back: a final answer's return becomes an end, as the
 /// reference renders an answer in history.
 fn sealed(ids: &[TokenId]) -> Vec<TokenId> {
@@ -1092,6 +1201,8 @@ mod tests {
         ids: Vec<TokenId>,
         stop: &'static str,
         predicted: usize,
+        /// Places of ids the stream leaves out; their text still comes, with the next id's.
+        lost: Vec<usize>,
     }
 
     fn answer(fixture: &str) -> Completion {
@@ -1100,6 +1211,7 @@ mod tests {
             predicted: ids.len(),
             ids,
             stop: "eos",
+            lost: Vec::new(),
         }
     }
 
@@ -1192,13 +1304,24 @@ mod tests {
                         seen.lock().unwrap().push(prompt);
                         kept.lock().unwrap().push(body.clone());
                         let c = queue.lock().unwrap().next().expect("a completion");
-                        let mut events: String = c
-                            .ids
-                            .iter()
-                            .map(|id| {
-                                format!("data: {}\n\n", json!({"content": "", "tokens": [id]}))
-                            })
-                            .collect();
+                        // text goes out once it is whole UTF-8, as llama-server releases it
+                        let (mut events, mut held, mut text) =
+                            (String::new(), Vec::new(), String::new());
+                        for (i, id) in c.ids.iter().enumerate() {
+                            match Special::from_id(*id) {
+                                Some(s) => held.extend_from_slice(s.text().as_bytes()),
+                                None => held.push((*id - 1000) as u8),
+                            }
+                            if let Ok(t) = std::str::from_utf8(&held) {
+                                text.push_str(t);
+                                held.clear();
+                            }
+                            if !c.lost.contains(&i) {
+                                let chunk =
+                                    json!({"content": std::mem::take(&mut text), "tokens": [id]});
+                                events.push_str(&format!("data: {chunk}\n\n"));
+                            }
+                        }
                         let last = json!({"content": "", "tokens": [], "stop": true, "stop_type": c.stop,
                             "timings": {"predicted_n": c.predicted, "prompt_n": 10, "cache_n": 90}});
                         events.push_str(&format!("data: {last}\n\n"));
@@ -1550,12 +1673,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_lost_ids_fails_the_step() {
-        let lossy = Completion {
-            predicted: generation(CALL).len() + 3,
+    async fn a_stream_that_lost_ids_goes_back_as_text_mended_from_the_servers() {
+        // gpt-oss on the GPU, 2026-11-03: 5 of 902 ids missing, and the answer read by its
+        // ids had as many U+FFFD; the server's text had every character
+        let fixture =
+            "«channel»final«message»Sizes: 4\u{202F}M and 12\u{202F}GB, model\u{2011}spec.«return»";
+        let ids = generation(fixture);
+        // the last byte of each narrow no-break space never comes as an id
+        let lost: Vec<usize> = ids
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| **id == 1000 + 0xAF)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(lost.len(), 2);
+        let call = "«channel»commentary to=functions.read «constrain»json«message»{\"path\":\"d\u{2011}x.rs\"}«call»";
+        let lost_in_call: Vec<usize> = generation(call)
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| **id == 1000 + 0x91)
+            .map(|(i, _)| i)
+            .collect();
+        let (url, prompts) = fake_server(vec![
+            Completion {
+                lost,
+                ..answer(fixture)
+            },
+            Completion {
+                lost: lost_in_call,
+                ..answer(call)
+            },
+            answer("«channel»final«message»Ok.«return»"),
+        ])
+        .await;
+        let d = driver(&url);
+        let user = ChatMessage::User("Sizes?".into());
+        let f = finished(&run(&d, request(vec![user.clone()], 1)).await);
+        assert!(matches!(f.outcome, Outcome::Answer));
+        assert_eq!(
+            f.content,
+            "Sizes: 4\u{202F}M and 12\u{202F}GB, model\u{2011}spec."
+        );
+        // its ids are not all there: it goes back as text
+        assert_eq!(f.tokens, None);
+        let f = finished(&run(&d, request(vec![user.clone()], 2)).await);
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].arguments, "{\"path\":\"d\u{2011}x.rs\"}");
+        assert_eq!(f.tokens, None);
+        let history = vec![
+            user,
+            ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: None,
+                tool_calls: calls.calls().to_vec(),
+                tokens: f.tokens.clone(),
+            },
+            ChatMessage::Tool {
+                tool_call_id: calls.calls()[0].id.clone(),
+                content: "empty".into(),
+            },
+        ];
+        run(&d, request(history, 3)).await;
+        let sent = text(&prompts.lock().unwrap()[2]);
+        assert!(sent.contains("d\u{2011}x.rs"), "{sent}");
+    }
+
+    #[tokio::test]
+    async fn a_lost_id_the_text_cannot_show_fails_the_step() {
+        let fixture = "«channel»final«message»Sizes: 4 MB.«return»";
+        let at = generation(fixture)
+            .iter()
+            .position(|id| *id == 1000 + u32::from(b'4'))
+            .unwrap();
+        let (url, _) = fake_server(vec![Completion {
+            lost: vec![at],
+            ..answer(fixture)
+        }])
+        .await;
+        let events = run(
+            &driver(&url),
+            request(vec![ChatMessage::User("Sizes?".into())], 1),
+        )
+        .await;
+        assert!(matches!(
+            events.last(),
+            Some(Err(DriverError::Engine(EngineError::Protocol(e)))) if e.contains("does not show")
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stream_with_more_ids_than_the_server_generated_fails_the_step() {
+        let odd = Completion {
+            predicted: generation(CALL).len() - 2,
             ..answer(CALL)
         };
-        let (url, _) = fake_server(vec![lossy]).await;
+        let (url, _) = fake_server(vec![odd]).await;
         let events = run(
             &driver(&url),
             request(vec![ChatMessage::User("Read a.rs".into())], 1),
@@ -1565,6 +1779,24 @@ mod tests {
             events.last(),
             Some(Err(DriverError::Engine(EngineError::Protocol(_))))
         ));
+    }
+
+    #[test]
+    fn lost_characters_are_put_back_where_the_servers_text_has_them() {
+        let server = "analysis: 4 M is the size«end»final: 4\u{202F}M and \u{2248}2\u{202F}GB";
+        // the last place of the first part comes first: an answer comes last
+        assert_eq!(
+            mended("4\u{FFFD}M and \u{FFFD}2\u{FFFD}GB", server),
+            "4\u{202F}M and \u{2248}2\u{202F}GB"
+        );
+        // a lost lead byte leaves two
+        assert_eq!(mended("4\u{FFFD}\u{FFFD}M and", server), "4\u{202F}M and");
+        assert_eq!(mended("\u{FFFD}2\u{FFFD}GB", server), "\u{2248}2\u{202F}GB");
+        // nothing to mend, and what does not lie there stays as it is
+        assert_eq!(mended("4 M", server), "4 M");
+        assert_eq!(mended("5\u{FFFD}M", server), "5\u{FFFD}M");
+        // only a character of more than one byte can have lost one
+        assert_eq!(mended("is\u{FFFD}the", server), "is\u{FFFD}the");
     }
 
     #[tokio::test]
