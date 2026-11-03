@@ -1,10 +1,11 @@
 //! T2-mini against a running llama-server:
 //!
-//!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native]
+//!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]
 //!
 //! Runs every scenario of `evals/t2/scenarios` (or those whose id or category holds TEXT)
 //! with each seed, one line per run, then the summary; `--native` runs them on the Native
-//! path, and the summary names the profile `ID+native`. DIR keeps the results
+//! path, and the summary names the profile `ID+native`. `--priors` gives gpt-oss the tools
+//! of its training (`ID+native+priors`). DIR keeps the results
 //! (`results.jsonl`, one run per line), the summary (`summary.json`), the sessions
 //! (`sessions.db`), their trajectories (`traces/`) and the projects of failed runs
 //! (`work/`). Runs already in `results.jsonl` are not run again, so an interrupted suite
@@ -15,6 +16,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use ognivo_core::agent::Layout;
 use ognivo_evals::t2::{self, Rate, RunResult, Summary, Target};
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{profile, template};
@@ -27,12 +29,13 @@ struct Args {
     seeds: Vec<u32>,
     only: Option<String>,
     native: bool,
+    priors: bool,
 }
 
 fn args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut url, mut profile, mut out, mut seeds, mut only) = (None, None, None, vec![1], None);
-    let mut native = false;
+    let (mut native, mut priors) = (false, false);
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -41,6 +44,7 @@ fn args() -> Result<Args, String> {
             "--out" => out = Some(PathBuf::from(value()?)),
             "--only" => only = Some(value()?),
             "--native" => native = true,
+            "--priors" => priors = true,
             "--seeds" => {
                 seeds = value()?
                     .split(',')
@@ -54,6 +58,9 @@ fn args() -> Result<Args, String> {
             other => return Err(format!("unknown argument {other}")),
         }
     }
+    if priors && !native {
+        return Err("--priors needs --native".into());
+    }
     let need = |v: Option<String>, name: &str| v.ok_or(format!("{name} is required"));
     Ok(Args {
         url: need(url, "--url")?,
@@ -62,6 +69,7 @@ fn args() -> Result<Args, String> {
         seeds,
         only,
         native,
+        priors,
     })
 }
 
@@ -71,7 +79,7 @@ async fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native]"
+                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]"
             );
             return ExitCode::from(2);
         }
@@ -144,12 +152,17 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         profile: p.clone(),
         n_ctx: props.n_ctx,
         native: a.native,
+        layout: if a.priors {
+            Layout::Priors
+        } else {
+            Layout::Standard
+        },
     };
     // the night report tells the paths apart by this name
-    let name = if a.native {
-        format!("{}+native", p.id)
-    } else {
-        p.id.clone()
+    let name = match (a.native, a.priors) {
+        (true, true) => format!("{}+native+priors", p.id),
+        (true, false) => format!("{}+native", p.id),
+        _ => p.id.clone(),
     };
     let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
     let ambiguous = t2::ambiguous(&scenarios);

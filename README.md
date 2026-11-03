@@ -31,7 +31,8 @@ the `trajectory.json` Harbor reads.
 | `crates/ognivo-cli` | the `ognivo` binary (`doctor`, `chat`, `run`) |
 | `crates/ognivo-models` | model families, profiles, server capabilities, llama-server client, the model driver and its guards, Harmony rendering and reading for the Native path |
 | `crates/ognivo-core` | agent loop and approvals |
-| `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell) and their per-model shapes |
+| `crates/ognivo-tools` | the tools (read, edit, write, grep, glob, shell, apply_patch) and their per-model shapes |
+| `crates/ognivo-patch` | the apply_patch (V4A) format, after OpenAI Codex (Apache-2.0) |
 | `crates/ognivo-protocol` | core ⇄ client event types |
 | `crates/ognivo-store` | event log |
 | `crates/ognivo-evals` | evaluation harness: T0 (the recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (`t2`: scenarios on fixture projects against a live server) |
@@ -58,7 +59,8 @@ turn; `/help` lists the rest. `run` takes the prompt on stdin;
 actions that would need approval are refused and explained to the model. With `--native`
 (gpt-oss so far) ognivo renders the model's format itself and the server only tokenizes and
 generates: the Native path of M2, in progress. In `chat` on that path, ^\ ends the model's
-reasoning where it stands and asks for the answer.
+reasoning where it stands and asks for the answer, and `--priors` gives gpt-oss the tools of
+its training (container.exec, repo_browser with apply_patch) instead of ognivo's own.
 
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 

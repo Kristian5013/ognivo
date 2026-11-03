@@ -166,9 +166,31 @@ impl NativeDriver {
 
     /// The step's prompt, ending where the model's next message begins.
     async fn prompt(&self, req: &StepRequest) -> Result<Prompt, DriverError> {
-        let functions = !req.tools.is_empty();
+        let tool = |t: &crate::generic::ToolDecl, name: &str| Tool {
+            name: name.to_owned(),
+            description: t.description.clone(),
+            parameters: Some(t.parameters.clone()),
+        };
+        // a tool named with a namespace is one of the model's own, in the system message
+        let mut system = self.system.clone();
+        let mut plain = Vec::new();
+        for t in &req.tools {
+            match t.name.split_once('.') {
+                Some((ns, name)) => match system.namespaces.iter_mut().find(|n| n.name == ns) {
+                    Some(n) => n.tools.push(tool(t, name)),
+                    None => system.namespaces.push(Namespace {
+                        name: ns.to_owned(),
+                        description: None,
+                        tools: vec![tool(t, name)],
+                    }),
+                },
+                None => plain.push(tool(t, &t.name)),
+            }
+        }
+        let functions = !plain.is_empty();
+        let declared: Vec<String> = req.tools.iter().map(|t| t.name.clone()).collect();
         let mut p = Prompt::default();
-        p.message(&Message::system(self.system.clone()), functions);
+        p.message(&Message::system(system), functions);
         let instructions: Vec<&str> = req
             .messages
             .iter()
@@ -182,15 +204,7 @@ impl NativeDriver {
                 vec![Namespace {
                     name: "functions".into(),
                     description: None,
-                    tools: req
-                        .tools
-                        .iter()
-                        .map(|t| Tool {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: Some(t.parameters.clone()),
-                        })
-                        .collect(),
+                    tools: plain,
                 }]
             } else {
                 Vec::new()
@@ -223,7 +237,7 @@ impl NativeDriver {
                     let thought = last_final.is_none_or(|f| i > f);
                     if thought
                         && let Some(ids) = tokens
-                        && self.replays(ids, m).await?
+                        && self.replays(ids, m, &declared).await?
                     {
                         p.assistant();
                         p.tokens(sealed(ids));
@@ -237,7 +251,7 @@ impl NativeDriver {
                             if !content.is_empty() {
                                 p.message(&Message::assistant("commentary", content), functions);
                             }
-                            let to = format!("functions.{}", c.name);
+                            let to = harmony::recipient(&c.name);
                             p.message(&Message::call(&to, &c.arguments), functions);
                         }
                         None => p.message(&Message::assistant("final", content), functions),
@@ -252,7 +266,7 @@ impl NativeDriver {
                             "a tool result answers call {tool_call_id}, which the history does not hold"
                         ))
                     })?;
-                    let from = format!("functions.{name}");
+                    let from = harmony::recipient(name);
                     p.message(&Message::result(&from, "commentary", content), functions);
                 }
             }
@@ -263,7 +277,12 @@ impl NativeDriver {
 
     /// Whether `ids` read back to the assistant message `m`, so that they can go back as
     /// they came.
-    async fn replays(&self, ids: &[TokenId], m: &ChatMessage) -> Result<bool, DriverError> {
+    async fn replays(
+        &self,
+        ids: &[TokenId],
+        m: &ChatMessage,
+        names: &[String],
+    ) -> Result<bool, DriverError> {
         let ChatMessage::Assistant {
             content,
             reasoning,
@@ -279,7 +298,7 @@ impl NativeDriver {
             reader.push(*id, piece);
         }
         reader.finish();
-        let k = kept(reader.messages(), false, "");
+        let k = kept(reader.messages(), false, "", names);
         let same = match (&k.outcome, tool_calls.first()) {
             (Outcome::Calls(calls), Some(c)) => {
                 let read = &calls.calls()[0];
@@ -408,6 +427,7 @@ impl NativeDriver {
             request_start: 0,
             counts: Counts::default(),
             constraint,
+            names: req.tools.iter().map(|t| t.name.clone()).collect(),
         };
         let events = stream::unfold(Some((self, g)), |state| async move {
             let (this, g) = state?;
@@ -624,6 +644,8 @@ struct Generation {
     request_start: usize,
     counts: Counts,
     constraint: Option<Constraint>,
+    /// The tools the step declared.
+    names: Vec<String>,
 }
 
 /// The repetition guard over the streams of one generation.
@@ -760,7 +782,7 @@ impl Generation {
     /// The step as the agent gets it; `limit` when the server cut its generation.
     fn finish(&mut self, limit: bool) -> Finished {
         self.reader.finish();
-        let k = kept(self.reader.messages(), limit, &self.call_id);
+        let k = kept(self.reader.messages(), limit, &self.call_id, &self.names);
         let tokens = (k.clean && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
             .then(|| self.reader.ids().to_vec());
         Finished {
@@ -777,7 +799,7 @@ impl Generation {
     /// A generation the repetition guard stopped: nothing in it may run.
     fn repeating(&mut self, channel: Channel, l: Loop) -> Finished {
         self.reader.finish();
-        let k = kept(self.reader.messages(), true, &self.call_id);
+        let k = kept(self.reader.messages(), true, &self.call_id, &self.names);
         let partial = match k.outcome {
             Outcome::Truncated { partial } => partial,
             Outcome::Malformed { calls, .. } => calls,
@@ -811,7 +833,7 @@ struct Kept {
     clean: bool,
 }
 
-fn kept(messages: &[parse::Message], limit: bool, call_id: &str) -> Kept {
+fn kept(messages: &[parse::Message], limit: bool, call_id: &str, names: &[String]) -> Kept {
     let (mut reasoning, mut content) = (Vec::new(), Vec::new());
     let mut clean = true;
     let (mut call, mut answer) = (None, None);
@@ -831,7 +853,7 @@ fn kept(messages: &[parse::Message], limit: bool, call_id: &str) -> Kept {
     }
     let (outcome, finish) = match (call, answer) {
         (Some(m), _) => {
-            let (outcome, finish, as_written) = call_outcome(m, call_id);
+            let (outcome, finish, as_written) = call_outcome(m, call_id, names);
             clean &= as_written;
             (outcome, finish)
         }
@@ -867,9 +889,28 @@ fn kept(messages: &[parse::Message], limit: bool, call_id: &str) -> Kept {
 }
 
 /// A call message as the agent gets it, and whether it went exactly as written.
-fn call_outcome(m: &parse::Message, id: &str) -> (Outcome, Option<FinishReason>, bool) {
+/// The declared tool a recipient names: the tool of that name with its namespace
+/// (`container.exec`), a function (`functions.read`), or a bare function name, up to the
+/// first character no name has.
+fn tool_of<'a>(recipient: &str, names: &'a [String]) -> Option<&'a str> {
+    let end = recipient
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
+        .unwrap_or(recipient.len());
+    let r = &recipient[..end];
+    let function = r.strip_prefix("functions.").unwrap_or(r);
+    names
+        .iter()
+        .find(|n| n.as_str() == r || (!n.contains('.') && n.as_str() == function))
+        .map(String::as_str)
+}
+
+fn call_outcome(
+    m: &parse::Message,
+    id: &str,
+    names: &[String],
+) -> (Outcome, Option<FinishReason>, bool) {
     let recipient = m.header.recipient.as_deref().unwrap_or_default();
-    let name = parse::function(recipient);
+    let name = tool_of(recipient, names);
     let text = m.text();
     let partial = || {
         vec![ToolCall {
@@ -897,7 +938,12 @@ fn call_outcome(m: &parse::Message, id: &str) -> (Outcome, Option<FinishReason>,
         End::End | End::Call | End::Return => {
             let Some(name) = name else {
                 return malformed(format!(
-                    "{recipient}: there is no such tool; call the tools as functions.NAME"
+                    "{recipient}: there is no such tool; the tools are {}",
+                    names
+                        .iter()
+                        .map(|n| harmony::recipient(n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 ));
             };
             if !m.foreign.is_empty() {
@@ -911,7 +957,7 @@ fn call_outcome(m: &parse::Message, id: &str) -> (Outcome, Option<FinishReason>,
                 Ok((args, repairs)) => {
                     let as_written = repairs.is_empty()
                         && m.end == End::Call
-                        && recipient.strip_prefix("functions.") == Some(name);
+                        && recipient == harmony::recipient(name);
                     let call = ToolCall {
                         id: id.into(),
                         name: name.into(),
@@ -1624,6 +1670,66 @@ mod tests {
         };
         run(&driver(&url), req).await;
         assert!(bodies.lock().unwrap()[0].get("grammar").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_model_s_own_tools_go_in_the_system_message_and_come_back_by_name() {
+        let exec = ToolDecl {
+            name: "container.exec".into(),
+            description: "Run a command".into(),
+            parameters: json!({"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]}),
+        };
+        let call = "«channel»analysis«message»List it.«end»«start»assistant«channel»analysis to=container.exec «constrain»json«message»{\"command\":[\"ls\"]}«call»";
+        let (url, prompts) = fake_server(vec![
+            answer(call),
+            answer("«channel»final«message»Two files.«return»"),
+        ])
+        .await;
+        let d = driver(&url);
+        let req = |messages| StepRequest {
+            tools: vec![exec.clone()],
+            ..request(messages, 1)
+        };
+        let f = finished(&run(&d, req(vec![ChatMessage::User("list".into())])).await);
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].name, "container.exec");
+        assert!(f.tokens.is_some(), "as written, so it goes back as it came");
+        let sent = text(&prompts.lock().unwrap()[0]);
+        // its namespace stands in the system message, and no function is declared
+        assert!(
+            sent.contains("## container\n\nnamespace container {"),
+            "{sent}"
+        );
+        assert!(!sent.contains("namespace functions"));
+        // a call without its ids goes back as the reference renders it, by its own name
+        let history = vec![
+            ChatMessage::User("list".into()),
+            ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "container.exec".into(),
+                    arguments: "{\"command\":[\"ls\"]}".into(),
+                }],
+                tokens: None,
+            },
+            ChatMessage::Tool {
+                tool_call_id: "c1".into(),
+                content: "a.rs b.rs".into(),
+            },
+        ];
+        run(&d, req(history)).await;
+        let sent = text(&prompts.lock().unwrap()[1]);
+        let (start, channel) = (Special::Start.text(), Special::Channel.text());
+        assert!(sent.contains(&format!(
+            "{start}assistant to=container.exec{channel}commentary"
+        )));
+        assert!(sent.contains(&format!(
+            "{start}container.exec to=assistant{channel}commentary"
+        )));
     }
 
     #[tokio::test]

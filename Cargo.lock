@@ -1047,6 +1047,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ognivo-patch"
+version = "0.0.1"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "ognivo-protocol"
 version = "0.0.1"
 dependencies = [
@@ -1072,6 +1079,7 @@ dependencies = [
  "globset",
  "ignore",
  "ognivo-models",
+ "ognivo-patch",
  "regex",
  "rustix",
  "serde",

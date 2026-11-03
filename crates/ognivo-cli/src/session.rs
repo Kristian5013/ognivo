@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Args;
-use ognivo_core::agent::{Agent, AgentOptions, Approver};
+use ognivo_core::agent::{Agent, AgentOptions, Approver, Layout};
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
@@ -58,6 +58,10 @@ pub struct SessionArgs {
     /// tokenizes and generates (gpt-oss only so far)
     #[arg(long)]
     pub native: bool,
+    /// With --native: gpt-oss gets the tools of its training, container.exec and
+    /// repo_browser with apply_patch, instead of ognivo's own
+    #[arg(long, requires = "native")]
+    pub priors: bool,
 }
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
@@ -293,6 +297,11 @@ impl SessionArgs {
                 time_limit: None,
                 user_instructions: user_instructions(),
                 rules: loaded.rules,
+                layout: if self.priors {
+                    Layout::Priors
+                } else {
+                    Layout::Standard
+                },
             },
             changed,
             pending: loaded.pending,

@@ -344,7 +344,8 @@ fn reindent(old: &[&str], found: &[&str], new: &[&str]) -> Vec<String> {
 }
 
 /// The window of the file most similar to `old`, by count of equal trimmed lines.
-fn nearest(lines: &[&str], old: &[&str]) -> Option<(usize, Vec<String>)> {
+/// The lines of the file most like `old`, and the 0-based line they start at.
+pub(crate) fn nearest(lines: &[&str], old: &[&str]) -> Option<(usize, Vec<String>)> {
     let want: Vec<&str> = old.iter().map(|l| l.trim()).collect();
     let n = want.len();
     let mut best = (0usize, 0usize);

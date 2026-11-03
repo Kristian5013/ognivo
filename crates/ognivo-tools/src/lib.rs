@@ -23,6 +23,8 @@ pub enum ToolId {
     Read,
     Edit,
     Write,
+    /// apply_patch (V4A), OpenAI's edit format: changes several files at once.
+    Patch,
     Grep,
     Glob,
     WebFetch,
@@ -31,7 +33,10 @@ pub enum ToolId {
     Skill,
     ToolSearch,
     Delegate,
-    Mcp { server: String, tool: String },
+    Mcp {
+        server: String,
+        tool: String,
+    },
 }
 
 impl ToolId {
@@ -42,6 +47,8 @@ impl ToolId {
             ToolId::Read => "Read".into(),
             ToolId::Edit => "Edit".into(),
             ToolId::Write => "Write".into(),
+            // Claude Code has none; rules on paths govern it as they do edits
+            ToolId::Patch => "ApplyPatch".into(),
             ToolId::Grep => "Grep".into(),
             ToolId::Glob => "Glob".into(),
             ToolId::WebFetch => "WebFetch".into(),
@@ -66,7 +73,7 @@ impl ToolId {
             | ToolId::Skill
             | ToolId::ToolSearch
             | ToolId::Delegate => Effect::ReadOnly,
-            ToolId::Edit | ToolId::Write => Effect::EditsFiles,
+            ToolId::Edit | ToolId::Write | ToolId::Patch => Effect::EditsFiles,
             // MCP annotations such as readOnlyHint are untrusted input
             ToolId::WebFetch | ToolId::Mcp { .. } => Effect::Network,
             ToolId::Bash => Effect::SideEffects,

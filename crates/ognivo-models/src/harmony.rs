@@ -196,25 +196,44 @@ pub enum Effort {
     High,
 }
 
-/// The grammar of a call to the functions in `tools` (§5.7): from `to=functions` on, a
-/// declared function's name, the rest of its header in either order, and its arguments as
-/// its schema has them ([`grammar`](crate::grammar)), then only the end of the generation.
-/// llama.cpp's own grammar for gpt-oss keeps calls so on the Generic path: without it, the
-/// first runs of the Native path had gpt-oss call the tools of its training (`search`, 10
-/// times in 432 calls) and give one tool's arguments to another (`glob` to glob, 8 times).
+/// Where a call to the tool `name` goes: a name with a namespace is that built-in tool
+/// itself (`container.exec`), any other a function (`functions.read`).
+pub fn recipient(name: &str) -> String {
+    if name.contains('.') {
+        name.to_owned()
+    } else {
+        format!("functions.{name}")
+    }
+}
+
+/// The grammar of a call to the tools in `tools` (§5.7): from `to=` and a namespace on, a
+/// declared tool's name ([`recipient`]), the rest of its header in either order, and its
+/// arguments as its schema has them ([`grammar`](crate::grammar)), then only the end of the
+/// generation. llama.cpp's own grammar for gpt-oss keeps calls so on the Generic path:
+/// without it, the first runs of the Native path had gpt-oss call the tools of its training
+/// (`search`, 10 times in 432 calls) and give one tool's arguments to another (`glob` to
+/// glob, 8 times).
 ///
-/// It is lazy. It wakes at `to=functions` in a header, at the start of the generation or of
-/// an assistant message, as llama.cpp's triggers for gpt-oss do: llama.cpp searches what the
-/// generation wrote so far, control tokens as their text, and feeds the grammar from the
-/// first group of the match. Reasoning stays free, and the reader takes the header as it
-/// comes ([`parse`]). A control token inside a string it lets through, since it sees its
-/// text; the reader keeps such a call from running.
+/// It is lazy. It wakes at `to=` and a namespace of the tools in a header, at the start of
+/// the generation or of an assistant message, as llama.cpp's triggers for gpt-oss do:
+/// llama.cpp searches what the generation wrote so far, control tokens as their text, and
+/// feeds the grammar from the first group of the match. Reasoning stays free, and the reader
+/// takes the header as it comes ([`parse`]). A control token inside a string it lets
+/// through, since it sees its text; the reader keeps such a call from running.
 pub fn arguments_constraint(tools: &[crate::generic::ToolDecl]) -> Constraint {
+    let mut namespaces: Vec<&str> = Vec::new();
+    for t in tools {
+        let ns = t.name.split_once('.').map_or("functions", |(ns, _)| ns);
+        if !namespaces.contains(&ns) {
+            namespaces.push(ns);
+        }
+    }
     let e = |s: Special| s.text().replace('|', r"\|");
     let trigger = format!(
-        r"(?:^|{start}assistant)(?:{channel}(?:commentary|analysis))?(\s*to=functions)",
+        r"(?:^|{start}assistant)(?:{channel}(?:commentary|analysis))?(\s*to=(?:{namespaces}))",
         start = e(Special::Start),
         channel = e(Special::Channel),
+        namespaces = namespaces.join("|"),
     );
     let lit = |s: Special| crate::grammar::literal(&s.text());
     let header = format!(
@@ -229,11 +248,14 @@ pub fn arguments_constraint(tools: &[crate::generic::ToolDecl]) -> Constraint {
         .iter()
         .map(|t| {
             let args = rules.schema(&t.parameters, &format!("args-{}", t.name));
-            format!("{} {header} {args}", crate::grammar::literal(&t.name))
+            format!(
+                "{} {header} {args}",
+                crate::grammar::literal(&recipient(&t.name))
+            )
         })
         .collect();
     let call = rules.add("call", calls.join(" | "));
-    let gbnf = rules.grammar(&format!("[ \\t\\n]* \"to=functions.\" {call}"));
+    let gbnf = rules.grammar(&format!("[ \\t\\n]* \"to=\" {call}"));
     Constraint::new(gbnf, vec![Trigger::Pattern(trigger)])
 }
 
@@ -865,13 +887,29 @@ mod tests {
             assert!(!re.is_match(&text(s)), "{s}");
         }
         // from there the grammar takes the function's name and the rest of the header
+        assert!(c.gbnf.starts_with("root ::= [ \\t\\n]* \"to=\" call\n"));
         assert!(
             c.gbnf
-                .starts_with("root ::= [ \\t\\n]* \"to=functions.\" call\n")
+                .contains("call ::= \"functions.read_file\" header args-read-file\n")
         );
+        // the model's own tools wake it under their namespaces
+        let exec = crate::generic::ToolDecl {
+            name: "container.exec".into(),
+            description: "Run a command".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {"command": {"type": "array", "items": {"type": "string"}}}, "required": ["command"]}),
+        };
+        let c = arguments_constraint(&[exec]);
+        let [Trigger::Pattern(p)] = c.triggers.as_slice() else {
+            panic!("{:?}", c.triggers)
+        };
+        let re = regex::Regex::new(p).unwrap();
+        assert!(re.is_match(&text(
+            "«channel»analysis to=container.exec «constrain»json«message»"
+        )));
+        assert!(!re.is_match(&text("«channel»commentary to=functions.read«message»")));
         assert!(
             c.gbnf
-                .contains("call ::= \"read_file\" header args-read-file\n")
+                .contains("call ::= \"container.exec\" header args-container-exec\n")
         );
     }
 

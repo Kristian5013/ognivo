@@ -27,7 +27,8 @@
 #   --window HH:MM-HH:MM  the GPU window (default 03:00-06:00)
 #   --models "A B C"      profiles, run in this order (default: gpt-oss-20b gemma-4-26b-a4b
 #                         qwen3.8-27b); ID+native runs that profile on the Native path,
-#                         on a server of its own, in a directory of that name
+#                         on a server of its own, in a directory of that name, and
+#                         ID+native+priors with gpt-oss's own tools there
 #   --seeds LIST          (default 1,2,3)
 #   --lock-lead HOURS     take the sleep lock this long before the window (default 8)
 #   --max-wait SECONDS    exit (0) when the window opens later than that
@@ -206,7 +207,7 @@ REPORT=$NIGHT/bin/night-report
 export OGNIVO_REPO=$SRC M0_MODELS_JSON=$SRC/evals/m0-baseline/harness/config/models.json
 llama_cmd() { python3 -I "$SRC/evals/m0-baseline/harness/scripts/llama_cmd.py" "$@"; }
 for m in $MODELS; do
-    llama_cmd argv "${m%+native}" --port "$PORT" > /dev/null 2>> "$LOG" || note "$m: no server command line (llama_cmd.py argv ${m%+native}: model file, template or profile missing)"
+    llama_cmd argv "${m%%+*}" --port "$PORT" > /dev/null 2>> "$LOG" || note "$m: no server command line (llama_cmd.py argv ${m%%+*}: model file, template or profile missing)"
 done
 
 # --- the window ----------------------------------------------------------------------------
@@ -313,8 +314,9 @@ for m in $MODELS; do
         continue
     fi
     path=()
-    [[ $m == *+native ]] && path=(--native)
-    if ! server_start "${m%+native}" "$dir"; then
+    [[ $m == *+native* ]] && path+=(--native)
+    [[ $m == *+priors* ]] && path+=(--priors)
+    if ! server_start "${m%%+*}" "$dir"; then
         note "$m: llama-server did not start or does not match the profile"
         continue
     fi
@@ -322,7 +324,7 @@ for m in $MODELS; do
     log "$m: T2-mini, seeds $SEEDS, at most $((budget / 60)) min"
     rc=0
     timeout --signal=TERM --kill-after=30 "$budget" \
-        "$T2" --url "http://127.0.0.1:$PORT" --profile "${m%+native}" "${path[@]}" --out "$dir" --seeds "$SEEDS" \
+        "$T2" --url "http://127.0.0.1:$PORT" --profile "${m%%+*}" "${path[@]}" --out "$dir" --seeds "$SEEDS" \
         >> "$dir/t2.log" 2>&1 < /dev/null 9>&- &
     T2_PID=$!
     wait "$T2_PID" || rc=$?

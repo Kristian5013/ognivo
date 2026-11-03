@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, NoUser, Stats, TurnEnd};
+use ognivo_core::agent::{Agent, AgentEvent, AgentOptions, Layout, NoUser, Stats, TurnEnd};
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::Rules;
@@ -269,6 +269,8 @@ pub struct Target {
     pub n_ctx: Option<u32>,
     /// The Native path instead of the Generic one.
     pub native: bool,
+    /// Which tools the model gets.
+    pub layout: Layout,
 }
 
 /// One scenario run with one seed.
@@ -369,6 +371,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         time_limit: Some(s.time_limit.map_or(TIME_LIMIT, Duration::from_secs)),
         user_instructions: UserInstructions::default(),
         rules: Rules::default(),
+        layout: t.layout,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);

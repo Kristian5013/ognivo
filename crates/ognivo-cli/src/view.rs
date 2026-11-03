@@ -206,6 +206,17 @@ impl View {
                 Some(p) => format!("{pattern} in {}", self.path(p)),
                 None => pattern.clone(),
             },
+            // the files a patch names, from its headers
+            Some(Call::Patch { patch }) => patch
+                .lines()
+                .filter_map(|l| {
+                    ["*** Add File: ", "*** Update File: ", "*** Delete File: "]
+                        .iter()
+                        .find_map(|m| l.trim().strip_prefix(m))
+                })
+                .map(|p| self.path(p))
+                .collect::<Vec<_>>()
+                .join(", "),
             None => arguments.to_owned(),
         };
         format!("→ {name} {}", short(&what, LINE_CHARS))
@@ -289,6 +300,7 @@ fn name_of(call: &Call) -> &'static str {
         Call::Read { .. } => "read",
         Call::Edit { .. } => "edit",
         Call::Write { .. } => "write",
+        Call::Patch { .. } => "apply_patch",
         Call::Shell { .. } => "shell",
         Call::Grep { .. } => "grep",
         Call::Glob { .. } => "glob",

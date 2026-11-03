@@ -38,6 +38,19 @@ pub enum FileError {
     UnreadOverwrite(PathBuf),
     #[error("the content is apply_patch text, not file content; use edit for changes")]
     PatchText,
+    #[error("the patch does not parse: {0}")]
+    PatchParse(String),
+    #[error("{path}: {message}")]
+    PatchHunk {
+        path: PathBuf,
+        message: String,
+        /// The fragment of the file most similar to the lines the hunk looked for, numbered.
+        nearest: Option<String>,
+    },
+    #[error(
+        "{0}: apply_patch adds and updates files here; delete or move files with the shell, then patch them"
+    )]
+    PatchUnsupported(PathBuf),
     #[error("{path}: {source}")]
     Edit {
         path: PathBuf,
@@ -214,6 +227,99 @@ impl Change {
         atomic_write(&self.path, &self.shown, self.after.as_bytes())?;
         Ok(self.report)
     }
+}
+
+/// Plans an apply_patch call ([`ognivo_patch`], V4A): the change of each file it names, in
+/// its order, or why none can be made: a patch applies whole or not at all. It adds files and
+/// updates them; deleting and moving them is the shell's, whose side effects the journal
+/// lists. `was_read` says whether the session read a file, which adding over an existing
+/// one needs, as a write does. Each change's report is its line of Codex's summary
+/// (`A path`, `M path`).
+pub fn plan_patch(
+    cwd: &Path,
+    root: &Path,
+    patch: &str,
+    was_read: impl Fn(&Path) -> bool,
+    style: LineStyle,
+) -> Result<Vec<Change>, FileError> {
+    let parsed =
+        ognivo_patch::parse_patch(patch).map_err(|e| FileError::PatchParse(e.to_string()))?;
+    let mut out: Vec<Change> = Vec::new();
+    for hunk in parsed.hunks {
+        match hunk {
+            ognivo_patch::Hunk::AddFile { path, contents } => {
+                let t = Target::new(resolve(cwd, &path.to_string_lossy()), root);
+                let mut change = plan_write(&t, &contents, was_read(&t.path))?;
+                change.report = format!("A {}", t.shown.display());
+                out.retain(|c| c.path != t.path);
+                out.push(change);
+            }
+            ognivo_patch::Hunk::DeleteFile { path } => {
+                return Err(FileError::PatchUnsupported(path));
+            }
+            ognivo_patch::Hunk::UpdateFile {
+                path,
+                move_path: Some(_),
+                ..
+            } => return Err(FileError::PatchUnsupported(path)),
+            ognivo_patch::Hunk::UpdateFile { path, chunks, .. } => {
+                let t = Target::new(resolve(cwd, &path.to_string_lossy()), root);
+                // a file the patch named before is patched as the patch left it
+                let (before, current) = match out.iter().position(|c| c.path == t.path) {
+                    Some(i) => {
+                        let c = out.remove(i);
+                        (c.before, c.after)
+                    }
+                    None => {
+                        let bytes = read_bytes(&t)?;
+                        let text = String::from_utf8(bytes)
+                            .map_err(|_| FileError::NotUtf8(t.shown.clone()))?;
+                        (Some(text.clone()), text)
+                    }
+                };
+                let after = ognivo_patch::apply_chunks(&current, &chunks).map_err(|e| {
+                    let nearest = match &e {
+                        ognivo_patch::ApplyError::Lines { lines, .. } => {
+                            let file: Vec<&str> = current.lines().collect();
+                            let want: Vec<&str> = lines.iter().map(String::as_str).collect();
+                            edit::nearest(&file, &want).map(|(at, found)| {
+                                let width = (at + found.len()).to_string().len();
+                                found
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, l)| {
+                                        format!("{}{l}\n", style.number(at + i + 1, width))
+                                    })
+                                    .collect()
+                            })
+                        }
+                        ognivo_patch::ApplyError::Context { .. }
+                        | ognivo_patch::ApplyError::Ambiguous { .. } => None,
+                    };
+                    FileError::PatchHunk {
+                        path: t.shown.clone(),
+                        message: e.to_string(),
+                        nearest,
+                    }
+                })?;
+                out.push(Change {
+                    report: format!(
+                        "{} {}",
+                        if before.is_some() { "M" } else { "A" },
+                        t.shown.display()
+                    ),
+                    path: t.path,
+                    before,
+                    after,
+                    shown: t.shown,
+                });
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err(FileError::PatchParse("it changes no file".into()));
+    }
+    Ok(out)
 }
 
 /// The result of planning an edit.
@@ -529,5 +635,55 @@ mod tests {
             Target::new("/etc/hosts".into(), root).shown,
             PathBuf::from("/etc/hosts")
         );
+    }
+
+    #[test]
+    fn a_patch_plans_every_file_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        file(root, "a.txt", "one\ntwo\nthree\n");
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n one\n-two\n+TWO\n three\n*** Add File: b.txt\n+new\n*** End Patch";
+        let changes = plan_patch(root, root, patch, |_| false, LineStyle::Bar).unwrap();
+        let reports: Vec<&str> = changes.iter().map(|c| c.report.as_str()).collect();
+        assert_eq!(reports, ["M a.txt", "A b.txt"]);
+        assert_eq!(changes[0].after, "one\nTWO\nthree\n");
+        assert_eq!(changes[1].before, None);
+        assert_eq!(changes[1].after, "new\n");
+        // nothing is written by planning
+        assert_eq!(
+            fs::read_to_string(root.join("a.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
+        // a hunk that does not apply fails the patch, and shows the nearest lines
+        let wrong = "*** Begin Patch\n*** Update File: a.txt\n@@\n one\n-TWO\n+2\n*** End Patch";
+        match plan_patch(root, root, wrong, |_| false, LineStyle::Bar) {
+            Err(FileError::PatchHunk { path, nearest, .. }) => {
+                assert_eq!(path, PathBuf::from("a.txt"));
+                assert_eq!(nearest.as_deref(), Some("1│one\n2│two\n"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // deleting and moving are the shell's
+        let delete = "*** Begin Patch\n*** Delete File: a.txt\n*** End Patch";
+        assert!(matches!(
+            plan_patch(root, root, delete, |_| false, LineStyle::Bar),
+            Err(FileError::PatchUnsupported(_))
+        ));
+        assert!(matches!(
+            plan_patch(
+                root,
+                root,
+                "*** Begin Patch\nno\n*** End Patch",
+                |_| false,
+                LineStyle::Bar
+            ),
+            Err(FileError::PatchParse(_))
+        ));
+        // adding over a file nobody read is refused, as a write is
+        let over = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch";
+        assert!(matches!(
+            plan_patch(root, root, over, |_| false, LineStyle::Bar),
+            Err(FileError::UnreadOverwrite(_))
+        ));
     }
 }

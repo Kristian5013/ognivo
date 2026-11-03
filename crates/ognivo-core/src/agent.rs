@@ -34,6 +34,7 @@ use ognivo_models::{
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
+pub use ognivo_tools::projection::Layout;
 use ognivo_tools::projection::{self, Call};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,9 @@ pub struct ApprovalRequest {
     pub reason: String,
     /// For running project code: what is unreviewed, one item each (§8); otherwise empty.
     pub unreviewed: Vec<String>,
+    /// What the model changes files with, for a refusal to point there: `the edit and
+    /// write tools`, or `apply_patch` with the tools of gpt-oss's training.
+    pub edit_with: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,8 +94,8 @@ pub struct NoUser;
 impl Approver for NoUser {
     fn approve<'a>(&'a mut self, req: &'a ApprovalRequest) -> BoxFuture<'a, Verdict> {
         let text = format!(
-            "{} needs the user's approval ({}), and this run has no user. Do not retry it or work around it with another command: change files with the edit and write tools, and if it was a check, finish without it. Say in your final answer what did not run.",
-            req.action, req.reason
+            "{} needs the user's approval ({}), and this run has no user. Do not retry it or work around it with another command: change files with {}, and if it was a check, finish without it. Say in your final answer what did not run.",
+            req.action, req.reason, req.edit_with
         );
         Box::pin(async move { Verdict::Refuse(text) })
     }
@@ -261,6 +265,8 @@ pub struct AgentOptions {
     pub user_instructions: UserInstructions,
     /// Permission rules on top of the policy (§8).
     pub rules: Rules,
+    /// Which tools the model gets ([`Layout::Priors`]: gpt-oss's own, on the Native path).
+    pub layout: Layout,
 }
 
 /// The time limit of the running turn.
@@ -383,12 +389,25 @@ impl std::fmt::Debug for Agent {
 /// The fixed instructions of every session, then the text of the user's and the project's
 /// instruction files. Short on purpose: the reference agents that work best with small
 /// models keep their prefix small (docs/research/2026-10-29).
-pub fn system_prompt(root: &Path, instructions: &str) -> String {
+pub fn system_prompt(root: &Path, instructions: &str, layout: Layout) -> String {
+    // the tools by the names the model has for them
+    let (tools, edit, run) = match layout {
+        Layout::Standard => (
+            "read and search files, edit them, run shell commands",
+            "Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.",
+            "the shell tool",
+        ),
+        Layout::Priors => (
+            "open and search files, change them with apply_patch, run commands with container.exec",
+            "Open a file before you change it. In apply_patch, copy the context and removed lines exactly as the file has them, without the line numbers that open_file shows.",
+            "container.exec",
+        ),
+    };
     let fixed = format!(
-        "You are ognivo, a coding agent. You work in the project at {} through tools: read and search files, edit them, run shell commands.\n\
-         - Read a file before you change it. In edit, copy the old text exactly as the file has it, without the line numbers that read shows.\n\
+        "You are ognivo, a coding agent. You work in the project at {} through tools: {tools}.\n\
+         - {edit}\n\
          - Change only what the task needs.\n\
-         - After changing code, run the project's build or tests with the shell tool.\n\
+         - After changing code, run the project's build or tests with {run}.\n\
          - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
          - Commands run without a terminal; do not start interactive programs.",
         root.display()
@@ -414,8 +433,9 @@ impl Agent {
             messages: vec![ChatMessage::System(system_prompt(
                 &opts.root,
                 &prompt_instructions.text,
+                opts.layout,
             ))],
-            tools: projection::declarations(family),
+            tools: projection::declarations(family, opts.layout),
             driver,
             family,
             approver,
@@ -657,6 +677,7 @@ impl Agent {
         self.messages = vec![ChatMessage::System(system_prompt(
             &self.opts.root,
             &self.prompt_instructions.text,
+            self.opts.layout,
         ))];
         self.seen.clear();
         self.context = 0;
@@ -1161,7 +1182,7 @@ impl Agent {
     ) -> String {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
-        let parsed = projection::parse(self.family, &call.name, &call.arguments);
+        let parsed = projection::parse(self.family, self.opts.layout, &call.name, &call.arguments);
         self.emit(
             on,
             AgentEvent::ToolStarted {
@@ -1425,6 +1446,72 @@ impl Agent {
                     Err(e) => error_text(&e),
                 }
             }
+            Call::Patch { patch } => {
+                let seen = &self.seen;
+                let planned =
+                    files::plan_patch(&self.cwd, &root, &patch, |p| seen.contains(p), style);
+                let changes = match planned {
+                    Ok(changes) => changes,
+                    Err(e) => {
+                        if matches!(e, FileError::PatchHunk { .. }) {
+                            self.stats.edits_failed += 1;
+                        }
+                        return error_text(&e);
+                    }
+                };
+                let edits: Vec<FileEdit> = changes
+                    .iter()
+                    .map(|c| FileEdit {
+                        path: &c.path,
+                        before: c.before.as_deref(),
+                        after: Some(&c.after),
+                    })
+                    .collect();
+                let decision = approval::decide_edit(&edits, &root);
+                // the strictest ruling of the files the patch changes rules the patch
+                let mut ruling = Ruling::Allow;
+                for c in &changes {
+                    match self.opts.rules.edit(&c.path, decision) {
+                        Ruling::Deny(why) => {
+                            ruling = Ruling::Deny(why);
+                            break;
+                        }
+                        Ruling::Ask => ruling = Ruling::Ask,
+                        Ruling::Allow => {}
+                    }
+                }
+                let action = changes
+                    .iter()
+                    .map(|c| c.shown.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if let Some(refusal) = self
+                    .permit(
+                        tool,
+                        ruling,
+                        &action,
+                        "a protected path or outside the project",
+                        Vec::new(),
+                        on,
+                    )
+                    .await
+                {
+                    return refusal;
+                }
+                // Codex's summary, as gpt-oss learnt it
+                let mut lines = vec!["Success. Updated the following files:".to_owned()];
+                for change in changes {
+                    let path = change.path.clone();
+                    let text = self.commit(change, path, on);
+                    if text.starts_with("[error]") {
+                        lines.push(text);
+                        return lines.join("\n");
+                    }
+                    lines.push(text);
+                }
+                self.stats.edits_applied += 1;
+                lines.join("\n")
+            }
             Call::Shell { command, timeout } => {
                 let ctx = ExecContext {
                     root: root.clone(),
@@ -1588,6 +1675,10 @@ impl Agent {
             action: action.to_owned(),
             reason: reason.to_owned(),
             unreviewed,
+            edit_with: match self.opts.layout {
+                Layout::Standard => "the edit and write tools",
+                Layout::Priors => "apply_patch",
+            },
         };
         match ruling {
             Ruling::Allow => return None,
@@ -1782,7 +1873,72 @@ mod tests {
             time_limit,
             user_instructions: UserInstructions::default(),
             rules: Rules::default(),
+            layout: Layout::Standard,
         }
+    }
+
+    #[tokio::test]
+    async fn a_patch_changes_its_files_through_the_journal_with_one_approval() {
+        let patch = "*** Begin Patch\n*** Update File: lib.rs\n@@\n fn a() -> u32 {\n-    1\n+    2\n }\n*** Add File: notes.txt\n+done\n*** End Patch";
+        let steps = vec![
+            calls(
+                &[("repo_browser.apply_patch", json!({ "patch": patch }))],
+                FinishReason::ToolCalls,
+            ),
+            answer("a() returns 2 now."),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
+        let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
+        let mut opts = options(&root, WorkspaceState::CLEAN, None);
+        opts.layout = Layout::Priors;
+        let mut r = Run {
+            agent: Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts),
+            seen,
+            root,
+            _dir: dir,
+        };
+        let (end, _) = turn(&mut r).await;
+        assert!(matches!(end, TurnEnd::Answer(_)), "{end:?}");
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    2\n}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("notes.txt")).unwrap(),
+            "done\n"
+        );
+        // Codex's summary, as gpt-oss learnt it
+        let result = r
+            .agent
+            .messages()
+            .iter()
+            .find_map(|m| match m {
+                ChatMessage::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            result,
+            "Success. Updated the following files:\nM lib.rs\nA notes.txt"
+        );
+        // the journal holds both, so both can be reverted
+        let changed: Vec<String> = r.agent.changes().into_iter().map(|c| c.shown).collect();
+        assert_eq!(changed, ["lib.rs", "notes.txt"]);
+        assert_eq!(r.agent.stats.edits_applied, 1);
+        // the model got the tools of its training, and the prompt names them
+        let req = &r.seen.lock().unwrap()[0];
+        assert!(
+            req.tools
+                .iter()
+                .any(|t| t.name == "repo_browser.apply_patch")
+        );
+        let ChatMessage::System(prompt) = &req.messages[0] else {
+            panic!()
+        };
+        assert!(prompt.contains("In apply_patch, copy the context and removed lines"));
     }
 
     async fn turn(r: &mut Run) -> (TurnEnd, Vec<AgentEvent>) {

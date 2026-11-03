@@ -56,7 +56,8 @@ pub fn atif(store: &Store, id: SessionId) -> Result<Value, TraceError> {
         .and_then(|ps| ps.into_iter().find(|p| p.id == row.profile))
         .map(|p| p.family);
     if let Some(family) = family {
-        let tools: Vec<Value> = projection::declarations(family)
+        // the session does not keep its layout yet: the standard one
+        let tools: Vec<Value> = projection::declarations(family, projection::Layout::Standard)
             .into_iter()
             .map(|t| {
                 json!({"type": "function", "function": {

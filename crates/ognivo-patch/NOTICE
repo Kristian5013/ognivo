@@ -1,0 +1,11 @@
+ognivo-patch
+This crate includes code from OpenAI Codex (https://github.com/openai/codex),
+codex-rs/apply-patch at b127a3643fd3dc81b0fce1c2707f0c72fb62ed65 (2025-09-03):
+src/parser.rs and src/seek_sequence.rs as they were there, and in src/lib.rs the
+computation of a file's new text from a patch's chunks, rewritten to work on text
+instead of files. Codex is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The NOTICE of OpenAI Codex:
+
+OpenAI Codex
+Copyright 2025 OpenAI

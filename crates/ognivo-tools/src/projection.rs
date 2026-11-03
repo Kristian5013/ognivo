@@ -11,10 +11,16 @@
 //! Arguments are checked against the declared schema before anything runs: required
 //! keys, types, no unknown keys. Numbers and booleans may come as strings (Gemma's call
 //! syntax has only strings).
+//!
+//! gpt-oss may also get the tools of its training instead ([`Layout::Priors`]):
+//! `container.exec` with an argument list, and `repo_browser.open_file`, `search`,
+//! `print_tree` and `apply_patch`, the layout that reproduced OpenAI's SWE-bench score
+//! (docs/research/2026-10-29/gpt-oss.md §D, layout A). They map to the same calls.
 
 use std::time::Duration;
 
 use ognivo_models::{Family, ToolDecl};
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::ToolId;
@@ -37,6 +43,10 @@ pub enum Call {
         path: String,
         content: String,
     },
+    /// An apply_patch (V4A) patch.
+    Patch {
+        patch: String,
+    },
     Shell {
         command: String,
         timeout: Option<Duration>,
@@ -58,6 +68,7 @@ impl Call {
             Call::Read { .. } => ToolId::Read,
             Call::Edit { .. } => ToolId::Edit,
             Call::Write { .. } => ToolId::Write,
+            Call::Patch { .. } => ToolId::Patch,
             Call::Shell { .. } => ToolId::Bash,
             Call::Grep { .. } => ToolId::Grep,
             Call::Glob { .. } => ToolId::Glob,
@@ -92,6 +103,8 @@ enum Kind {
     Str,
     Int,
     Bool,
+    /// A list of strings: a command and its arguments.
+    StrList,
 }
 
 impl Kind {
@@ -100,8 +113,29 @@ impl Kind {
             Kind::Str => "string",
             Kind::Int => "integer",
             Kind::Bool => "boolean",
+            Kind::StrList => "array",
         }
     }
+
+    fn json(self) -> Value {
+        match self {
+            Kind::StrList => json!({"type": "array", "items": {"type": "string"}}),
+            other => json!({"type": other.schema()}),
+        }
+    }
+}
+
+/// Which tools a model gets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layout {
+    /// ognivo's own tools, shaped per family.
+    #[default]
+    Standard,
+    /// gpt-oss's own: `container.exec` and `repo_browser.*`, apply_patch for edits. A name
+    /// with a namespace is one of the model's built-in tools, which the Native path declares
+    /// in the system message; gpt-oss only, and the Native path only.
+    Priors,
 }
 
 /// One argument: the model-facing name, the canonical field it fills, and its doc line.
@@ -136,7 +170,7 @@ const fn arg(
     }
 }
 
-use Kind::{Bool, Int, Str};
+use Kind::{Bool, Int, Str, StrList};
 
 const READ_DOC: &str = "Read a text file with line numbers; the first line gives its size. Pages of up to 2000 lines: continue with offset.";
 const EDIT_DOC: &str = "Replace one exact, unique occurrence of a text in a file with new text. Copy the text from read output without the line numbers.";
@@ -146,6 +180,147 @@ const SHELL_DOC: &str = "Run a bash command in the project and return its exit c
 const GREP_DOC: &str = "Search file contents line by line with a regular expression (Rust syntax: escape [ ] ( ) { } . * + ? | \\ to match them literally); returns path:line:text for each match.";
 const GLOB_DOC: &str =
     "List files whose path matches a glob pattern such as **/*.rs, newest first.";
+const EXEC_DOC: &str = "Run a command in the project and return its exit code and output. Give the command as an argument list, such as [\"bash\", \"-lc\", \"cargo test\"]. The working directory persists between calls.";
+const OPEN_FILE_DOC: &str = "Open a text file with line numbers; the first line gives its size. Pages of up to 2000 lines: continue from where a page ends.";
+const SEARCH_DOC: &str = "Search the contents of the project's files for a text, line by line; returns path:line:text for each match.";
+const PRINT_TREE_DOC: &str =
+    "List the files under a directory, down to a depth (default 2), newest first.";
+/// Codex's description of apply_patch for gpt-oss (OpenAI Codex, `create_apply_patch_json_tool`
+/// at b127a3643, Apache-2.0), without its invocation through a shell, and with what this
+/// one does not do.
+const APPLY_PATCH_DOC: &str = "Use the `apply_patch` tool to edit files.
+Your patch language is a stripped‑down, file‑oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high‑level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of two headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Update File: <path> - patch an existing file in place.
+
+Then one or more “hunks”, each introduced by @@ (optionally followed by a hunk header).
+Within a hunk each line starts with ' ' (context), '-' (a line to remove) or '+' (a line to add).
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+A full patch can combine several operations:
+
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+@@ def greet():
+-print(\"Hi\")
++print(\"Hello, world!\")
+*** End Patch
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Update)
+- You must prefix new lines with `+` even when creating a new file
+- File references can only be relative, NEVER ABSOLUTE.
+- Delete and move files with container.exec.";
+
+/// gpt-oss's own tools, in its own shapes (the layout of docs/research/2026-10-29/gpt-oss.md
+/// §D, layout A).
+const HARMONY_PRIORS: &[Tool] = &[
+    Tool {
+        name: "container.exec",
+        id: ToolId::Bash,
+        doc: EXEC_DOC,
+        args: &[
+            arg(
+                "command",
+                "argv",
+                StrList,
+                true,
+                "The command and its arguments.",
+            ),
+            arg(
+                "timeout_ms",
+                "timeout_ms",
+                Int,
+                false,
+                "Time limit in milliseconds, at most 600000.",
+            ),
+        ],
+    },
+    Tool {
+        name: "repo_browser.open_file",
+        id: ToolId::Read,
+        doc: OPEN_FILE_DOC,
+        args: &[
+            arg(
+                "path",
+                "path",
+                Str,
+                true,
+                "File path, relative to the project root.",
+            ),
+            arg(
+                "line_start",
+                "offset",
+                Int,
+                false,
+                "First line to show, 1-based.",
+            ),
+            arg("line_end", "end", Int, false, "Last line to show."),
+        ],
+    },
+    Tool {
+        name: "repo_browser.search",
+        id: ToolId::Grep,
+        doc: SEARCH_DOC,
+        args: &[
+            arg("query", "query", Str, true, "The text to find."),
+            arg(
+                "path",
+                "path",
+                Str,
+                false,
+                "Directory or file to search; default the project root.",
+            ),
+        ],
+    },
+    Tool {
+        name: "repo_browser.print_tree",
+        id: ToolId::Glob,
+        doc: PRINT_TREE_DOC,
+        args: &[
+            arg(
+                "path",
+                "path",
+                Str,
+                false,
+                "Directory to list; default the project root.",
+            ),
+            arg("depth", "depth", Int, false, "How many levels down."),
+        ],
+    },
+    Tool {
+        name: "repo_browser.apply_patch",
+        id: ToolId::Patch,
+        doc: APPLY_PATCH_DOC,
+        args: &[arg(
+            "patch",
+            "patch",
+            Str,
+            true,
+            "The entire patch, from *** Begin Patch to *** End Patch.",
+        )],
+    },
+];
 
 const HARMONY: &[Tool] = &[
     Tool {
@@ -524,26 +699,26 @@ const QWEN: &[Tool] = &[
     },
 ];
 
-fn table(family: Family) -> &'static [Tool] {
-    match family {
-        Family::Harmony => HARMONY,
-        Family::Gemma4 => GEMMA,
-        Family::QwenXml => QWEN,
+fn table(family: Family, layout: Layout) -> &'static [Tool] {
+    match (family, layout) {
+        (Family::Harmony, Layout::Priors) => HARMONY_PRIORS,
+        (Family::Harmony, Layout::Standard) => HARMONY,
+        (Family::Gemma4, _) => GEMMA,
+        (Family::QwenXml, _) => QWEN,
     }
 }
 
-/// The tool declarations for `family`, in declaration order (sent with serde_json's
-/// `preserve_order`, so the order on the wire is this order).
-pub fn declarations(family: Family) -> Vec<ToolDecl> {
-    table(family)
+/// The tool declarations for `family` in `layout`, in declaration order (sent with
+/// serde_json's `preserve_order`, so the order on the wire is this order).
+pub fn declarations(family: Family, layout: Layout) -> Vec<ToolDecl> {
+    table(family, layout)
         .iter()
         .map(|t| {
             let mut props = Map::new();
             for a in t.args {
-                props.insert(
-                    a.name.into(),
-                    json!({"type": a.kind.schema(), "description": a.doc}),
-                );
+                let mut schema = a.kind.json();
+                schema["description"] = json!(a.doc);
+                props.insert(a.name.into(), schema);
             }
             let required: Vec<&str> = t
                 .args
@@ -566,13 +741,21 @@ pub fn declarations(family: Family) -> Vec<ToolDecl> {
 }
 
 /// The model-facing name of a tool, for messages about it.
-pub fn name_of(family: Family, id: &ToolId) -> Option<&'static str> {
-    table(family).iter().find(|t| &t.id == id).map(|t| t.name)
+pub fn name_of(family: Family, layout: Layout, id: &ToolId) -> Option<&'static str> {
+    table(family, layout)
+        .iter()
+        .find(|t| &t.id == id)
+        .map(|t| t.name)
 }
 
 /// Checks a call against its declaration and maps it to a [`Call`].
-pub fn parse(family: Family, name: &str, arguments: &str) -> Result<Call, ArgError> {
-    let tools = table(family);
+pub fn parse(
+    family: Family,
+    layout: Layout,
+    name: &str,
+    arguments: &str,
+) -> Result<Call, ArgError> {
+    let tools = table(family, layout);
     let Some(tool) = tools.iter().find(|t| t.name == name) else {
         let known = tools.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
         return Err(ArgError::UnknownTool(name.into(), known));
@@ -619,10 +802,17 @@ pub fn parse(family: Family, name: &str, arguments: &str) -> Result<Call, ArgErr
     let n = |k: &str| fields.get(k).and_then(Value::as_u64).map(|n| n as usize);
     let req = |k: &str| s(k).expect("required string checked above");
     Ok(match tool.id {
+        // open_file gives the last line where read gives a count
         ToolId::Read => Call::Read {
             path: req("path"),
             offset: n("offset"),
-            limit: n("limit"),
+            limit: n("limit").or_else(|| {
+                n("end").map(|end| {
+                    end.saturating_add(1)
+                        .saturating_sub(n("offset").unwrap_or(1))
+                        .max(1)
+                })
+            }),
         },
         ToolId::Edit => Call::Edit {
             path: req("path"),
@@ -637,30 +827,130 @@ pub fn parse(family: Family, name: &str, arguments: &str) -> Result<Call, ArgErr
             path: req("path"),
             content: req("content"),
         },
-        ToolId::Bash => Call::Shell {
-            command: req("command"),
-            timeout: n("timeout_ms")
-                .map(|ms| Duration::from_millis(ms as u64))
-                .or_else(|| n("timeout_s").map(|s| Duration::from_secs(s as u64))),
-        },
+        ToolId::Bash => {
+            let command = match fields.get("argv") {
+                Some(Value::Array(argv)) => match argv.as_slice() {
+                    // the patch as the argument, Codex's other way to call it
+                    [Value::String(w), Value::String(patch)]
+                        if PATCH_WORDS.contains(&w.as_str()) =>
+                    {
+                        return Ok(Call::Patch {
+                            patch: patch.clone(),
+                        });
+                    }
+                    _ => command_line(argv),
+                },
+                _ => req("command"),
+            };
+            if let Some(patch) = patch_in(&command) {
+                return Ok(Call::Patch { patch });
+            }
+            Call::Shell {
+                command,
+                timeout: n("timeout_ms")
+                    .map(|ms| Duration::from_millis(ms as u64))
+                    .or_else(|| n("timeout_s").map(|s| Duration::from_secs(s as u64))),
+            }
+        }
+        // search finds a text, grep a regular expression
         ToolId::Grep => Call::Grep {
-            pattern: req("pattern"),
+            pattern: s("pattern").unwrap_or_else(|| regex::escape(&req("query"))),
             path: s("path"),
             // models fill optional fields with "": an empty filter is no filter, not one
             // that no file matches
             glob: s("glob").filter(|g| !g.trim().is_empty()),
         },
         ToolId::Glob => Call::Glob {
-            pattern: req("pattern"),
+            pattern: s("pattern").unwrap_or_else(|| levels(n("depth").unwrap_or(2))),
             path: s("path"),
+        },
+        ToolId::Patch => Call::Patch {
+            patch: req("patch"),
         },
         ref other => unreachable!("no projection declares {other:?}"),
     })
 }
 
+/// The words that call apply_patch in a command line.
+const PATCH_WORDS: [&str; 3] = ["apply_patch", "applypatch", "repo_browser.apply_patch"];
+
+/// The patch of a command line that is nothing but `apply_patch <<'EOF' … EOF`, Codex's
+/// way of calling it, which gpt-oss learnt: given container.exec, it wrote 13 of 34 patches
+/// so on the first run of the layout of its training, and 4 more without the closing
+/// marker, which bash reads to the end. A shell has no apply_patch, so such a command is
+/// the patch's call.
+fn patch_in(command: &str) -> Option<String> {
+    let rest = PATCH_WORDS
+        .iter()
+        .find_map(|w| command.trim_start().strip_prefix(w))?;
+    let heredoc = rest.trim_start().strip_prefix("<<")?;
+    let heredoc = heredoc.strip_prefix('-').unwrap_or(heredoc);
+    let (marker, body) = heredoc.split_once('\n')?;
+    let marker = marker.trim().trim_matches(['\'', '"']);
+    if marker.is_empty()
+        || !marker
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+    let mut lines = Vec::new();
+    let mut tail = body.lines();
+    for line in tail.by_ref() {
+        if line.trim() == marker {
+            // nothing may follow it: the command is the patch alone
+            return tail.all(|l| l.trim().is_empty()).then(|| lines.join("\n"));
+        }
+        lines.push(line);
+    }
+    // no closing marker: bash reads to the end, and a patch it is
+    let body = lines.join("\n");
+    body.trim_start()
+        .starts_with("*** Begin Patch")
+        .then(|| body.trim_end().to_owned())
+}
+
+/// A command line from an argument list: the script of `bash -lc SCRIPT` as it is,
+/// anything else quoted for the shell where it needs it.
+fn command_line(argv: &[Value]) -> String {
+    let args: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+    if let [shell, flag, script] = args.as_slice()
+        && matches!(*shell, "bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh")
+        && matches!(*flag, "-c" | "-lc" | "-cl")
+    {
+        return (*script).to_owned();
+    }
+    args.iter()
+        .map(|a| {
+            let plain = !a.is_empty()
+                && a.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_-./=:,+@%".contains(c));
+            if plain {
+                (*a).to_owned()
+            } else {
+                format!("'{}'", a.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A glob for the files `depth` levels down, at most 6.
+fn levels(depth: usize) -> String {
+    let all: Vec<String> = (1..=depth.clamp(1, 6))
+        .map(|i| vec!["*"; i].join("/"))
+        .collect();
+    format!("{{{}}}", all.join(","))
+}
+
 /// Strings stay strings; integers and booleans may arrive as their string forms.
 fn coerce(v: &Value, kind: Kind) -> Option<Value> {
     match (kind, v) {
+        (Kind::StrList, Value::Array(a)) if a.iter().all(Value::is_string) && !a.is_empty() => {
+            Some(v.clone())
+        }
+        // a command line where a list belongs
+        (Kind::StrList, Value::String(line)) => Some(json!(["bash", "-lc", line])),
         (Kind::Str, Value::String(_)) => Some(v.clone()),
         (Kind::Int, Value::Number(n)) => n.as_u64().map(Value::from),
         (Kind::Int, Value::String(s)) => s.trim().parse::<u64>().ok().map(Value::from),
@@ -680,7 +970,7 @@ mod tests {
 
     #[test]
     fn gemma_keys_sort_into_generation_order() {
-        for d in declarations(Family::Gemma4) {
+        for d in declarations(Family::Gemma4, Layout::Standard) {
             let keys: Vec<&String> = d.parameters["properties"]
                 .as_object()
                 .unwrap()
@@ -694,7 +984,7 @@ mod tests {
                 d.name
             );
         }
-        let edit = &declarations(Family::Gemma4)[1];
+        let edit = &declarations(Family::Gemma4, Layout::Standard)[1];
         let keys: Vec<_> = edit.parameters["properties"]
             .as_object()
             .unwrap()
@@ -730,10 +1020,15 @@ mod tests {
             ),
         ];
         for (family, name, args) in cases {
-            assert_eq!(parse(family, name, args).unwrap(), want, "{family}");
+            assert_eq!(
+                parse(family, Layout::Standard, name, args).unwrap(),
+                want,
+                "{family}"
+            );
         }
         let shell = parse(
             Family::QwenXml,
+            Layout::Standard,
             "Bash",
             r#"{"command":"ls","timeout":"5000"}"#,
         )
@@ -745,7 +1040,13 @@ mod tests {
                 timeout: Some(Duration::from_secs(5))
             }
         );
-        let g = parse(Family::Gemma4, "bash", r#"{"command":"ls","timeout_s":7}"#).unwrap();
+        let g = parse(
+            Family::Gemma4,
+            Layout::Standard,
+            "bash",
+            r#"{"command":"ls","timeout_s":7}"#,
+        )
+        .unwrap();
         assert_eq!(
             g,
             Call::Shell {
@@ -764,7 +1065,13 @@ mod tests {
             (Family::Gemma4, "grep"),
             (Family::QwenXml, "Grep"),
         ] {
-            let g = parse(family, name, r#"{"pattern":"calc_total","glob":" "}"#).unwrap();
+            let g = parse(
+                family,
+                Layout::Standard,
+                name,
+                r#"{"pattern":"calc_total","glob":" "}"#,
+            )
+            .unwrap();
             assert_eq!(
                 g,
                 Call::Grep {
@@ -781,21 +1088,27 @@ mod tests {
     fn bad_arguments_are_explained() {
         let h = Family::Harmony;
         assert!(matches!(
-            parse(h, "Read", "{}"),
+            parse(h, Layout::Standard, "Read", "{}"),
             Err(ArgError::UnknownTool(..))
         ));
         assert!(matches!(
-            parse(h, "read", "[]"),
+            parse(h, Layout::Standard, "read", "[]"),
             Err(ArgError::NotObject { .. })
         ));
         assert!(
-            matches!(parse(h, "read", "{}"), Err(ArgError::Missing { arg, .. }) if arg == "path")
+            matches!(parse(h, Layout::Standard, "read", "{}"), Err(ArgError::Missing { arg, .. }) if arg == "path")
         );
         // OpenCode's camelCase from M0 is not ours: say which names exist
-        let e = parse(h, "edit", r#"{"path":"a","oldString":"x","newString":"y"}"#).unwrap_err();
+        let e = parse(
+            h,
+            Layout::Standard,
+            "edit",
+            r#"{"path":"a","oldString":"x","newString":"y"}"#,
+        )
+        .unwrap_err();
         assert!(e.to_string().contains("old_string, new_string"), "{e}");
         assert!(matches!(
-            parse(h, "read", r#"{"path":"a","limit":"ten"}"#),
+            parse(h, Layout::Standard, "read", r#"{"path":"a","limit":"ten"}"#),
             Err(ArgError::Type { .. })
         ));
     }
@@ -803,7 +1116,7 @@ mod tests {
     #[test]
     fn declarations_are_strict_schemas() {
         for f in [Family::Harmony, Family::Gemma4, Family::QwenXml] {
-            let decls = declarations(f);
+            let decls = declarations(f, Layout::Standard);
             assert_eq!(decls.len(), 6, "{f}");
             for d in decls {
                 assert_eq!(d.parameters["additionalProperties"], json!(false));
@@ -813,5 +1126,146 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn gpt_oss_tools_of_its_training_map_to_ognivo_calls() {
+        let h = Family::Harmony;
+        let p = |name: &str, args: &str| parse(h, Layout::Priors, name, args).unwrap();
+        // the script of bash -lc as it is, other lists quoted where they need it
+        assert_eq!(
+            p(
+                "container.exec",
+                r#"{"command":["bash","-lc","cargo test 2>&1 | tail -5"]}"#
+            ),
+            Call::Shell {
+                command: "cargo test 2>&1 | tail -5".into(),
+                timeout: None
+            }
+        );
+        assert_eq!(
+            p(
+                "container.exec",
+                r#"{"command":["grep","-n","fn main","src/main.rs"]}"#
+            ),
+            Call::Shell {
+                command: "grep -n 'fn main' src/main.rs".into(),
+                timeout: None
+            }
+        );
+        // the last line to show is a count of lines for read
+        assert_eq!(
+            p(
+                "repo_browser.open_file",
+                r#"{"path":"a.rs","line_start":10,"line_end":19}"#
+            ),
+            Call::Read {
+                path: "a.rs".into(),
+                offset: Some(10),
+                limit: Some(10)
+            }
+        );
+        // search finds a text, so it is a regular expression of that text
+        assert_eq!(
+            p("repo_browser.search", r#"{"query":"foo(bar"}"#),
+            Call::Grep {
+                pattern: r"foo\(bar".into(),
+                path: None,
+                glob: None
+            }
+        );
+        assert_eq!(
+            p("repo_browser.print_tree", r#"{"depth":2}"#),
+            Call::Glob {
+                pattern: "{*,*/*}".into(),
+                path: None
+            }
+        );
+        assert_eq!(
+            p(
+                "repo_browser.apply_patch",
+                r#"{"patch":"*** Begin Patch\n*** End Patch"}"#
+            ),
+            Call::Patch {
+                patch: "*** Begin Patch\n*** End Patch".into()
+            }
+        );
+        // the names are the model's own, and edit is not among them
+        let names: Vec<String> = declarations(h, Layout::Priors)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "container.exec",
+                "repo_browser.open_file",
+                "repo_browser.search",
+                "repo_browser.print_tree",
+                "repo_browser.apply_patch"
+            ]
+        );
+        assert!(parse(h, Layout::Priors, "edit", "{}").is_err());
+    }
+
+    #[test]
+    fn apply_patch_through_a_shell_is_the_patch() {
+        let body = "*** Begin Patch\n*** Update File: a.rs\n@@\n-1\n+2\n*** End Patch";
+        let patch = Call::Patch { patch: body.into() };
+        let exec = |argv: Value| {
+            parse(
+                Family::Harmony,
+                Layout::Priors,
+                "container.exec",
+                &json!({ "command": argv }).to_string(),
+            )
+            .unwrap()
+        };
+        // a heredoc, as gpt-oss writes it after Codex
+        assert_eq!(
+            exec(json!([
+                "bash",
+                "-lc",
+                format!("apply_patch <<'PATCH'\n{body}\nPATCH")
+            ])),
+            patch
+        );
+        assert_eq!(
+            exec(json!([
+                "bash",
+                "-lc",
+                format!("repo_browser.apply_patch <<EOF\n{body}\nEOF\n")
+            ])),
+            patch
+        );
+        // the patch as the argument
+        assert_eq!(exec(json!(["apply_patch", body])), patch);
+        // without its closing marker, as bash reads it
+        assert_eq!(
+            exec(json!([
+                "bash",
+                "-lc",
+                format!("apply_patch <<'PATCH'\n{body}")
+            ])),
+            patch
+        );
+        // more after it is a shell's command, and stays one
+        assert!(matches!(
+            exec(json!([
+                "bash",
+                "-lc",
+                format!("apply_patch <<'PATCH'\n{body}\nPATCH\ncargo test")
+            ])),
+            Call::Shell { .. }
+        ));
+        // the same in ognivo's own shell tool
+        let shell = parse(
+            Family::Harmony,
+            Layout::Standard,
+            "shell",
+            &json!({ "command": format!("apply_patch <<'EOF'\n{body}\nEOF") }).to_string(),
+        )
+        .unwrap();
+        assert_eq!(shell, patch);
     }
 }

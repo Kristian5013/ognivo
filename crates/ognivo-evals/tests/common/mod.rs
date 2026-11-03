@@ -254,6 +254,7 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         time_limit: None,
         user_instructions: UserInstructions::default(),
         rules: Rules::default(),
+        layout: Default::default(),
     }
 }
 

@@ -13,6 +13,7 @@ publish = false
 [workspace.dependencies]
 ognivo-core = { path = "crates/ognivo-core" }
 ognivo-models = { path = "crates/ognivo-models" }
+ognivo-patch = { path = "crates/ognivo-patch" }
 ognivo-protocol = { path = "crates/ognivo-protocol" }
 ognivo-store = { path = "crates/ognivo-store" }
 ognivo-tools = { path = "crates/ognivo-tools" }
