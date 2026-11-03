@@ -15,7 +15,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use serde_json::{Value, json};
 
 use crate::Family;
-use crate::engine::{EngineError, SamplerSpec, Usage};
+use crate::engine::{EngineError, SamplerSpec, TokenId, Usage};
 use crate::generic::{
     Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, Outcome, ToolCall,
     ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
@@ -74,6 +74,9 @@ pub struct Finished {
     pub usage: Usage,
     /// The seed of the attempt that produced this result.
     pub seed: u32,
+    /// The ids of the generation, for the Native path to send back as they came (§5.4);
+    /// `None` on the Generic path, and where the Native path repaired the generation.
+    pub tokens: Option<Vec<TokenId>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -188,6 +191,7 @@ fn history_for(
                 content,
                 reasoning,
                 tool_calls,
+                tokens,
             } => {
                 if family == Family::Harmony && tool_calls.len() > 1 {
                     return Err(DriverError::InvalidRequest(format!(
@@ -204,6 +208,7 @@ fn history_for(
                     content,
                     reasoning,
                     tool_calls,
+                    tokens,
                 });
             }
             other => rest.push(other),
@@ -228,6 +233,7 @@ fn guard_message(g: &Guard, m: ChatMessage) -> ChatMessage {
             content,
             reasoning,
             tool_calls,
+            tokens,
         } => ChatMessage::Assistant {
             content: esc(content),
             reasoning: reasoning.map(esc),
@@ -238,6 +244,7 @@ fn guard_message(g: &Guard, m: ChatMessage) -> ChatMessage {
                     ..c
                 })
                 .collect(),
+            tokens,
         },
         ChatMessage::Tool {
             tool_call_id,
@@ -435,6 +442,7 @@ fn finished(acc: ChatCompletion, guard: &Guard, seed: u32) -> Finished {
         finish: acc.finish,
         usage: acc.usage,
         seed,
+        tokens: None,
     }
 }
 
@@ -491,6 +499,7 @@ fn stopped(
         finish: None,
         usage: acc.usage,
         seed,
+        tokens: None,
     }
 }
 
@@ -883,6 +892,7 @@ mod tests {
                 content: "let me look".into(),
                 reasoning: Some("r".into()),
                 tool_calls: vec![call("1")],
+                tokens: None,
             },
         ];
         let gemma = history_for(Family::Gemma4, history.clone()).unwrap();
@@ -898,6 +908,7 @@ mod tests {
             content: String::new(),
             reasoning: None,
             tool_calls: vec![call("1"), call("2")],
+            tokens: None,
         }];
         assert!(history_for(Family::Harmony, two.clone()).is_err());
         assert!(history_for(Family::Gemma4, two).is_ok());
@@ -1009,6 +1020,7 @@ mod tests {
                     name: "read".into(),
                     arguments: json!({"file": "a.py"}).to_string(),
                 }],
+                tokens: None,
             },
             ChatMessage::Tool {
                 tool_call_id: "r".into(),

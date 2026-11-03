@@ -1064,6 +1064,7 @@ impl Agent {
                         content: f.content.clone(),
                         reasoning,
                         tool_calls: Vec::new(),
+                        tokens: f.tokens,
                     });
                     return Ok(TurnEnd::Answer(Answer {
                         text: f.content,
@@ -1078,6 +1079,7 @@ impl Agent {
                         content: f.content,
                         reasoning,
                         tool_calls: calls.clone(),
+                        tokens: f.tokens,
                     });
                     for (i, call) in calls.iter().enumerate() {
                         let result = if self.stuck.is_some() {
@@ -1661,6 +1663,7 @@ mod tests {
                 finish: c.finish,
                 usage: c.usage,
                 seed: 0,
+                tokens: None,
             }))
         }
     }
@@ -2109,6 +2112,7 @@ mod tests {
             finish: None,
             usage: Default::default(),
             seed: 0,
+            tokens: None,
         };
         let steps = vec![Step::Done(Box::new(looped)), answer("stopped").into()];
         let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);
@@ -2241,6 +2245,7 @@ mod tests {
             finish: None,
             usage: Default::default(),
             seed: 0,
+            tokens: None,
         };
         let steps = vec![Step::Done(Box::new(looped)), answer("ok").into()];
         let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);

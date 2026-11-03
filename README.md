@@ -55,7 +55,9 @@ current directory: the answer streams, each tool call shows as one line and each
 short diff, an action that needs approval asks `y`, `n` (or `n` and what to do instead) or
 `a` (that exact action again without asking, for the rest of the session), and ^C stops a
 turn; `/help` lists the rest. `run` takes the prompt on stdin;
-actions that would need approval are refused and explained to the model.
+actions that would need approval are refused and explained to the model. With `--native`
+(gpt-oss so far) ognivo renders the model's format itself and the server only tokenizes and
+generates: the Native path of M2, in progress.
 
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 

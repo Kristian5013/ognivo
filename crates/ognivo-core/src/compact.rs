@@ -69,6 +69,7 @@ fn bytes(m: &ChatMessage) -> u64 {
             content,
             reasoning,
             tool_calls,
+            ..
         } => {
             content.len()
                 + reasoning.as_ref().map_or(0, String::len)
@@ -235,6 +236,7 @@ mod tests {
                     name: "read".into(),
                     arguments: "{}".into(),
                 }],
+                tokens: None,
             },
             ChatMessage::Tool {
                 tool_call_id: id.into(),
@@ -263,6 +265,7 @@ mod tests {
                 content: "old answer".into(),
                 reasoning: None,
                 tool_calls: Vec::new(),
+                tokens: None,
             },
             ChatMessage::User("fix it".into()),
         ];

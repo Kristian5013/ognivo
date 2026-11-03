@@ -238,6 +238,64 @@ impl LlamaServer {
         }
     }
 
+    /// `/tokenize` of a list of texts and ids, read as llama-server reads a mixed prompt: each
+    /// text on its own, here without special parsing, and each id as it is.
+    pub async fn tokenize_mixed(&self, content: &[Value]) -> Result<Vec<u32>, EngineError> {
+        let body = json!({ "content": content, "parse_special": false, "add_special": false });
+        match self.post("/tokenize", &body, TOKENIZE_TIMEOUT).await? {
+            (200, v) => v["tokens"]
+                .as_array()
+                .ok_or_else(|| EngineError::Protocol("/tokenize: no tokens array".into()))?
+                .iter()
+                .map(|t| {
+                    t.as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .ok_or_else(|| EngineError::Protocol(format!("/tokenize: bad token {t}")))
+                })
+                .collect(),
+            (status, v) => Err(status_err(status, &v)),
+        }
+    }
+
+    /// The bytes of each of `ids` in the server's vocabulary: `/tokenize` of the ids with their
+    /// pieces, where a piece that is no UTF-8 on its own comes as its bytes.
+    pub async fn pieces(&self, ids: &[u32]) -> Result<Vec<Vec<u8>>, EngineError> {
+        let body = json!({ "content": ids, "with_pieces": true, "add_special": false });
+        let tokens = match self.post("/tokenize", &body, TOKENIZE_TIMEOUT).await? {
+            (200, mut v) => match v["tokens"].take() {
+                Value::Array(a) => a,
+                _ => return Err(EngineError::Protocol("/tokenize: no tokens array".into())),
+            },
+            (status, v) => return Err(status_err(status, &v)),
+        };
+        if tokens.len() != ids.len() {
+            return Err(EngineError::Protocol(format!(
+                "/tokenize: {} pieces for {} ids",
+                tokens.len(),
+                ids.len()
+            )));
+        }
+        let bad = |t: &Value| EngineError::Protocol(format!("/tokenize: bad piece {t}"));
+        tokens
+            .iter()
+            .zip(ids)
+            .map(|(t, id)| {
+                if t["id"].as_u64() != Some(u64::from(*id)) {
+                    return Err(bad(t));
+                }
+                match &t["piece"] {
+                    Value::String(s) => Ok(s.as_bytes().to_vec()),
+                    Value::Array(bytes) => bytes
+                        .iter()
+                        .map(|b| b.as_u64().and_then(|b| u8::try_from(b).ok()))
+                        .collect::<Option<Vec<u8>>>()
+                        .ok_or_else(|| bad(t)),
+                    _ => Err(bad(t)),
+                }
+            })
+            .collect()
+    }
+
     pub async fn detokenize(&self, ids: &[u32]) -> Result<String, EngineError> {
         match self
             .post("/detokenize", &json!({ "tokens": ids }), TOKENIZE_TIMEOUT)

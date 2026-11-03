@@ -33,7 +33,7 @@ use crate::engine::TokenId;
 
 /// Ids from here on are control tokens of o200k_harmony: Harmony's seven, startoftext,
 /// endoftext, endofprompt and the reserved ones.
-const CONTROL: TokenId = 199_998;
+pub(crate) const CONTROL: TokenId = 199_998;
 
 const CHANNELS: [&str; 3] = ["analysis", "commentary", "final"];
 

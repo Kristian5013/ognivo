@@ -16,9 +16,10 @@
 //! - [`template`]: chat templates in the form servers report them.
 //!
 //! - [`harmony`]: gpt-oss's format, rendered as its reference does and read back
-//!   tolerantly, for the Native path (M2).
+//!   tolerantly, for the Native path (M2);
+//! - [`native`]: [`NativeDriver`], the Native path for gpt-oss over `/completion`.
 //!
-//! The Native driver and the codecs of Gemma 4 and Qwen XML arrive in M2–M3.
+//! The codecs of Gemma 4 and Qwen XML arrive in M3.
 
 pub mod caps;
 pub mod doctor;
@@ -29,6 +30,7 @@ pub mod generic;
 pub mod guard;
 pub mod harmony;
 pub mod llama;
+pub mod native;
 pub mod profile;
 pub mod repeat;
 pub mod sse;
@@ -43,4 +45,5 @@ pub use generic::{
     Outcome, ToolCall, ToolChoice, ToolDecl, chat_body, chat_events,
 };
 pub use guard::Guard;
+pub use native::NativeDriver;
 pub use profile::ModelProfile;

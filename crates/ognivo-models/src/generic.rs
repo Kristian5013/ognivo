@@ -51,6 +51,10 @@ pub enum ChatMessage {
         /// gpt-oss keeps at most one call per assistant message (its template renders only
         /// the first); other families may carry several.
         tool_calls: Vec<ToolCall>,
+        /// The ids the model generated for this message, for the Native path to send back as
+        /// they came (§5.4); `None` on the Generic path, and where the Native path repaired
+        /// the generation.
+        tokens: Option<Vec<u32>>,
     },
     /// One tool result, answering the assistant's call with id `tool_call_id`.
     Tool {
@@ -89,6 +93,8 @@ struct StoredMessage {
     tool_calls: Vec<ToolCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tokens: Option<Vec<u32>>,
 }
 
 impl From<ChatMessage> for StoredMessage {
@@ -99,6 +105,7 @@ impl From<ChatMessage> for StoredMessage {
             reasoning: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
+            tokens: None,
         };
         match m {
             ChatMessage::System(content) => plain(Role::System, content),
@@ -107,9 +114,11 @@ impl From<ChatMessage> for StoredMessage {
                 content,
                 reasoning,
                 tool_calls,
+                tokens,
             } => StoredMessage {
                 reasoning,
                 tool_calls,
+                tokens,
                 ..plain(Role::Assistant, content)
             },
             ChatMessage::Tool {
@@ -134,6 +143,7 @@ impl TryFrom<StoredMessage> for ChatMessage {
                 content: m.content,
                 reasoning: m.reasoning,
                 tool_calls: m.tool_calls,
+                tokens: m.tokens,
             },
             Role::Tool => ChatMessage::Tool {
                 tool_call_id: m.tool_call_id.ok_or("a tool result without tool_call_id")?,
@@ -243,6 +253,7 @@ fn message_json(m: &ChatMessage) -> Value {
             content,
             reasoning,
             tool_calls,
+            ..
         } => {
             let mut o = Map::new();
             o.insert("role".into(), json!("assistant"));
@@ -529,6 +540,12 @@ impl ExecutableCalls {
     pub fn calls(&self) -> &[ToolCall] {
         &self.0
     }
+
+    /// Calls the Native path read and checked itself: complete, each with an id, a name and an
+    /// object of arguments.
+    pub(crate) fn checked(calls: Vec<ToolCall>) -> Self {
+        ExecutableCalls(calls)
+    }
 }
 
 /// The calls as the tools must see them, or why they cannot run.
@@ -600,11 +617,13 @@ mod tests {
                     name: "read".into(),
                     arguments: r#"{"path":"a"}"#.into(),
                 }],
+                tokens: None,
             },
             ChatMessage::Assistant {
                 content: "done".into(),
                 reasoning: None,
                 tool_calls: Vec::new(),
+                tokens: None,
             },
             ChatMessage::Tool {
                 tool_call_id: "c1".into(),
@@ -719,6 +738,7 @@ mod tests {
                 name: "Read".into(),
                 arguments: "{\"path\":\"a.rs\"}".into(),
             }],
+            tokens: None,
         };
         let v = message_json(&msg);
         assert_eq!(v["role"], json!("assistant"));
@@ -735,6 +755,7 @@ mod tests {
             content: "x".into(),
             reasoning: None,
             tool_calls: vec![],
+            tokens: None,
         });
         assert!(none.get("reasoning_content").is_none());
         assert!(none.get("tool_calls").is_none());
@@ -742,6 +763,7 @@ mod tests {
             content: "x".into(),
             reasoning: Some(String::new()),
             tool_calls: vec![],
+            tokens: None,
         });
         assert_eq!(empty["reasoning_content"], json!(""));
     }

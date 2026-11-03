@@ -82,6 +82,8 @@ pub enum Piece {
     Special(Special),
     /// Text tokenized on its own, as content.
     Text(String),
+    /// Ids the model generated, sent back as they came (§5.4, `seal()`).
+    Tokens(Vec<TokenId>),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -90,27 +92,100 @@ pub struct Prompt {
 }
 
 impl Prompt {
-    fn special(&mut self, s: Special) {
+    pub(crate) fn special(&mut self, s: Special) {
         self.pieces.push(Piece::Special(s));
     }
 
     /// The reference encodes an empty text as nothing.
-    fn text(&mut self, t: impl Into<String>) {
+    pub(crate) fn text(&mut self, t: impl Into<String>) {
         let t = t.into();
         if !t.is_empty() {
             self.pieces.push(Piece::Text(t));
         }
     }
 
-    /// The prompt as text with its control tokens written out, as the golden files hold it.
+    pub(crate) fn tokens(&mut self, ids: Vec<TokenId>) {
+        if !ids.is_empty() {
+            self.pieces.push(Piece::Tokens(ids));
+        }
+    }
+
+    /// The start of the assistant's next message, where generation begins.
+    pub(crate) fn assistant(&mut self) {
+        self.special(Special::Start);
+        self.text(Role::Assistant.as_str());
+    }
+
+    /// The prompt as text with its control tokens written out, as the golden files hold it;
+    /// ids sent back as they came show as their number.
     pub fn display(&self) -> String {
         self.pieces
             .iter()
             .map(|p| match p {
                 Piece::Special(s) => s.text(),
                 Piece::Text(t) => t.clone(),
+                Piece::Tokens(ids) => format!("⟨{} ids⟩", ids.len()),
             })
             .collect()
+    }
+
+    /// `m`, rendered as the reference renders it; `functions` tells whether the developer
+    /// message declares functions, which the system message then names.
+    pub(crate) fn message(&mut self, m: &Message, functions: bool) {
+        self.special(Special::Start);
+        if m.role == Role::Tool {
+            // a tool's name stands for its role
+            self.text(m.name.clone().unwrap_or_default());
+        } else {
+            self.text(m.role.as_str());
+            if let Some(name) = &m.name {
+                self.text(format!(":{name}"));
+            }
+        }
+        if let Some(r) = m.recipient.as_deref().filter(|r| *r != "all") {
+            self.text(format!(" to={r}"));
+        }
+        if let Some(c) = &m.channel {
+            self.special(Special::Channel);
+            self.text(c.clone());
+        }
+        if let Some(t) = &m.content_type {
+            match t.strip_prefix(&Special::Constrain.text()) {
+                Some(rest) => {
+                    self.text(" ");
+                    self.special(Special::Constrain);
+                    self.text(rest);
+                }
+                None => self.text(format!(" {t}")),
+            }
+        }
+        self.special(Special::Message);
+        match &m.content {
+            Content::Text(t) => self.text(t.clone()),
+            Content::System(s) => self.text(system_text(s, functions)),
+            Content::Developer {
+                instructions,
+                namespaces,
+            } => {
+                let mut sections = Vec::new();
+                if let Some(i) = instructions {
+                    sections.push("# Instructions".to_owned());
+                    sections.push(i.clone());
+                }
+                if namespaces
+                    .iter()
+                    .any(|n| !n.tools.is_empty() || n.description.is_some())
+                {
+                    sections.push(tools_section(namespaces));
+                }
+                self.text(sections.join("\n\n"));
+            }
+        }
+        self.special(if m.role == Role::Assistant && m.recipient.is_some() {
+            Special::Call
+        } else {
+            Special::End
+        });
     }
 }
 
@@ -271,8 +346,7 @@ impl Message {
 /// `messages`, then the start of the assistant's next message.
 pub fn render_for_completion(messages: &[Message]) -> Prompt {
     let mut p = render(messages);
-    p.special(Special::Start);
-    p.text(Role::Assistant.as_str());
+    p.assistant();
     p
 }
 
@@ -285,66 +359,9 @@ pub fn render(messages: &[Message]) -> Prompt {
     });
     let mut p = Prompt::default();
     for m in messages {
-        render_message(m, functions, &mut p);
+        p.message(m, functions);
     }
     p
-}
-
-fn render_message(m: &Message, functions: bool, p: &mut Prompt) {
-    p.special(Special::Start);
-    if m.role == Role::Tool {
-        // a tool's name stands for its role
-        p.text(m.name.clone().unwrap_or_default());
-    } else {
-        p.text(m.role.as_str());
-        if let Some(name) = &m.name {
-            p.text(format!(":{name}"));
-        }
-    }
-    if let Some(r) = m.recipient.as_deref().filter(|r| *r != "all") {
-        p.text(format!(" to={r}"));
-    }
-    if let Some(c) = &m.channel {
-        p.special(Special::Channel);
-        p.text(c.clone());
-    }
-    if let Some(t) = &m.content_type {
-        match t.strip_prefix(&Special::Constrain.text()) {
-            Some(rest) => {
-                p.text(" ");
-                p.special(Special::Constrain);
-                p.text(rest);
-            }
-            None => p.text(format!(" {t}")),
-        }
-    }
-    p.special(Special::Message);
-    match &m.content {
-        Content::Text(t) => p.text(t.clone()),
-        Content::System(s) => p.text(system_text(s, functions)),
-        Content::Developer {
-            instructions,
-            namespaces,
-        } => {
-            let mut sections = Vec::new();
-            if let Some(i) = instructions {
-                sections.push("# Instructions".to_owned());
-                sections.push(i.clone());
-            }
-            if namespaces
-                .iter()
-                .any(|n| !n.tools.is_empty() || n.description.is_some())
-            {
-                sections.push(tools_section(namespaces));
-            }
-            p.text(sections.join("\n\n"));
-        }
-    }
-    p.special(if m.role == Role::Assistant && m.recipient.is_some() {
-        Special::Call
-    } else {
-        Special::End
-    });
 }
 
 fn system_text(s: &System, functions: bool) -> String {
@@ -746,7 +763,7 @@ mod tests {
             .iter()
             .filter_map(|p| match p {
                 Piece::Special(s) => Some(s.id()),
-                Piece::Text(_) => None,
+                Piece::Text(_) | Piece::Tokens(_) => None,
             })
             .collect();
         let golden_specials: Vec<u32> = ids.into_iter().filter(|&id| id >= 199_998).collect();

@@ -14,7 +14,7 @@ use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
-use ognivo_models::{ChatDriver, Family, doctor, profile};
+use ognivo_models::{ChatDriver, Family, ModelDriver, NativeDriver, doctor, native, profile};
 use ognivo_store::{NewSession, SessionRow, Store};
 
 /// The session store, in the data directory.
@@ -52,6 +52,10 @@ pub struct SessionArgs {
     /// Where sessions and logs go; ~/.ognivo/data by default
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
+    /// The Native path: ognivo renders the model's format itself, and the server only
+    /// tokenizes and generates (gpt-oss only so far)
+    #[arg(long)]
+    pub native: bool,
 }
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
@@ -80,7 +84,7 @@ impl Failure {
 /// A server ready for the agent, and what the agent starts with.
 #[derive(Debug)]
 pub struct Connected {
-    pub driver: ChatDriver,
+    pub driver: Box<dyn ModelDriver>,
     pub family: Family,
     /// The profile's id.
     pub profile: String,
@@ -113,7 +117,7 @@ impl Connected {
             seed: self.opts.seed,
         };
         let session = Session::create(store, &new).map_err(store_failure)?;
-        let mut agent = Agent::new(Box::new(self.driver), self.family, approver, self.opts);
+        let mut agent = Agent::new(self.driver, self.family, approver, self.opts);
         agent.keep_in(session);
         Ok(agent)
     }
@@ -130,7 +134,7 @@ impl Connected {
         let known: Vec<PathBuf> = left.journal.files.iter().map(|f| f.path.clone()).collect();
         self.opts.workspace = state(self.changed.as_deref(), &known);
         Ok(Agent::resume(
-            Box::new(self.driver),
+            self.driver,
             self.family,
             approver,
             self.opts,
@@ -243,8 +247,20 @@ impl SessionArgs {
             .ok()
             .and_then(Result::ok)
             .and_then(|p| p.n_ctx);
-        let driver = ChatDriver::new(server, profile, level.as_deref(), self.slot)
-            .map_err(Failure::usage)?;
+        let driver: Box<dyn ModelDriver> = if self.native {
+            // the system message holds the day the session began, and must keep it
+            let began = stored.map_or_else(native::now, |r| r.created.max(0) as u64 / 1000);
+            let date = native::utc_date(began);
+            Box::new(
+                NativeDriver::new(server, profile, level.as_deref(), self.slot, &date)
+                    .map_err(Failure::usage)?,
+            )
+        } else {
+            Box::new(
+                ChatDriver::new(server, profile, level.as_deref(), self.slot)
+                    .map_err(Failure::usage)?,
+            )
+        };
         let seed = stored.map(|r| r.seed).or(self.seed).unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

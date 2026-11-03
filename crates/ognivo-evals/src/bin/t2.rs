@@ -1,9 +1,10 @@
 //! T2-mini against a running llama-server:
 //!
-//!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT]
+//!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native]
 //!
 //! Runs every scenario of `evals/t2/scenarios` (or those whose id or category holds TEXT)
-//! with each seed, one line per run, then the summary. DIR keeps the results
+//! with each seed, one line per run, then the summary; `--native` runs them on the Native
+//! path, and the summary names the profile `ID+native`. DIR keeps the results
 //! (`results.jsonl`, one run per line), the summary (`summary.json`), the sessions
 //! (`sessions.db`), their trajectories (`traces/`) and the projects of failed runs
 //! (`work/`). Runs already in `results.jsonl` are not run again, so an interrupted suite
@@ -25,11 +26,13 @@ struct Args {
     out: PathBuf,
     seeds: Vec<u32>,
     only: Option<String>,
+    native: bool,
 }
 
 fn args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut url, mut profile, mut out, mut seeds, mut only) = (None, None, None, vec![1], None);
+    let mut native = false;
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -37,6 +40,7 @@ fn args() -> Result<Args, String> {
             "--profile" => profile = Some(value()?),
             "--out" => out = Some(PathBuf::from(value()?)),
             "--only" => only = Some(value()?),
+            "--native" => native = true,
             "--seeds" => {
                 seeds = value()?
                     .split(',')
@@ -57,6 +61,7 @@ fn args() -> Result<Args, String> {
         out: out.ok_or("--out is required")?,
         seeds,
         only,
+        native,
     })
 }
 
@@ -66,7 +71,7 @@ async fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT]"
+                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native]"
             );
             return ExitCode::from(2);
         }
@@ -138,6 +143,13 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         url: a.url.clone(),
         profile: p.clone(),
         n_ctx: props.n_ctx,
+        native: a.native,
+    };
+    // the night report tells the paths apart by this name
+    let name = if a.native {
+        format!("{}+native", p.id)
+    } else {
+        p.id.clone()
     };
     let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
     let ambiguous = t2::ambiguous(&scenarios);
@@ -173,12 +185,12 @@ async fn suite(a: &Args) -> Result<Summary, String> {
             results.push(r);
             // a suite stopped at the end of a night window keeps the summary of what ran
             let now = selected(&results, &wanted, &a.seeds);
-            let s = t2::summarize(&p.id, info.clone(), &a.seeds, &now, &ambiguous);
+            let s = t2::summarize(&name, info.clone(), &a.seeds, &now, &ambiguous);
             write_summary(&a.out, &s)?;
         }
     }
     let s = t2::summarize(
-        &p.id,
+        &name,
         info,
         &a.seeds,
         &selected(&results, &wanted, &a.seeds),

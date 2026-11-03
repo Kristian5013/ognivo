@@ -18,7 +18,7 @@ use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::Rules;
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
-use ognivo_models::{ChatDriver, DriverError, ModelProfile};
+use ognivo_models::{ChatDriver, DriverError, ModelDriver, ModelProfile, NativeDriver, native};
 use ognivo_store::{NewSession, Store};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -267,6 +267,8 @@ pub struct Target {
     pub url: String,
     pub profile: ModelProfile,
     pub n_ctx: Option<u32>,
+    /// The Native path instead of the Generic one.
+    pub native: bool,
 }
 
 /// One scenario run with one seed.
@@ -348,8 +350,14 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     };
     let session = Session::create(store, &new).map_err(|e| e.to_string())?;
     let server = LlamaServer::new(&t.url, None).map_err(|e| e.to_string())?;
-    let driver =
-        ChatDriver::new(server, t.profile.clone(), None, Some(0)).map_err(|e| e.to_string())?;
+    let driver: Box<dyn ModelDriver> = if t.native {
+        let date = native::utc_date(native::now());
+        let d = NativeDriver::new(server, t.profile.clone(), None, Some(0), &date);
+        Box::new(d.map_err(|e| e.to_string())?)
+    } else {
+        let d = ChatDriver::new(server, t.profile.clone(), None, Some(0));
+        Box::new(d.map_err(|e| e.to_string())?)
+    };
     let opts = AgentOptions {
         root: root.clone(),
         data_dir: work.join("data"),
@@ -362,7 +370,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         user_instructions: UserInstructions::default(),
         rules: Rules::default(),
     };
-    let mut agent = Agent::new(Box::new(driver), t.profile.family, Box::new(NoUser), opts);
+    let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);
 
     let mut calls: Vec<(String, String)> = Vec::new();
