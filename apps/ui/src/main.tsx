@@ -5,7 +5,11 @@ import { App } from "./app.tsx";
 import { Core, corePort } from "./core.ts";
 import "./index.css";
 import { LiveApp } from "./live-app.tsx";
+import { startLook } from "./look.ts";
 import { Threads } from "./threads.ts";
+
+// the theme, the accent and the scale, before anything shows
+startLook();
 
 const root = document.getElementById("root");
 if (!root) throw new Error("index.html has no #root");

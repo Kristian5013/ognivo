@@ -35,6 +35,12 @@ export function summary(call: Call): string {
       return `/${call.pattern}/${call.path ? ` in ${call.path}` : ""}${call.glob ? ` · ${call.glob}` : ""}`;
     case "Glob":
       return `${call.pattern}${call.path ? ` in ${call.path}` : ""}`;
+    case "ApplyPatch": {
+      const files = [...call.patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)].map((m) => m[1]!.trim());
+      return files.length ? files.join(", ") : "a patch";
+    }
+    case "Task":
+      return `${call.tasks.length} ${call.tasks.length === 1 ? "task" : "tasks"}: ${call.tasks.map((t) => t.title).join(", ")}`;
   }
 }
 

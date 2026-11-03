@@ -3,13 +3,17 @@
 // thread from the list shows what happened in it; the first message to one the core does
 // not have open picks it up again with the server it last had.
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { Hud } from "./app.tsx";
 import { Composer, type Sending } from "./components/composer.tsx";
+import { Logo, Wordmark } from "./components/logo.tsx";
 import { type ApprovalAsk, ApprovalCard, type Panel, SidePanel } from "./components/panels.tsx";
+import { SettingsButton } from "./components/settings.tsx";
+import { ThreadNavContext } from "./components/subagent.tsx";
 import { ThreadView } from "./components/thread.tsx";
 import { type Ask, type Core, CoreError } from "./core.ts";
+import { ending } from "./format.ts";
 import profiles from "./profiles.json";
 import * as P from "./protocol.ts";
 import type { ThreadStore } from "./store.ts";
@@ -80,11 +84,11 @@ function ThreadList({
   return (
     <nav className="flex w-72 shrink-0 flex-col border-r border-border bg-panel">
       <div className="flex items-center px-4 py-3">
-        <span className="text-[15px] font-semibold tracking-tight text-spark">ognivo</span>
+        <Wordmark />
         <button
           type="button"
           onClick={onNew}
-          className={`ml-auto rounded border px-2 py-0.5 text-[12px] hover:bg-raised ${creating ? "border-spark/60" : "border-border"}`}
+          className={`ml-auto rounded border px-2 py-0.5 text-[12px] hover:bg-raised ${creating ? "border-spark/60 text-foreground" : "border-border"}`}
         >
           New session
         </button>
@@ -106,23 +110,28 @@ function ThreadList({
                   key={t.thread}
                   type="button"
                   onClick={() => onSelect(t)}
-                  className={`block w-full px-4 py-1.5 text-left hover:bg-raised ${t.thread === selected && !creating ? "bg-raised" : ""}`}
+                  className={`block w-full border-l-2 px-4 py-1.5 text-left hover:bg-raised ${t.thread === selected && !creating ? "border-spark bg-raised" : "border-transparent"}`}
                 >
-                  <span className="line-clamp-2 leading-5">{t.title || "New session"}</span>
+                  <span className="flex items-start gap-2">
+                    <span className="line-clamp-2 min-w-0 flex-1 leading-5">{t.title || "New session"}</span>
+                    {runs && <span className="ember-dot mt-1.5" title="A turn runs" />}
+                  </span>
                   <span className="flex gap-2 text-[11px] text-muted-foreground">
                     <span>{t.profile}</span>
                     <span>
                       {t.turns} {t.turns === 1 ? "turn" : "turns"}
                     </span>
                     {t.unreviewed > 0 && <span className="text-warn">{t.unreviewed} unreviewed</span>}
-                    {runs && <span className="animate-pulse text-spark">running</span>}
-                    {asks > 0 && <span className="text-spark">asks</span>}
+                    {asks > 0 && <span className="rounded bg-spark/15 px-1 text-spark">asks</span>}
                   </span>
                 </button>
               );
             })}
           </section>
         ))}
+      </div>
+      <div className="flex items-center border-t border-border px-3 py-2">
+        <SettingsButton />
       </div>
     </nav>
   );
@@ -138,7 +147,7 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
   const label = "mb-1 block text-[12px] text-muted-foreground";
   return (
     <form
-      className="m-auto w-full max-w-lg space-y-4 px-6"
+      className="rise m-auto w-full max-w-lg space-y-4 rounded-xl border border-border bg-panel/70 p-6 shadow-xl backdrop-blur"
       onSubmit={(e) => {
         e.preventDefault();
         setBusy(true);
@@ -148,7 +157,13 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
           .finally(() => setBusy(false));
       }}
     >
-      <h1 className="text-[15px] font-semibold">New session</h1>
+      <div className="flex items-center gap-3">
+        <Logo size={30} />
+        <div>
+          <h1 className="text-[15px] font-semibold">New session</h1>
+          <p className="text-[12px] text-muted-foreground">A coding agent on your own llama-server</p>
+        </div>
+      </div>
       <div>
         <label className={label} htmlFor="project">
           Project: its root directory
@@ -234,7 +249,7 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
         <button
           type="submit"
           disabled={busy}
-          className="rounded border border-spark/60 px-3 py-1 hover:bg-raised disabled:opacity-40"
+          className="rounded-md bg-spark px-4 py-1.5 font-medium text-background hover:opacity-90 disabled:opacity-40"
         >
           {busy ? "Connecting…" : "Start"}
         </button>
@@ -289,6 +304,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const [store, setStore] = useState<ThreadStore>();
   const [notes, setNotes] = useState(new Map<number, string[]>());
   const [open, setOpen] = useState(new Set<number>());
+  /** Threads on the Native path, which can end the model's reasoning. */
+  const [native, setNative] = useState(new Set<number>());
   const [panel, setPanel] = useState<Panel>();
   const [generation, setGeneration] = useState<number>();
   const [error, setError] = useState<string>();
@@ -322,7 +339,11 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const opened = (o: P.Opened) => {
     setNotes((n) => new Map(n).set(o.thread, o.notes));
     setOpen((s) => new Set(s).add(o.thread));
+    if (o.answer_now) setNative((s) => new Set(s).add(o.thread));
   };
+
+  // a subagent's lane opens its thread
+  const nav = useMemo(() => ({ store: (t: number) => threads.store(t), open: (t: number) => select(t) }), [threads]);
 
   const start = async (form: Settings, project: string) => {
     const o = await core.call("thread/start", {
@@ -343,12 +364,18 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
 
   const summary = list.find((t) => t.thread === selected);
   const isOpen = selected !== undefined && (open.has(selected) || Boolean(summary?.open));
+  const running = selected !== undefined && threads.running(selected);
+  /** The thread a subagent's thread works for. */
+  const parent = selected === undefined ? undefined : threads.info(selected)?.parent;
+  // a turn that ended without an answer can go on
+  const last = store?.row(store.length - 1);
+  const stopped = !running && !parent && last?.kind === "end" && last.end !== "answer" ? last : undefined;
 
   const sending: Sending | undefined =
     selected === undefined
       ? undefined
       : {
-          running: threads.running(selected),
+          running,
           send: async (text) => {
             const turn = () => core.call("turn/start", { thread: selected, text });
             try {
@@ -369,6 +396,10 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
             }
           },
           stop: () => void core.call("turn/interrupt", { thread: selected }).catch((e: unknown) => setError(message(e))),
+          answerNow:
+            native.has(selected) || summary?.answer_now
+              ? () => void core.call("turn/answer_now", { thread: selected }).catch((e: unknown) => setError(message(e)))
+              : undefined,
         };
 
   const asks = [...core.asks.values()];
@@ -401,12 +432,24 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
         onSelect={(t) => select(t.thread, t.title)}
         onNew={() => setCreating(true)}
       />
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className={`flex min-w-0 flex-1 flex-col ${creating || selected === undefined ? "hearth" : ""}`}>
         {creating || selected === undefined ? (
           <NewThread key={settings.projects[0] ?? ""} settings={settings} onStart={start} />
         ) : store ? (
           <>
             <Hud store={store} panel={panel} onPanel={setPanel} waiting={here.length} />
+            {parent && (
+              <div className="flex items-center gap-3 border-b border-border bg-panel px-6 py-1.5 text-[12px]">
+                <span className="text-muted-foreground">A subagent's thread: it works on one task of the session.</span>
+                <button
+                  type="button"
+                  onClick={() => select(parent.thread)}
+                  className="ml-auto rounded border border-border px-2 py-0.5 hover:border-spark/60 hover:bg-raised"
+                >
+                  ← Back to the session
+                </button>
+              </div>
+            )}
             {(shownNotes?.length || error) && (
               <div className="border-b border-border px-6 py-1.5 text-[12px] text-muted-foreground">
                 {shownNotes?.map((n) => (
@@ -415,15 +458,17 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
                 {error && <p className="text-err">{error}</p>}
               </div>
             )}
-            <ThreadView
-              key={store.info.id}
-              store={store}
-              atEnd
-              onInspect={(g) => {
-                setGeneration(g);
-                setPanel("inspector");
-              }}
-            />
+            <ThreadNavContext.Provider value={nav}>
+              <ThreadView
+                key={store.info.id}
+                store={store}
+                atEnd
+                onInspect={(g) => {
+                  setGeneration(g);
+                  setPanel("inspector");
+                }}
+              />
+            </ThreadNavContext.Provider>
             {here.length > 0 && (
               <div className="px-6 pt-2">
                 <div className="mx-auto max-w-3xl">
@@ -433,12 +478,35 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
                 </div>
               </div>
             )}
+            {stopped && sending && (
+              <div className="px-6 pt-2">
+                <div className="rise mx-auto flex max-w-3xl items-center gap-3 rounded-md border border-warn/40 bg-panel px-3 py-1.5 text-[12px]">
+                  <span className="min-w-0 flex-1 truncate text-warn">
+                    Turn {stopped.turn} {ending(stopped.end)}
+                    {stopped.why ? `: ${stopped.why}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void sending.send("Continue.").catch((e: unknown) => setError(message(e)))}
+                    className="shrink-0 rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90"
+                  >
+                    Continue
+                  </button>
+                </div>
+              </div>
+            )}
             {summary && !isOpen && (
               <p className="px-6 pt-1 text-center text-[12px] text-muted-foreground">
                 The core does not have this session open: a message picks it up again on {summary.server}
               </p>
             )}
-            <Composer key={store.info.id} store={store} sending={sending} />
+            {parent ? (
+              <p className="border-t border-border px-6 py-3 text-center text-[12px] text-muted-foreground">
+                A subagent ends with its task; talk to the session that started it.
+              </p>
+            ) : (
+              <Composer key={store.info.id} store={store} sending={sending} />
+            )}
           </>
         ) : (
           <p className="m-auto text-muted-foreground">{error ?? "Loading…"}</p>

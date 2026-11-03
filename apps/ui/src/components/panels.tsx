@@ -124,7 +124,7 @@ export function ApprovalCard({ ask, core }: { ask: ApprovalAsk; core: Core }) {
   const answer = (decision: P.Decision, text?: string) =>
     core.answer<"approval/ask">(ask.id, { decision, instead: text?.trim() || null });
   return (
-    <article className="mb-2 rounded-md border border-spark/50 bg-background p-3">
+    <article className="asks mb-2 rounded-md bg-background p-3">
       <div className="flex min-w-0 items-baseline gap-2">
         <span className="shrink-0 font-mono text-[11px] text-spark uppercase">{q.tool}</span>
         <span className="min-w-0 truncate font-mono text-[12px]" title={q.action}>
@@ -458,7 +458,7 @@ export function SidePanel({
     </button>
   );
   return (
-    <aside className="flex w-[440px] shrink-0 flex-col border-l border-border bg-panel">
+    <aside className="panel-in flex w-[440px] shrink-0 flex-col border-l border-border bg-panel">
       <div className="flex shrink-0 gap-1 border-b border-border px-2 text-[12px]">
         {tab("changes", "Changes", files.length)}
         {tab("approvals", "Approvals", live ? live.asks.length : refused.length)}

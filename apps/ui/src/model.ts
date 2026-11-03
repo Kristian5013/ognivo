@@ -11,7 +11,11 @@ export type Call =
   | { name: "Write"; path: string; content: string }
   | { name: "Bash"; command: string; timeoutMs?: number }
   | { name: "Grep"; pattern: string; path?: string; glob?: string }
-  | { name: "Glob"; pattern: string; path?: string };
+  | { name: "Glob"; pattern: string; path?: string }
+  /** gpt-oss's `apply_patch`, in the V4A format. */
+  | { name: "ApplyPatch"; patch: string }
+  /** `delegate`: tasks for subagents. */
+  | { name: "Task"; tasks: { title: string; write: boolean; files: string[] }[] };
 
 export interface ToolResult {
   /** `refused` when it needed an approval it did not get, `error` when it failed. */
@@ -103,7 +107,23 @@ export interface VoidItem extends Base {
   calls: { name: string; arguments: string }[];
 }
 
-export type Item = ReasoningItem | MessageItem | ToolItem | NoticeItem | VoidItem;
+/** A task of `delegate`, which a subagent works on in a thread of its own. */
+export interface SubagentItem extends Base {
+  kind: "subagent";
+  /** Its number among the call's tasks, from 0. */
+  index: number;
+  title: string;
+  /** The files of a write task; `undefined` for a read task. */
+  write?: string[];
+  /** Its thread on the core. */
+  thread?: number;
+  /** How its turn ended, as a turn's end says it; `undefined` while it works. */
+  end?: string;
+  steps?: number;
+  changed: string[];
+}
+
+export type Item = ReasoningItem | MessageItem | ToolItem | NoticeItem | VoidItem | SubagentItem;
 
 export interface Turn {
   index: number;

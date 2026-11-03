@@ -14,6 +14,8 @@ export interface Sending {
   send: (text: string) => Promise<void>;
   stop: () => void;
   running: boolean;
+  /** On the Native path: ends the model's reasoning, and the answer comes. */
+  answerNow?: () => void;
 }
 
 /** Where the user writes, with `@` for the files of the session and what the message
@@ -136,7 +138,7 @@ export function Composer({ store, draft = "", sending }: { store: ThreadStore; d
               setClosed(true);
             }
           }}
-          className="block w-full resize-none rounded-lg border border-border bg-panel px-3 py-2 leading-5 outline-none placeholder:text-muted-foreground focus:border-spark/60"
+          className="composer block w-full resize-none rounded-lg border border-border bg-panel px-3 py-2 leading-5 outline-none placeholder:text-muted-foreground"
         />
         <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
           <span>
@@ -153,19 +155,31 @@ export function Composer({ store, draft = "", sending }: { store: ThreadStore; d
           <span className="ml-auto">counts are estimates: 4 bytes a token</span>
           {sending &&
             (sending.running ? (
-              <button
-                type="button"
-                onClick={sending.stop}
-                className="rounded border border-warn/60 px-2 py-0.5 text-foreground hover:bg-raised"
-              >
-                Stop
-              </button>
+              <>
+                {sending.answerNow && (
+                  <button
+                    type="button"
+                    onClick={sending.answerNow}
+                    title="End the model's reasoning where it stands and ask for the answer"
+                    className="rounded border border-spark/60 px-2 py-0.5 text-foreground hover:bg-raised"
+                  >
+                    Answer now
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={sending.stop}
+                  className="rounded border border-warn/60 px-2 py-0.5 text-foreground hover:bg-raised"
+                >
+                  Stop
+                </button>
+              </>
             ) : (
               <button
                 type="button"
                 disabled={busy || !text.trim()}
                 onClick={submit}
-                className="rounded border border-border px-2 py-0.5 text-foreground hover:bg-raised disabled:opacity-40"
+                className="rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90 disabled:bg-raised disabled:text-muted-foreground"
               >
                 Send
               </button>

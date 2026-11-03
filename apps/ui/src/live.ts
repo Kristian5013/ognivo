@@ -68,13 +68,18 @@ function toItem(item: P.Item, offset: number): Item {
         id,
         text: `instructions: ${item.files.join(", ")}${item.skipped.map((s) => ` · not read: ${s.path} (${s.why})`).join("")}`,
       };
-    case "subagent": {
-      const mode = item.write ? `writes ${item.write.join(", ")}` : "reads";
-      const end = item.end
-        ? ` · ${item.end === "answer" ? "done" : item.end.replace("_", " ")} after ${item.steps ?? 0} steps${item.changed.length ? `, changed ${item.changed.join(", ")}` : ""}`
-        : " · working";
-      return { kind: "notice", id, text: `subagent ${item.index + 1} «${item.title}» ${mode}${end}` };
-    }
+    case "subagent":
+      return {
+        kind: "subagent",
+        id,
+        index: item.index,
+        title: item.title,
+        write: item.write ?? undefined,
+        thread: item.thread ?? undefined,
+        end: item.end ?? undefined,
+        steps: item.steps ?? undefined,
+        changed: item.changed,
+      };
   }
 }
 
@@ -86,7 +91,7 @@ function parsed(arguments_: string): unknown {
   }
 }
 
-/** The calls the UI knows as such; apply_patch and delegate show by their tools' names. */
+/** The call in the UI's terms. */
 function toCall(c: P.Call): Call | undefined {
   switch (c.name) {
     case "Read":
@@ -102,8 +107,9 @@ function toCall(c: P.Call): Call | undefined {
     case "Glob":
       return { name: "Glob", pattern: c.pattern, path: c.path ?? undefined };
     case "ApplyPatch":
+      return { name: "ApplyPatch", patch: c.patch };
     case "Task":
-      return undefined;
+      return { name: "Task", tasks: c.tasks.map((t) => ({ title: t.title, write: t.write, files: t.files })) };
   }
 }
 

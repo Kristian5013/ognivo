@@ -46,7 +46,9 @@ describe("the core's stream", () => {
     const reasoning = items.find((r) => r.item.kind === "reasoning")?.item;
     expect(reasoning).toMatchObject({ text: "The greeting is in main.rs.", generation: 1 });
     const tools = items.flatMap((r) => (r.item.kind === "tool" ? [r.item] : []));
-    expect(tools.map((t) => t.call?.name ?? t.shown)).toEqual(["Read", "Edit", "Bash", "delegate"]);
+    expect(tools.map((t) => t.call?.name ?? t.shown)).toEqual(["Read", "Edit", "Bash", "Task"]);
+    const task = tools.at(-1)?.call;
+    expect(task?.name === "Task" && task.tasks.map((t) => t.title)).toEqual(["Check the README"]);
     expect(tools.find((t) => t.call?.name === "Bash")?.result).toMatchObject({ outcome: "ok", exit: 0 });
     expect(items.some((r) => r.item.kind === "void" && r.item.why === "malformed")).toBe(true);
     expect(s.generations.map((g) => g.index)).toEqual([1, 2, 3, 4, 5, 6, 7]);

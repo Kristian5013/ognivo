@@ -131,8 +131,9 @@ export class Core {
 
 declare global {
   interface Window {
-    /** Electron's preload: asks main for a port to the core (apps/desktop/preload.cjs). */
-    ognivo?: { connect(): void };
+    /** Electron's preload (apps/desktop/preload.cjs): asks main for a port to the core, and
+     * zooms the page. */
+    ognivo?: { connect(): void; zoom?(factor: number): void };
   }
 }
 

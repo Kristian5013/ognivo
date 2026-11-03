@@ -34,6 +34,8 @@ const CORE_STOPPED: &str = "ognivo's core was stopped.";
 pub struct ThreadHandle {
     commands: mpsc::UnboundedSender<Command>,
     running: Arc<AtomicBool>,
+    /// On the Native path, which can end the reasoning.
+    answer_now: bool,
 }
 
 impl ThreadHandle {
@@ -141,6 +143,7 @@ pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
                 unreviewed: r.unreviewed_files,
                 open: open.is_some(),
                 running: open.is_some_and(|h| h.running.load(Ordering::SeqCst)),
+                answer_now: open.is_some_and(|h| h.answer_now),
             }
         })
         .collect();
@@ -371,11 +374,13 @@ async fn open(
     hub.emit(thread, lock(&shared).started());
     let (commands, received) = mpsc::unbounded_channel();
     let running = Arc::new(AtomicBool::new(false));
+    let can_answer_now = answer_now.is_some();
     lock(&hub.threads).insert(
         id,
         ThreadHandle {
             commands,
             running: running.clone(),
+            answer_now: can_answer_now,
         },
     );
     let actor = Actor {
@@ -393,6 +398,7 @@ async fn open(
         thread,
         info,
         notes,
+        answer_now: can_answer_now,
     })
 }
 
@@ -535,10 +541,17 @@ impl Actor {
                             break Ended::Stopped(STOPPED);
                         }
                         Some(Command::AnswerNow(reply)) => {
-                            if let Some(a) = &self.answer_now {
-                                a.press();
-                            }
-                            let _ = reply.send(done());
+                            let answer = match &self.answer_now {
+                                Some(a) => {
+                                    a.press();
+                                    done()
+                                }
+                                None => Err(RpcError::new(
+                                    rpc::error::UNSUPPORTED,
+                                    "only the Native path ends the model's reasoning",
+                                )),
+                            };
+                            let _ = reply.send(answer);
                         }
                         Some(Command::Close(reply)) => {
                             closing = Some(reply);

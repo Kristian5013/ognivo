@@ -48,6 +48,8 @@ pub mod error {
     pub const NOT_STARTED: i64 = -32003;
     /// The edit journal could not do it.
     pub const JOURNAL: i64 = -32004;
+    /// The thread's path cannot do it: only the Native path ends the reasoning.
+    pub const UNSUPPORTED: i64 = -32005;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -105,6 +107,8 @@ pub struct ThreadSummary {
     /// Whether the core has it open, and whether a turn of it runs.
     pub open: bool,
     pub running: bool,
+    /// Open on the Native path: `turn/answer_now` ends the model's reasoning.
+    pub answer_now: bool,
 }
 
 /// How a thread reaches its model.
@@ -153,6 +157,8 @@ pub struct Opened {
     /// What the start found, as `ognivo chat` says it under its banner: instruction and
     /// rule files, a tree that is not clean, a context smaller than the profile plans for.
     pub notes: Vec<String>,
+    /// On the Native path: `turn/answer_now` ends the model's reasoning.
+    pub answer_now: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

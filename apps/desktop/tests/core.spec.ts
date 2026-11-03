@@ -10,8 +10,9 @@ import { gpuEnv } from "../gpu.js";
 
 // The GUI on a real core (docs/architecture.md §3): a session starts from the form, a
 // turn streams, its command waits for the user's yes in the thread, and its change is
-// reverted from the Changes panel; the core quits once the window is gone. The model is
-// a fake llama-server that streams what llama-server streams; no GPU, no network.
+// reverted from the Changes panel; subagents show as lanes whose threads open; the
+// settings change the look; the core quits once the window is gone. The model is a fake
+// llama-server that streams what llama-server streams; no GPU, no network.
 
 const main = fileURLToPath(new URL("../main.js", import.meta.url));
 const ognivo = fileURLToPath(new URL("../../../target/debug/ognivo", import.meta.url));
@@ -66,17 +67,13 @@ function fakeServer(replies: object[][]): Promise<{ server: Server; url: string 
   );
 }
 
-test("a session on the core: a turn, a question in the thread, a revert", async () => {
+/** The window on a core of its own, with a fake llama-server answering `replies`. */
+async function launch(replies: object[][]) {
   const dir = mkdtempSync(join(tmpdir(), "ognivo-e2e-"));
   const project = join(dir, "proj");
   mkdirSync(project);
   writeFileSync(join(project, "README.md"), "a project\n");
-  const { server, url } = await fakeServer([
-    call("c1", "write", { path: "new.txt", content: "fresh\n" }),
-    call("c2", "shell", { command: "touch made.txt" }),
-    answer("Done: new.txt and made.txt are there."),
-    answer("Done: new.txt and made.txt are there."),
-  ]);
+  const { server, url } = await fakeServer(replies);
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   delete env.ELECTRON_RUN_AS_NODE;
@@ -90,14 +87,29 @@ test("a session on the core: a turn, a question in the thread, a revert", async 
     OGNIVO_INACTIVE: "1",
   });
   const app = await electron.launch({ args: [main], env });
-  try {
-    const page = await app.firstWindow();
-    await page.getByRole("heading", { name: "New session" }).waitFor({ timeout: 30_000 });
-    await page.locator("#project").fill(project);
-    await page.locator("#server").fill(url);
-    await page.locator("#profile").selectOption("gpt-oss-20b");
-    await page.getByRole("button", { name: "Start" }).click();
+  const page = await app.firstWindow();
+  await page.getByRole("heading", { name: "New session" }).waitFor({ timeout: 30_000 });
+  await page.locator("#project").fill(project);
+  await page.locator("#server").fill(url);
+  await page.locator("#profile").selectOption("gpt-oss-20b");
+  const close = async () => {
+    await app.close();
+    server.close();
+    // nobody there: the core quits, and its socket goes with it
+    await expect.poll(() => existsSync(join(dir, "run/core.sock")), { timeout: 20_000 }).toBe(false);
+  };
+  return { page, project, close };
+}
 
+test("a session on the core: a turn, a question in the thread, a revert, the settings", async () => {
+  const { page, project, close } = await launch([
+    call("c1", "write", { path: "new.txt", content: "fresh\n" }),
+    call("c2", "shell", { command: "touch made.txt" }),
+    answer("Done: new.txt and made.txt are there."),
+    answer("Done: new.txt and made.txt are there."),
+  ]);
+  try {
+    await page.getByRole("button", { name: "Start" }).click();
     const composer = page.locator("textarea");
     await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
     await expect(page.getByText("not a clean git tree")).toBeVisible();
@@ -125,10 +137,58 @@ test("a session on the core: a turn, a question in the thread, a revert", async 
     await revert.click();
     await expect.poll(() => existsSync(join(project, "new.txt"))).toBe(false);
     await expect(page.getByText(/ran touch made.txt: its side effects are not in the journal/)).toBeVisible();
+
+    // the look: the theme and the accent change at once, and stay
+    await page.getByRole("button", { name: "Settings" }).click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await dialog.getByRole("radio", { name: "Light" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+    await dialog.getByRole("radio", { name: "Violet" }).click();
+    const spark = () => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--spark").trim());
+    await expect.poll(spark).toBe("#8250df");
+    await page.screenshot({ path: "test-results/core-settings.png" });
+    await dialog.getByRole("radio", { name: "Dark" }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await dialog.getByRole("button", { name: "Done" }).click();
+    await page.reload();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark", { timeout: 30_000 });
+    await expect.poll(spark).toBe("#a371f7");
   } finally {
-    await app.close();
-    server.close();
+    await close();
   }
-  // nobody there: the core quits, and its socket goes with it
-  await expect.poll(() => existsSync(join(dir, "run/core.sock")), { timeout: 20_000 }).toBe(false);
+});
+
+test("subagents show as lanes, and their threads open", async () => {
+  const tasks = [
+    { title: "Count the files", goal: "How many files are there?", mode: "read" },
+    { title: "Read the README", goal: "What does it say?", mode: "read" },
+  ];
+  const { page, close } = await launch([
+    call("d1", "delegate", { tasks }),
+    answer("My part is done."),
+    answer("My part is done."),
+    answer("Both parts are done."),
+  ]);
+  try {
+    await page.getByText("Subagents:").click();
+    await page.getByRole("button", { name: "Start" }).click();
+    const composer = page.locator("textarea");
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+    await composer.fill("Look at two things, with subagents.");
+    await composer.press("Enter");
+    await expect(page.getByText("Both parts are done.")).toBeVisible({ timeout: 60_000 });
+    const lanes = page.locator(".lane");
+    await expect(lanes).toHaveCount(2);
+    for (const t of tasks) await expect(lanes.filter({ hasText: t.title }).getByText("done")).toBeVisible();
+    await page.screenshot({ path: "test-results/core-subagents.png" });
+
+    await lanes.filter({ hasText: "Read the README" }).getByRole("button", { name: "Open" }).click();
+    await expect(page.getByText("A subagent's thread")).toBeVisible();
+    await expect(page.getByText(/Task from the main agent: Read the README/)).toBeVisible();
+    await expect(page.getByText("My part is done.")).toBeVisible();
+    await page.getByRole("button", { name: "← Back to the session" }).click();
+    await expect(page.getByText("Both parts are done.")).toBeVisible();
+  } finally {
+    await close();
+  }
 });

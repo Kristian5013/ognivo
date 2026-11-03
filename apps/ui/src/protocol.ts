@@ -338,7 +338,11 @@ unreviewed: number,
 /**
  * Whether the core has it open, and whether a turn of it runs.
  */
-open: boolean, running: boolean, };
+open: boolean, running: boolean, 
+/**
+ * Open on the Native path: `turn/answer_now` ends the model's reasoning.
+ */
+answer_now: boolean, };
 
 export type Server = { 
 /**
@@ -391,7 +395,11 @@ export type Opened = { thread: ThreadId, info: ThreadInfo,
  * What the start found, as `ognivo chat` says it under its banner: instruction and
  * rule files, a tree that is not clean, a context smaller than the profile plans for.
  */
-notes: Array<string>, };
+notes: Array<string>, 
+/**
+ * On the Native path: `turn/answer_now` ends the model's reasoning.
+ */
+answer_now: boolean, };
 
 export type ThreadRef = { thread: ThreadId, };
 
@@ -555,4 +563,4 @@ export type Asks = {
 export const NOTIFY_EVENT = "event";
 export const NOTIFY_CANCEL = "$/cancelRequest";
 
-export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004 } as const;
+export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005 } as const;

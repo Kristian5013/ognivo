@@ -119,7 +119,12 @@ export class ThreadStore {
           key: e.item.id,
           item: e.item,
           open: this.opens(e.item),
-          live: e.item.kind === "tool" ? !e.item.result : e.item.kind !== "notice" && e.item.kind !== "void",
+          live:
+            e.item.kind === "tool"
+              ? !e.item.result
+              : e.item.kind === "subagent"
+                ? !e.item.end
+                : e.item.kind !== "notice" && e.item.kind !== "void",
         });
         return;
       case "item_delta":

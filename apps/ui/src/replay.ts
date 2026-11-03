@@ -28,6 +28,7 @@ function size(item: Item): number {
     case "void":
       return item.calls.reduce((n, c) => n + c.arguments.length, 0);
     case "notice":
+    case "subagent":
       return 0;
   }
 }

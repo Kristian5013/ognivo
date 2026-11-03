@@ -111,11 +111,12 @@ fn typescript() -> String {
         rpc::CANCEL
     ));
     out.push_str(&format!(
-        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {} }} as const;\n",
+        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {}, unsupported: {} }} as const;\n",
         rpc::error::NO_THREAD,
         rpc::error::BUSY,
         rpc::error::NOT_STARTED,
-        rpc::error::JOURNAL
+        rpc::error::JOURNAL,
+        rpc::error::UNSUPPORTED
     ));
     out
 }

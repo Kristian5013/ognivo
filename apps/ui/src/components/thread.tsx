@@ -1,11 +1,12 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { memo, useCallback, useSyncExternalStore } from "react";
+import { memo, useCallback, useState, useSyncExternalStore } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { Streamdown } from "streamdown";
 
 import { ending, seconds } from "../format.ts";
 import type { VoidItem } from "../model.ts";
 import type { Row, ThreadStore } from "../store.ts";
+import { SubagentCard } from "./subagent.tsx";
 import { ToolCard } from "./tool.tsx";
 
 function Chevron({ open }: { open: boolean }) {
@@ -37,7 +38,7 @@ function Reasoning({
       <Collapsible.Trigger className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground">
         <Chevron open={row.open} />
         {row.live ? (
-          <span className="animate-pulse">Thinking…</span>
+          <span className="ember-text">Thinking…</span>
         ) : ms ? (
           `Thought for ${seconds(ms)}`
         ) : (
@@ -121,6 +122,8 @@ function Content({ store, row }: { store: ThreadStore; row: Row }) {
           );
         case "void":
           return <Void item={item} />;
+        case "subagent":
+          return <SubagentCard item={item} live={row.live} />;
       }
     }
   }
@@ -139,10 +142,12 @@ const RowView = memo(function RowView({
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeRow(index, l), [store, index]);
   const row = useSyncExternalStore(subscribe, () => store.row(index));
+  // a row that comes while the model works rises into place; one read back does not
+  const [rising] = useState(() => row?.kind === "item" && row.live);
   if (!row) return null;
   const generation = row.kind === "item" ? row.item.generation : undefined;
   return (
-    <div className="group relative mx-auto max-w-3xl px-6 py-1">
+    <div className={`row group relative mx-auto max-w-3xl px-6 ${rising ? "rise" : ""}`}>
       {onInspect && generation !== undefined && (
         <button
           type="button"

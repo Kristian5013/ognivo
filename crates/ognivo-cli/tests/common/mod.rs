@@ -89,6 +89,10 @@ async fn serve(
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
             let (head, body) = read_request(&mut sock).await;
+            // a connection the client dropped before it asked is no request
+            if head.is_empty() {
+                continue;
+            }
             if head.starts_with("GET ") {
                 let line = head.lines().next().unwrap_or_default().to_owned();
                 got.lock().unwrap().push(line);

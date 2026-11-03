@@ -43,6 +43,7 @@ function Body({ item }: { item: ToolItem }) {
   if (item.result && item.result.outcome !== "ok") return <Text text={item.result.text} />;
   if (call?.name === "Edit") return <EditDiff path={call.path} before={call.old} after={call.new} />;
   if (call?.name === "Write") return <Text text={call.content} />;
+  if (call?.name === "ApplyPatch") return <Text text={call.patch} />;
   if (!call) return <Text text={JSON.stringify(item.raw, null, 2)} />;
   return <Text text={body(item)} />;
 }
@@ -61,11 +62,14 @@ export function ToolCard({
     <Collapsible.Root
       open={open}
       onOpenChange={onOpenChange}
-      className="rounded-md border border-border bg-panel"
+      className={`rounded-md border border-border bg-panel ${item.result ? "" : "running"}`}
     >
-      <Collapsible.Trigger className="flex w-full min-w-0 cursor-pointer items-center gap-3 px-3 py-1.5 text-left hover:bg-raised">
+      <Collapsible.Trigger
+        style={{ paddingBlock: "var(--line-py)" }}
+        className="flex w-full min-w-0 cursor-pointer items-center gap-3 px-3 text-left hover:bg-raised"
+      >
         <span className="w-11 shrink-0 font-mono text-[11px] tracking-wide text-spark uppercase">
-          {item.call?.name ?? item.shown}
+          {item.call?.name === "ApplyPatch" ? "Patch" : (item.call?.name ?? item.shown)}
         </span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
           {item.call ? summary(item.call) : `${item.shown} ${JSON.stringify(item.raw)}`}

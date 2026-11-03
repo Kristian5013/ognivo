@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
 import { Composer } from "./components/composer.tsx";
+import { Wordmark } from "./components/logo.tsx";
 import { type Panel, SidePanel } from "./components/panels.tsx";
+import { SettingsButton } from "./components/settings.tsx";
 import { ThreadView } from "./components/thread.tsx";
 import { count, ending, percent } from "./format.ts";
 import type { Thread } from "./model.ts";
@@ -125,7 +127,9 @@ function Sidebar({ selected, onSelect }: { selected?: string; onSelect: (key: st
   }
   return (
     <nav className="flex w-72 shrink-0 flex-col border-r border-border bg-panel">
-      <div className="px-4 py-3 text-[15px] font-semibold tracking-tight text-spark">ognivo</div>
+      <div className="px-4 py-3">
+        <Wordmark />
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto pb-4">
         {[...groups].map(([profile, list]) => (
           <section key={profile}>
@@ -148,6 +152,9 @@ function Sidebar({ selected, onSelect }: { selected?: string; onSelect: (key: st
             })}
           </section>
         ))}
+      </div>
+      <div className="flex items-center border-t border-border px-3 py-2">
+        <SettingsButton />
       </div>
     </nav>
   );

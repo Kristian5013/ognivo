@@ -2,9 +2,12 @@
 /* streamdown's classes, from the hoisted node_modules of the workspace */
 @source "../../../node_modules/streamdown/dist/*.js";
 
-/* Dark by default, next to a terminal; light when the system asks for it. The names
-   streamdown uses (background, muted, border, primary, sidebar) map onto the same set. */
-:root {
+/* Dark by default, next to a terminal; light when the system asks for it, until the
+   settings say otherwise (look.ts puts data-theme on <html>, and the accent in --spark).
+   The names streamdown uses (background, muted, border, primary, sidebar) map onto the
+   same set. */
+:root,
+:root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #0f1012;
   --panel: #15161a;
@@ -16,10 +19,11 @@
   --warn: #d6a031;
   --err: #f2685f;
   --ok: #4cc263;
+  --glow: 0.22;
 }
 
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
     color-scheme: light;
     --bg: #ffffff;
     --panel: #f6f7f8;
@@ -31,7 +35,34 @@
     --warn: #9a6700;
     --err: #cf222e;
     --ok: #1a7f37;
+    --glow: 0.14;
   }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --panel: #f6f7f8;
+  --raised: #eceef1;
+  --fg: #1f2328;
+  --muted-fg: #59636e;
+  --border: #d5dbe1;
+  --spark: #bc4c00;
+  --warn: #9a6700;
+  --err: #cf222e;
+  --ok: #1a7f37;
+  --glow: 0.14;
+}
+
+/* the space a row of the thread and a call's line take */
+:root {
+  --row-py: 4px;
+  --line-py: 6px;
+}
+
+:root[data-density="compact"] {
+  --row-py: 1px;
+  --line-py: 3px;
 }
 
 @theme inline {
@@ -70,4 +101,178 @@ body {
   color: var(--fg);
   font-family: var(--font-sans);
   font-size: 13px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--spark) 30%, transparent);
+}
+
+.row {
+  padding-block: var(--row-py);
+}
+
+/* Effects: a spark that runs where something works, and settles when it is done. Only
+   opacity, transforms and one gradient move, so a stream at the end of 10k rows keeps its
+   frames (§10). */
+
+/* text that works: thinking, a subagent at its task */
+.ember-text {
+  background: linear-gradient(
+    100deg,
+    var(--muted-fg) 20%,
+    var(--spark) 45%,
+    color-mix(in oklab, var(--spark) 40%, white) 50%,
+    var(--spark) 55%,
+    var(--muted-fg) 80%
+  );
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: ember-sweep 2.2s linear infinite;
+}
+
+@keyframes ember-sweep {
+  from {
+    background-position: 125% 0;
+  }
+  to {
+    background-position: -125% 0;
+  }
+}
+
+/* a row that comes while the model works */
+.rise {
+  animation: rise 220ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* a call that runs: a spark along its lower edge */
+.running {
+  position: relative;
+  overflow: hidden;
+}
+
+.running::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, var(--spark), transparent);
+  animation: run-along 1.3s ease-in-out infinite;
+}
+
+@keyframes run-along {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(290%);
+  }
+}
+
+/* a subagent at work */
+.lane-live {
+  border-color: color-mix(in oklab, var(--spark) 45%, var(--border));
+}
+
+/* what waits for the user */
+.asks {
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--spark) 55%, transparent),
+    0 0 22px -4px color-mix(in oklab, var(--spark) calc(var(--glow) * 300%), transparent);
+  animation: rise 220ms ease-out both;
+}
+
+/* a session whose turn runs */
+.ember-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--spark);
+  box-shadow: 0 0 8px 1px color-mix(in oklab, var(--spark) 70%, transparent);
+  animation: flicker 1.6s ease-in-out infinite;
+}
+
+@keyframes flicker {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  45% {
+    opacity: 0.55;
+    transform: scale(0.8);
+  }
+  60% {
+    opacity: 0.9;
+    transform: scale(1.05);
+  }
+}
+
+/* the start, and a page with nothing open */
+.hearth {
+  background: radial-gradient(
+      900px circle at 50% -10%,
+      color-mix(in oklab, var(--spark) calc(var(--glow) * 100%), transparent),
+      transparent 60%
+    ),
+    var(--bg);
+}
+
+.panel-in {
+  animation: panel-in 200ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* what the user writes in */
+.composer:focus-within {
+  border-color: color-mix(in oklab, var(--spark) 60%, var(--border));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--spark) calc(var(--glow) * 100%), transparent);
+}
+
+button {
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+/* motion off: as the system asks, unless the settings say otherwise, or as they say */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation: none !important;
+  transition: none !important;
 }

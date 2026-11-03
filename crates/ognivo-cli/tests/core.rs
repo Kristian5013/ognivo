@@ -360,6 +360,15 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
         .await;
     a.until(|m| event(m, "turn_started") && m["params"]["thread"] == second)
         .await;
+    // stopped once its request is at the server, which holds it
+    let began = Instant::now();
+    while bodies.lock().unwrap().len() < 5 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     let busy = a
         .call("turn/start", json!({"thread": second, "text": "more"}))
         .await
