@@ -1,9 +1,9 @@
 //! T2-mini against a running llama-server:
 //!
 //!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]
-//!      [--subagents]
+//!      [--subagents] [--scenarios DIR]
 //!
-//! Runs every scenario of `evals/t2/scenarios` (or those whose id or category holds TEXT)
+//! Runs every scenario of `evals/t2/scenarios` or DIR (or those whose id or category holds TEXT)
 //! with each seed, one line per run, then the summary; `--native` runs them on the Native
 //! path, and the summary names the profile `ID+native`. `--priors` gives gpt-oss the tools
 //! of its training (`ID+native+priors`), `--subagents` lets the agent delegate
@@ -33,12 +33,14 @@ struct Args {
     native: bool,
     priors: bool,
     subagents: bool,
+    scenarios: PathBuf,
 }
 
 fn args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut url, mut profile, mut out, mut seeds, mut only) = (None, None, None, vec![1], None);
     let (mut native, mut priors, mut subagents) = (false, false, false);
+    let mut scenarios = t2::scenarios_dir();
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -49,6 +51,7 @@ fn args() -> Result<Args, String> {
             "--native" => native = true,
             "--priors" => priors = true,
             "--subagents" => subagents = true,
+            "--scenarios" => scenarios = PathBuf::from(value()?),
             "--seeds" => {
                 seeds = value()?
                     .split(',')
@@ -75,6 +78,7 @@ fn args() -> Result<Args, String> {
         native,
         priors,
         subagents,
+        scenarios,
     })
 }
 
@@ -84,7 +88,7 @@ async fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]] [--subagents]"
+                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]] [--subagents] [--scenarios DIR]"
             );
             return ExitCode::from(2);
         }
@@ -133,7 +137,7 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         props.n_ctx.map_or("?".into(), |n| n.to_string())
     );
 
-    let scenarios: Vec<_> = t2::load(&t2::scenarios_dir())?
+    let scenarios: Vec<_> = t2::load(&a.scenarios)?
         .into_iter()
         .filter(|s| {
             a.only

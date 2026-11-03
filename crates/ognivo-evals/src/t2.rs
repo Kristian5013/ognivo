@@ -433,14 +433,21 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
 
     let mut calls: Vec<(String, String)> = Vec::new();
     let mut refused_ids: HashSet<String> = HashSet::new();
-    let mut on = |e: AgentEvent| match e {
-        AgentEvent::ToolStarted { id, tool, call, .. } => {
-            calls.push((id, call.map_or(tool, |c| c.id().canonical_name())));
+    // the subagents' calls count too: a suite a subagent ran was run
+    let mut on = |e: AgentEvent| {
+        let (e, of) = match e {
+            AgentEvent::Subagent { index, event } => (*event, format!("{index}.")),
+            e => (e, String::new()),
+        };
+        match e {
+            AgentEvent::ToolStarted { id, tool, call, .. } => {
+                calls.push((of + &id, call.map_or(tool, |c| c.id().canonical_name())));
+            }
+            AgentEvent::ToolFinished { id, result, .. } if result.starts_with("[refused]") => {
+                refused_ids.insert(of + &id);
+            }
+            _ => {}
         }
-        AgentEvent::ToolFinished { id, result, .. } if result.starts_with("[refused]") => {
-            refused_ids.insert(id);
-        }
-        _ => {}
     };
     let started = Instant::now();
     let end = agent.turn(&s.prompt, &mut on).await;

@@ -73,7 +73,8 @@ With `--subagents` the agent may hand tasks to subagents (`delegate`): each work
 task in a context of its own, at the same time as the others, at medium reasoning, and
 reports back. A read task changes no file; a write task only the files it lists. What
 they change is the session's to review, and each one's conversation is kept as a session
-of its own.
+of its own. gpt-oss-20b does not delegate on its own: ask for subagents in the task. They pay
+off for independent parts that each take long (slow test suites), not for quick lookups.
 
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 
