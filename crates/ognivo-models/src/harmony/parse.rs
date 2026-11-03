@@ -219,6 +219,14 @@ impl Reader {
         &self.messages
     }
 
+    /// The kind of the message whose content is being read, if one is.
+    pub fn open(&self) -> Option<Kind> {
+        match self.state {
+            State::Content(_) => self.messages.last().map(|m| m.kind),
+            _ => None,
+        }
+    }
+
     /// The ids read: the generation up to where it stopped.
     pub fn ids(&self) -> &[TokenId] {
         &self.ids
@@ -249,7 +257,7 @@ impl Reader {
                     p.part = Part::Constrain;
                     State::Header(p)
                 }
-                Some(Special::Message) => self.open(p, ev),
+                Some(Special::Message) => self.begin(p, ev),
                 Some(Special::End) => {
                     self.junk(p, at + 1, End::End, ev);
                     State::Between
@@ -332,7 +340,7 @@ impl Reader {
         State::Done
     }
 
-    fn open(&mut self, p: Pending, ev: &mut Vec<Event>) -> State {
+    fn begin(&mut self, p: Pending, ev: &mut Vec<Event>) -> State {
         let index = self.messages.len();
         let (header, kind) = p.read();
         ev.push(Event::Open {

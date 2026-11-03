@@ -58,7 +58,8 @@ const HELP: &str = "\
 /clear           start a new conversation; what the session changed stays unreviewed
 /exit            quit; so does ^D
 A line that ends in \\ goes on in the next one; \"\"\" on a line of its own starts and ends a block.
-^C stops the running turn, and the conversation goes on.";
+^C stops the running turn, and the conversation goes on.
+^\\ ends the model's reasoning where it stands and asks for the answer (with --native).";
 
 /// Items named in a list of what is unreviewed; the rest are counted.
 const SUMMARY_FILES: usize = 3;
@@ -115,6 +116,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         ),
         Paint::Plain,
     );
+    let answer_now = s.answer_now.take();
     let rule_files = std::mem::take(&mut s.rule_files);
     let rule_problems = std::mem::take(&mut s.rule_problems);
     let mut untrusted = false;
@@ -212,9 +214,18 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Paint::Yellow,
         );
     }
-    screen.line("/help · ^C stops a turn · ^D quits", Paint::Dim);
+    screen.line(
+        if answer_now.is_some() {
+            "/help · ^C stops a turn · ^\\ answers now · ^D quits"
+        } else {
+            "/help · ^C stops a turn · ^D quits"
+        },
+        Paint::Dim,
+    );
     let mut int = signal(SignalKind::interrupt())?;
     let mut term = signal(SignalKind::terminate())?;
+    // ^\ in a line-mode terminal: the reasoning ends, and the answer comes (Native path)
+    let mut quit = signal(SignalKind::quit())?;
     loop {
         if let Some(e) = agent.store_failure() {
             screen.line(
@@ -263,9 +274,13 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
         };
-        // a ^C or a stop left from before must not end this turn
+        // a ^C, a stop or a ^\ left from before must not end this turn or its reasoning
         while int.recv().now_or_never().is_some() {}
         while stopped.try_recv().is_ok() {}
+        while quit.recv().now_or_never().is_some() {}
+        if let Some(a) = &answer_now {
+            a.clear();
+        }
         let (steps, generated, started) = (
             agent.stats.steps,
             agent.stats.completion_tokens,
@@ -276,11 +291,18 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             let mut on = |e: AgentEvent| view.show(e);
             let turn = agent.turn(&text, &mut on);
             tokio::pin!(turn);
-            tokio::select! {
-                end = &mut turn => Outcome::Ended(end),
-                _ = int.recv() => Outcome::Stopped,
-                _ = stopped.recv() => Outcome::Stopped,
-                _ = term.recv() => Outcome::Terminated,
+            loop {
+                tokio::select! {
+                    end = &mut turn => break Outcome::Ended(end),
+                    _ = int.recv() => break Outcome::Stopped,
+                    _ = stopped.recv() => break Outcome::Stopped,
+                    _ = term.recv() => break Outcome::Terminated,
+                    _ = quit.recv() => {
+                        if let Some(a) = &answer_now {
+                            a.press();
+                        }
+                    }
+                }
             }
         };
         view.finish();

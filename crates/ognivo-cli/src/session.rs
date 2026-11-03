@@ -14,7 +14,9 @@ use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
-use ognivo_models::{ChatDriver, Family, ModelDriver, NativeDriver, doctor, native, profile};
+use ognivo_models::{
+    AnswerNow, ChatDriver, Family, ModelDriver, NativeDriver, doctor, native, profile,
+};
 use ognivo_store::{NewSession, SessionRow, Store};
 
 /// The session store, in the data directory.
@@ -85,6 +87,8 @@ impl Failure {
 #[derive(Debug)]
 pub struct Connected {
     pub driver: Box<dyn ModelDriver>,
+    /// Ends the model's reasoning where it stands (the Native path only).
+    pub answer_now: Option<AnswerNow>,
     pub family: Family,
     /// The profile's id.
     pub profile: String,
@@ -247,19 +251,18 @@ impl SessionArgs {
             .ok()
             .and_then(Result::ok)
             .and_then(|p| p.n_ctx);
-        let driver: Box<dyn ModelDriver> = if self.native {
+        let (driver, answer_now): (Box<dyn ModelDriver>, _) = if self.native {
             // the system message holds the day the session began, and must keep it
             let began = stored.map_or_else(native::now, |r| r.created.max(0) as u64 / 1000);
             let date = native::utc_date(began);
-            Box::new(
-                NativeDriver::new(server, profile, level.as_deref(), self.slot, &date)
-                    .map_err(Failure::usage)?,
-            )
+            let d = NativeDriver::new(server, profile, level.as_deref(), self.slot, &date)
+                .map_err(Failure::usage)?;
+            let answer_now = d.answer_now();
+            (Box::new(d), Some(answer_now))
         } else {
-            Box::new(
-                ChatDriver::new(server, profile, level.as_deref(), self.slot)
-                    .map_err(Failure::usage)?,
-            )
+            let d = ChatDriver::new(server, profile, level.as_deref(), self.slot)
+                .map_err(Failure::usage)?;
+            (Box::new(d), None)
         };
         let seed = stored.map(|r| r.seed).or(self.seed).unwrap_or_else(|| {
             std::time::SystemTime::now()
@@ -275,6 +278,7 @@ impl SessionArgs {
         });
         Ok(Connected {
             driver,
+            answer_now,
             family,
             profile: id,
             level,

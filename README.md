@@ -57,7 +57,8 @@ short diff, an action that needs approval asks `y`, `n` (or `n` and what to do i
 turn; `/help` lists the rest. `run` takes the prompt on stdin;
 actions that would need approval are refused and explained to the model. With `--native`
 (gpt-oss so far) ognivo renders the model's format itself and the server only tokenizes and
-generates: the Native path of M2, in progress.
+generates: the Native path of M2, in progress. In `chat` on that path, ^\ ends the model's
+reasoning where it stands and asks for the answer.
 
 The GUI is at its start: it shows recorded sessions and talks to no core yet.
 

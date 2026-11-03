@@ -20,6 +20,7 @@
 //! of class A (§5.4).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures::stream::{self, BoxStream, StreamExt};
@@ -64,6 +65,14 @@ pub fn utc_date(unix_secs: u64) -> String {
 /// Stands between the texts of one tokenization request: a control token, which no text
 /// cut at its guarded strings can produce.
 const SEPARATOR: TokenId = 200_007;
+/// Requests that may continue a step, after reasoning that ended with neither a call nor an
+/// answer, ran past its budget (three quarters of the step's tokens), or was ended from
+/// outside ([`AnswerNow`]).
+const MAX_CONTINUATIONS: u8 = 2;
+/// Tokens of reasoning a step may go on with once its reasoning was ended.
+const REASONING_AFTER_END: usize = 512;
+/// The fewest tokens a continuing request may generate.
+const MIN_PREDICT: u32 = 256;
 
 #[derive(Debug, Clone)]
 pub struct NativeDriver {
@@ -74,6 +83,7 @@ pub struct NativeDriver {
     /// The profile's guarded strings, cut in every content text (§5.3).
     guarded: Arc<Vec<String>>,
     learnt: Arc<Mutex<Learnt>>,
+    answer_now: AnswerNow,
 }
 
 /// What the driver learnt from its server: the bytes of ids, and the ids of texts.
@@ -119,6 +129,7 @@ impl NativeDriver {
             guarded: Arc::new(profile.tokens.guarded().map(str::to_owned).collect()),
             profile: Arc::new(profile),
             learnt: Arc::default(),
+            answer_now: AnswerNow::default(),
         })
     }
 
@@ -361,12 +372,13 @@ impl NativeDriver {
         let prompt = self.prompt(&req).await?;
         let ids = self.ids(&prompt).await?;
         let call_id = format!("call_{:08x}_{}", req.seed, ids.len());
+        let sampler = SamplerSpec {
+            seed: Some(req.seed),
+            ..SamplerSpec::from(self.profile.sampling.main)
+        };
         let completion = CompletionRequest {
-            prompt: ids,
-            sampler: SamplerSpec {
-                seed: Some(req.seed),
-                ..SamplerSpec::from(self.profile.sampling.main)
-            },
+            prompt: ids.clone(),
+            sampler,
             n_predict: req.max_tokens,
             slot: self.slot,
             constraint: None,
@@ -385,61 +397,80 @@ impl NativeDriver {
             received: 0,
             seed: req.seed,
             call_id,
+            prompt: ids,
+            sampler,
+            max_tokens: req.max_tokens,
+            continued: 0,
+            thought: 0,
+            budget: req.max_tokens as usize * 3 / 4,
+            request_start: 0,
+            counts: Counts::default(),
         };
         let events = stream::unfold(Some((self, g)), |state| async move {
-            let (this, mut g) = state?;
-            let batch = match g.events.next().await? {
-                Ok(TokenEvent::Tokens { ids, .. }) => {
-                    g.received += ids.len();
-                    if g.reader.stopped() {
-                        // past the call or the answer: only the end of the stream is wanted
-                        return Some((Vec::new(), Some((this, g))));
-                    }
-                    let pieces = match this.pieces(&ids).await {
-                        Ok(p) => p,
-                        Err(e) => return Some((vec![Err(failure(e))], None)),
-                    };
-                    let mut batch = Vec::new();
-                    for (id, piece) in ids.iter().zip(&pieces) {
-                        for ev in g.reader.push(*id, piece) {
-                            if let Some((channel, l)) = g.show(ev, &mut batch) {
-                                let f = g.repeating(channel, l);
-                                batch.push(Ok(DriverEvent::Finished(Box::new(f))));
-                                // dropping the stream cancels the generation
-                                return Some((batch, None));
-                            }
-                        }
-                        if g.reader.stopped() {
-                            break;
-                        }
-                    }
-                    if g.reader.stopped() && !g.at_end_of_generation() {
-                        let f = g.finish(Usage::default(), false);
-                        batch.push(Ok(DriverEvent::Finished(Box::new(f))));
-                        return Some((batch, None));
-                    }
-                    batch
-                }
-                Ok(TokenEvent::Done { stop, usage }) => {
-                    let predicted = usage.predicted_n.and_then(|n| usize::try_from(n).ok());
-                    if let Some(n) = predicted
-                        && n != g.received
-                    {
-                        let e = EngineError::Protocol(format!(
-                            "the server streamed {} of {n} token ids; the Native path needs a server that streams them all (class A, §5.4)",
-                            g.received
-                        ));
-                        return Some((vec![Err(DriverError::Engine(e))], None));
-                    }
-                    let limit = matches!(stop, Stop::Limit | Stop::ContextFull);
-                    let f = g.finish(usage, limit);
-                    return Some((vec![Ok(DriverEvent::Finished(Box::new(f)))], None));
-                }
-                Err(e) => return Some((vec![Err(failure(e))], None)),
-            };
-            Some((batch, Some((this, g))))
+            let (this, g) = state?;
+            advance(this, g).await
         });
         Ok(events.flat_map(stream::iter).boxed())
+    }
+
+    /// The handle that ends the reasoning of the step in progress, as "Answer now" does.
+    pub fn answer_now(&self) -> AnswerNow {
+        self.answer_now.clone()
+    }
+
+    /// The step goes on after its reasoning: the reasoning ends where it stands, the model's
+    /// next message begins, and a new request continues the prompt and the generation so
+    /// far, so the slot's cache holds all of it.
+    async fn go_on(&self, g: &mut Generation) -> Result<(), DriverError> {
+        let mut ids = g.reader.ids().to_vec();
+        // the token that ended the generation goes: the reasoning ends instead
+        if ids
+            .last()
+            .is_some_and(|id| *id == Special::Call.id() || *id == Special::Return.id())
+        {
+            ids.pop();
+        }
+        let mut reader = Reader::new();
+        let pieces = self.pieces(&ids).await.map_err(failure)?;
+        for (id, piece) in ids.iter().zip(&pieces) {
+            reader.push(*id, piece);
+        }
+        let mut tail = Vec::new();
+        if reader.open().is_some() {
+            tail.push(Special::End.id());
+        }
+        let mut next = Prompt::default();
+        next.assistant();
+        tail.extend(self.ids(&next).await?);
+        let pieces = self.pieces(&tail).await.map_err(failure)?;
+        for (id, piece) in tail.iter().zip(&pieces) {
+            reader.push(*id, piece);
+        }
+        ids.extend(tail);
+        g.reader = reader;
+        g.open = None;
+        g.continued += 1;
+        g.budget = g.thought + REASONING_AFTER_END;
+        g.request_start = ids.len();
+        let mut prompt = g.prompt.clone();
+        prompt.extend_from_slice(&ids);
+        let used = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        let completion = CompletionRequest {
+            prompt,
+            sampler: g.sampler,
+            n_predict: g.max_tokens.saturating_sub(used).max(MIN_PREDICT),
+            slot: self.slot,
+            constraint: None,
+            banned: Vec::new(),
+        };
+        let payloads = self
+            .server
+            .completion_stream(&engine::completion_body(&completion), None)
+            .await
+            .map_err(failure)?;
+        g.events = engine::terminated(payloads);
+        g.received = 0;
+        Ok(())
     }
 }
 
@@ -455,6 +486,88 @@ impl ModelDriver for NativeDriver {
     }
 }
 
+type Batch = Vec<Result<DriverEvent, DriverError>>;
+
+/// The next events of a step, and what the step goes on from; `None` once it ended.
+async fn advance(
+    this: NativeDriver,
+    mut g: Generation,
+) -> Option<(Batch, Option<(NativeDriver, Generation)>)> {
+    let mut batch = Vec::new();
+    match g.events.next().await? {
+        Ok(TokenEvent::Tokens { ids, .. }) => {
+            g.received += ids.len();
+            if g.reader.stopped() {
+                // past the call or the answer: only the end of the stream is wanted
+                return Some((batch, Some((this, g))));
+            }
+            let pieces = match this.pieces(&ids).await {
+                Ok(p) => p,
+                Err(e) => return Some((vec![Err(failure(e))], None)),
+            };
+            for (id, piece) in ids.iter().zip(&pieces) {
+                for ev in g.reader.push(*id, piece) {
+                    if let Some((channel, l)) = g.show(ev, &mut batch) {
+                        let f = g.repeating(channel, l);
+                        batch.push(Ok(DriverEvent::Finished(Box::new(f))));
+                        // dropping the stream cancels the generation
+                        return Some((batch, None));
+                    }
+                }
+                // a token of reasoning: text of an open analysis
+                if *id < CONTROL && g.reader.open() == Some(Kind::Analysis) {
+                    g.thought += 1;
+                    if g.continued < MAX_CONTINUATIONS
+                        && (g.thought > g.budget || this.answer_now.take())
+                    {
+                        // the rest of this stream is dropped, and its generation with it
+                        let generated = g.reader.ids().len() - g.request_start;
+                        g.counts.cut(u32::try_from(generated).unwrap_or(u32::MAX));
+                        if let Err(e) = this.go_on(&mut g).await {
+                            batch.push(Err(e));
+                            return Some((batch, None));
+                        }
+                        return Some((batch, Some((this, g))));
+                    }
+                }
+                if g.reader.stopped() {
+                    break;
+                }
+            }
+            if g.reader.stopped() && !g.at_end_of_generation() {
+                let f = g.finish(false);
+                batch.push(Ok(DriverEvent::Finished(Box::new(f))));
+                return Some((batch, None));
+            }
+            Some((batch, Some((this, g))))
+        }
+        Ok(TokenEvent::Done { stop, usage }) => {
+            let predicted = usage.predicted_n.and_then(|n| usize::try_from(n).ok());
+            if let Some(n) = predicted
+                && n != g.received
+            {
+                let e = EngineError::Protocol(format!(
+                    "the server streamed {} of {n} token ids; the Native path needs a server that streams them all (class A, §5.4)",
+                    g.received
+                ));
+                return Some((vec![Err(DriverError::Engine(e))], None));
+            }
+            g.counts.finished(usage);
+            let limit = matches!(stop, Stop::Limit | Stop::ContextFull);
+            // reasoning that ended with neither a call nor an answer goes on to one
+            if !limit && g.continued < MAX_CONTINUATIONS && g.bare() {
+                if let Err(e) = this.go_on(&mut g).await {
+                    return Some((vec![Err(e)], None));
+                }
+                return Some((batch, Some((this, g))));
+            }
+            let f = g.finish(limit);
+            Some((vec![Ok(DriverEvent::Finished(Box::new(f)))], None))
+        }
+        Err(e) => Some((vec![Err(failure(e))], None)),
+    }
+}
+
 fn failure(e: EngineError) -> DriverError {
     if is_context_exceeded(&e) {
         DriverError::ContextExceeded(e.to_string())
@@ -463,17 +576,50 @@ fn failure(e: EngineError) -> DriverError {
     }
 }
 
-/// One generation as it streams.
+/// Ends the reasoning of a step from outside, as the "Answer now" button does: the step
+/// closes its reasoning where it stands and goes on to the answer. A press counts for the
+/// reasoning of the step in progress, or else of the next one.
+#[derive(Debug, Clone, Default)]
+pub struct AnswerNow(Arc<AtomicBool>);
+
+impl AnswerNow {
+    pub fn press(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Forgets a press that came when no reasoning was there to end.
+    pub fn clear(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// One step as it streams: the generation, and the requests that continue it.
 struct Generation {
     events: BoxStream<'static, Result<TokenEvent, EngineError>>,
     reader: Reader,
     /// The kind of the open message, which decides where its text shows.
     open: Option<Kind>,
     watch: Watch,
-    /// Ids the stream brought, those after reading stopped included.
+    /// Ids the request's stream brought, those after reading stopped included.
     received: usize,
     seed: u32,
     call_id: String,
+    /// The step's prompt, which every request of the step continues.
+    prompt: Vec<TokenId>,
+    sampler: SamplerSpec,
+    max_tokens: u32,
+    /// Requests that continued the step.
+    continued: u8,
+    /// Tokens of reasoning so far, and how many may come before the reasoning is ended.
+    thought: usize,
+    budget: usize,
+    /// Where the generation of the request in progress began among the reader's ids.
+    request_start: usize,
+    counts: Counts,
 }
 
 /// The repetition guard over the streams of one generation.
@@ -484,13 +630,62 @@ struct Watch {
     arguments: Repeats,
 }
 
+/// The server's counts over the requests of a step, as one generation's.
+#[derive(Debug, Default)]
+struct Counts {
+    prompt: Option<u32>,
+    cached: Option<u32>,
+    predicted: u32,
+    prompt_ms: Option<f64>,
+    predicted_ms: Option<f64>,
+    /// Ids generated in requests that were cut short: a later request's prompt holds them,
+    /// and they are no hit of the prompt cache.
+    cut_short: u32,
+}
+
+impl Counts {
+    fn finished(&mut self, u: Usage) {
+        let sum = |a: Option<u32>, b: Option<u32>| match (a, b) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        let sum_ms = |a: Option<f64>, b: Option<f64>| match (a, b) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        if self.prompt.is_none() && self.cached.is_none() {
+            // the first request the server finished holds the step's cache
+            self.cached = u.cache_n.map(|c| c.saturating_sub(self.cut_short));
+        }
+        self.prompt = sum(self.prompt, u.prompt_n);
+        self.predicted += u.predicted_n.unwrap_or(0);
+        self.prompt_ms = sum_ms(self.prompt_ms, u.prompt_ms);
+        self.predicted_ms = sum_ms(self.predicted_ms, u.predicted_ms);
+    }
+
+    fn cut(&mut self, generated: u32) {
+        self.predicted += generated;
+        self.cut_short += generated;
+    }
+
+    /// What the server counted; nothing when no request of the step ended on its own.
+    fn usage(&self) -> Usage {
+        if self.prompt.is_none() && self.cached.is_none() {
+            return Usage::default();
+        }
+        Usage {
+            prompt_n: self.prompt,
+            cache_n: self.cached,
+            predicted_n: Some(self.predicted),
+            prompt_ms: self.prompt_ms,
+            predicted_ms: self.predicted_ms,
+        }
+    }
+}
+
 impl Generation {
     /// A reader's event for display; the loop the repetition guard saw in it, if any.
-    fn show(
-        &mut self,
-        ev: Event,
-        out: &mut Vec<Result<DriverEvent, DriverError>>,
-    ) -> Option<(Channel, Loop)> {
+    fn show(&mut self, ev: Event, out: &mut Batch) -> Option<(Channel, Loop)> {
         match ev {
             Event::Open {
                 kind, recipient, ..
@@ -549,8 +744,17 @@ impl Generation {
             .is_some_and(|id| *id == Special::Call.id() || *id == Special::Return.id())
     }
 
-    /// The generation as the agent gets it; `limit` when the server cut it.
-    fn finish(&mut self, usage: Usage, limit: bool) -> Finished {
+    /// Whether the generation ended with neither a call nor an answer.
+    fn bare(&self) -> bool {
+        !self
+            .reader
+            .messages()
+            .iter()
+            .any(|m| matches!(m.kind, Kind::Call | Kind::Final))
+    }
+
+    /// The step as the agent gets it; `limit` when the server cut its generation.
+    fn finish(&mut self, limit: bool) -> Finished {
         self.reader.finish();
         let k = kept(self.reader.messages(), limit, &self.call_id);
         let tokens = (k.clean && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
@@ -560,7 +764,7 @@ impl Generation {
             reasoning: k.reasoning,
             outcome: k.outcome,
             finish: k.finish,
-            usage,
+            usage: self.counts.usage(),
             seed: self.seed,
             tokens,
         }
@@ -585,7 +789,7 @@ impl Generation {
             content: k.content,
             reasoning: k.reasoning,
             finish: None,
-            usage: Usage::default(),
+            usage: self.counts.usage(),
             seed: self.seed,
             tokens: None,
         }
@@ -1294,6 +1498,97 @@ mod tests {
             events.last(),
             Some(Err(DriverError::Engine(EngineError::Protocol(_))))
         ));
+    }
+
+    #[tokio::test]
+    async fn reasoning_that_ends_without_an_answer_goes_on_to_one() {
+        // the shape of 2 of 195 generations on the first live run: a thought, then the end
+        let bare = "«channel»analysis«message»The answer is 391.«return»";
+        let last = "«channel»final«message»391«return»";
+        let (url, prompts) = fake_server(vec![answer(bare), answer(last)]).await;
+        let d = driver(&url);
+        let f = finished(&run(&d, request(vec![ChatMessage::User("17 * 23?".into())], 1)).await);
+        assert!(matches!(f.outcome, Outcome::Answer));
+        assert_eq!(f.content, "391");
+        assert_eq!(f.reasoning, "The answer is 391.");
+        let prompts = prompts.lock().unwrap();
+        // the second request continues the first: the thought, ended, and the next message
+        let mut thought = generation(bare);
+        thought.pop();
+        let mut want = prompts[0].clone();
+        want.extend(&thought);
+        want.push(Special::End.id());
+        want.extend(tokenize(&format!("{}assistant", Special::Start.text())));
+        assert_eq!(prompts[1], want);
+        // the step goes back as all of it, and the server's counts add up over both requests
+        let mut ids = want[prompts[0].len()..].to_vec();
+        ids.extend(generation(last));
+        assert_eq!(f.tokens, Some(ids));
+        let both = generation(bare).len() + generation(last).len();
+        assert_eq!(f.usage.predicted_n, Some(both as u32));
+        assert_eq!((f.usage.prompt_n, f.usage.cache_n), (Some(20), Some(90)));
+    }
+
+    #[tokio::test]
+    async fn reasoning_past_its_budget_is_ended_where_it_stands() {
+        let thought = "x".repeat(60);
+        let long = format!(
+            "«channel»analysis«message»{thought}«end»«start»assistant«channel»final«message»Late.«return»"
+        );
+        let (url, prompts) = fake_server(vec![
+            answer(&long),
+            answer("«channel»final«message»Done.«return»"),
+        ])
+        .await;
+        let d = driver(&url);
+        // 40 tokens for the step: 30 of reasoning at most
+        let req = StepRequest {
+            max_tokens: 40,
+            ..request(vec![ChatMessage::User("go".into())], 1)
+        };
+        let f = finished(&run(&d, req).await);
+        assert_eq!(f.content, "Done.");
+        assert_eq!(f.reasoning, "x".repeat(31));
+        let prompts = prompts.lock().unwrap();
+        let header = generation("«channel»analysis«message»");
+        let mut want = prompts[0].clone();
+        want.extend(&header);
+        want.extend(std::iter::repeat_n(1000 + TokenId::from(b'x'), 31));
+        want.push(Special::End.id());
+        want.extend(tokenize(&format!("{}assistant", Special::Start.text())));
+        assert_eq!(prompts[1], want);
+    }
+
+    #[tokio::test]
+    async fn answer_now_ends_the_reasoning_where_it_stands() {
+        let (url, _) = fake_server(vec![
+            answer("«channel»analysis«message»Let me think it over.«end»«start»assistant«channel»final«message»Later.«return»"),
+            answer("«channel»final«message»Now.«return»"),
+        ])
+        .await;
+        let d = driver(&url);
+        d.answer_now().press();
+        let f = finished(&run(&d, request(vec![ChatMessage::User("go".into())], 1)).await);
+        assert_eq!((f.reasoning.as_str(), f.content.as_str()), ("L", "Now."));
+        // the press is spent
+        assert!(!d.answer_now.take());
+    }
+
+    #[tokio::test]
+    async fn a_step_goes_on_twice_at_most() {
+        let bare = "«channel»analysis«message»Hmm.«return»";
+        let (url, prompts) = fake_server(vec![answer(bare), answer(bare), answer(bare)]).await;
+        let f = finished(
+            &run(
+                &driver(&url),
+                request(vec![ChatMessage::User("go".into())], 1),
+            )
+            .await,
+        );
+        // neither a call nor an answer: the agent tells the model so
+        assert!(matches!(f.outcome, Outcome::Answer));
+        assert_eq!(f.content, "");
+        assert_eq!(prompts.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]

@@ -45,5 +45,5 @@ pub use generic::{
     Outcome, ToolCall, ToolChoice, ToolDecl, chat_body, chat_events,
 };
 pub use guard::Guard;
-pub use native::NativeDriver;
+pub use native::{AnswerNow, NativeDriver};
 pub use profile::ModelProfile;
