@@ -475,6 +475,9 @@ impl std::fmt::Debug for Agent {
     }
 }
 
+/// How many steps of a turn are left when the model is told to finish.
+const STEPS_LEFT_NOTE: u32 = 2;
+
 /// How long an MCP tool may take; a turn's time limit cuts it shorter.
 const MCP_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -519,7 +522,8 @@ pub fn system_prompt(layout: Layout) -> String {
         "You are ognivo, a coding agent. You work in the user's project through tools: {tools}.\n\
          - {edit}\n\
          - Change only what the task needs.\n\
-         - After changing code, run the project's build or tests with {run}.\n\
+         - After changing code, run the project's build or tests with {run}, if it has them.\n\
+         - Answer a question that needs nothing from the project, such as arithmetic or a general concept, directly, without tools.\n\
          - In the final answer, report only what tool results above show. Never write that a command ran or passed unless its result is above; if a command was refused or failed, say so. ognivo adds the verification status to your answer itself.\n\
          - Commands run without a terminal; do not start interactive programs."
     )
@@ -529,9 +533,21 @@ pub fn system_prompt(layout: Layout) -> String {
 const PROJECT_AT: &str = "[ognivo] The project is at ";
 
 /// The project's part of a conversation's start, the message after the system prompt:
-/// where the project is, and the text of the user's and the project's instruction files.
+/// where the project is, what checks a change in it, and the text of the user's and the
+/// project's instruction files.
 pub fn project_context(root: &Path, instructions: &str) -> String {
     let mut text = format!("{PROJECT_AT}{}.", root.display());
+    let checks = verify::project_checks(root);
+    if checks.is_empty() {
+        // T2, 2026-11-03: told to run "the project's build or tests" in a project of three
+        // files, Gemma wrote test programs of its own and asked to compile them
+        text.push_str(" It has no build or test files (no Cargo.toml, package.json, pyproject.toml, go.mod, Makefile, tests/ or the like), so no build can check a change: read the changed lines again instead, and do not write programs or files only to test it.");
+    } else {
+        text.push_str(&format!(
+            " Its build and test files: {}.",
+            checks.join(", ")
+        ));
+    }
     if !instructions.is_empty() {
         text.push_str("\n\n");
         text.push_str(instructions);
@@ -1260,8 +1276,17 @@ impl Agent {
         self.idle_compactions = 0;
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
-        for _ in 0..self.opts.max_steps {
+        for step in 0..self.opts.max_steps {
             if let Some(note) = self.clock.as_mut().and_then(Clock::note) {
+                self.emit(on, AgentEvent::Notice { text: note.clone() });
+                self.append_to_last(&note);
+            }
+            // T2, 2026-11-03: Gemma had its answer by step 4 of 10 and searched on, sure
+            // there must be more, until the limit came with no answer
+            if step > 0 && self.opts.max_steps - step == STEPS_LEFT_NOTE {
+                let note = format!(
+                    "[ognivo] {STEPS_LEFT_NOTE} steps of this turn are left. Finish now: if the results above answer the task, give the final answer; otherwise make the change that is left, then answer and say what is not done."
+                );
                 self.emit(on, AgentEvent::Notice { text: note.clone() });
                 self.append_to_last(&note);
             }
@@ -1303,7 +1328,11 @@ impl Agent {
                     };
                     // The draft is not kept: an assistant turn without calls before more
                     // tool steps would make gpt-oss's template drop all earlier analysis.
-                    let back = if unverified && !sent_to_verify && self.can_run_project_code() {
+                    let back = if unverified
+                        && !sent_to_verify
+                        && self.can_run_project_code()
+                        && !verify::project_checks(&self.opts.root).is_empty()
+                    {
                         sent_to_verify = true;
                         Some(format!(
                             "[ognivo] Not finished yet: {}. Run the project's build or tests now with the shell tool, then give the final answer.",
@@ -2646,6 +2675,7 @@ mod tests {
             WorkspaceState::CLEAN,
             Box::new(AllowAll),
         );
+        std::fs::write(r.root.join("Cargo.toml"), "[package]\n").unwrap();
         let a = answered(turn(&mut r).await.0);
         assert_eq!(
             a.verification,
@@ -2658,6 +2688,79 @@ mod tests {
                 .starts_with("[ognivo] Not finished yet: NOT verified: lib.rs changed")
         );
         assert_eq!(r.agent.stats.answers_sent_back, 1);
+    }
+
+    #[tokio::test]
+    async fn a_project_with_nothing_to_build_says_so_and_its_answer_is_not_sent_back() {
+        let edit =
+            serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"});
+        let mut r = agent_with(
+            vec![
+                calls(&[("edit", edit)], FinishReason::ToolCalls),
+                answer("Changed a to return 2; there is no build to run."),
+            ],
+            WorkspaceState::CLEAN,
+            Box::new(AllowAll),
+        );
+        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+            panic!("{:?}", r.agent.messages()[1]);
+        };
+        assert!(
+            project.contains("It has no build or test files (no Cargo.toml"),
+            "{project}"
+        );
+        let a = answered(turn(&mut r).await.0);
+        assert!(
+            matches!(a.verification, Verification::Unverified { .. }),
+            "{:?}",
+            a.verification
+        );
+        assert_eq!(r.agent.stats.answers_sent_back, 0);
+        // a new conversation looks again
+        std::fs::write(r.root.join("Cargo.toml"), "[package]\n").unwrap();
+        r.agent.clear();
+        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+            panic!("{:?}", r.agent.messages()[1]);
+        };
+        assert!(
+            project.contains(" Its build and test files: Cargo.toml."),
+            "{project}"
+        );
+    }
+
+    #[tokio::test]
+    async fn two_steps_before_the_limit_the_model_is_told_to_finish() {
+        // different commands: the same one again is a repeat of its own
+        let ls = |dir: &str| {
+            calls(
+                &[(
+                    "shell",
+                    serde_json::json!({ "command": format!("ls {dir}") }),
+                )],
+                FinishReason::ToolCalls,
+            )
+        };
+        let mut r = agent_with(
+            vec![ls("."), ls("/"), ls("/tmp"), ls("..")],
+            WorkspaceState::CLEAN,
+            Box::new(AllowAll),
+        );
+        r.agent.opts.max_steps = 4;
+        let (end, events) = turn(&mut r).await;
+        assert!(matches!(end, TurnEnd::StepLimit), "{end:?}");
+        let results = tool_results(&r.agent);
+        let told: Vec<bool> = results
+            .iter()
+            .map(|t| t.ends_with("[ognivo] 2 steps of this turn are left. Finish now: if the results above answer the task, give the final answer; otherwise make the change that is left, then answer and say what is not done."))
+            .collect();
+        assert_eq!(told, [false, true, false, false]);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Notice { text } if text.contains("steps of this turn are left")))
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

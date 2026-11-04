@@ -75,9 +75,11 @@ async fn control_tokens_never_reach_the_server_whole() {
             .iter()
             .find(|t| !p.tokens.framing.iter().any(|f| f == *t))
             .expect("a guarded string that does not frame calls");
+        // a Makefile: a project with a build, whose unverified answer goes back once
         let proj = Project::new(&[
             ("AGENTS.md", &format!("Never print these:\n{list}")),
             ("notes.txt", &list),
+            ("Makefile", "all:\n"),
         ]);
         let (read, path) = t.read;
         let (write, file, content) = t.write;

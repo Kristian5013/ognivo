@@ -42,10 +42,12 @@ fn spawn_with(url: &str, root: &Path, data: &Path, stdin: &str, args: &[&str]) -
     child
 }
 
+/// A project with a build, so that an unverified answer is sent back once to run it.
 fn project() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("Makefile"), "all:\n").unwrap();
     (dir, root)
 }
 
@@ -495,7 +497,7 @@ async fn a_session_is_kept_and_goes_on_with_its_changes() {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     };
     git(&["init", "-q"]);
-    git(&["add", "notes.txt"]);
+    git(&["add", "notes.txt", "Makefile"]);
     git(&["commit", "-qm", "start"]);
     let data = dir.path().join("data");
     let (r, d) = (root.clone(), data.clone());

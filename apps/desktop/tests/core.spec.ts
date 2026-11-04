@@ -73,6 +73,8 @@ async function launch(replies: object[][]) {
   const project = join(dir, "proj");
   mkdirSync(project);
   writeFileSync(join(project, "README.md"), "a project\n");
+  // a project with a build: an unverified answer is sent back once to run it
+  writeFileSync(join(project, "Makefile"), "all:\n");
   const { server, url } = await fakeServer(replies);
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;

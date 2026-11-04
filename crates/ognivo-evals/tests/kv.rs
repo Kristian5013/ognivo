@@ -39,7 +39,8 @@ async fn stopped_turn(a: &mut ognivo_core::agent::Agent, text: &str, after: Dura
 #[tokio::test]
 async fn gpt_oss_steps_and_turns_extend_one_prompt() {
     let p = profile("gpt-oss-20b");
-    let proj = Project::new(&[("src/lib.rs", LIB)]);
+    // a crate: the unverified answer goes back once
+    let proj = Project::new(&[("src/lib.rs", LIB), ("Cargo.toml", "[package]\n")]);
     let gens = [
         Gen::calls("Read it first.", &[("c1", "read", json!({"path": "src/lib.rs"}))]),
         Gen::calls(

@@ -183,6 +183,100 @@ pub fn is_build_or_test(command: &str) -> bool {
     RE.is_match(command)
 }
 
+/// Files at a project's root that say how it builds or tests.
+const BUILD_FILES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "deno.json",
+    "deno.jsonc",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+    "pytest.ini",
+    "noxfile.py",
+    "go.mod",
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "CMakeLists.txt",
+    "meson.build",
+    "build.gradle",
+    "build.gradle.kts",
+    "pom.xml",
+    "build.xml",
+    "build.sbt",
+    "composer.json",
+    "Gemfile",
+    "Rakefile",
+    "mix.exs",
+    "build.zig",
+    "dune-project",
+    "stack.yaml",
+    "Package.swift",
+    "justfile",
+    "Justfile",
+    "Taskfile.yml",
+    "MODULE.bazel",
+    "WORKSPACE",
+];
+
+/// Extensions of build files whose names vary: `app.csproj`, `pkg.cabal`.
+const BUILD_EXTENSIONS: &[&str] = &["sln", "csproj", "fsproj", "vcxproj", "cabal", "nimble"];
+
+/// Directories at a project's root that hold its tests.
+const TEST_DIRS: &[&str] = &["tests", "test", "spec", "__tests__"];
+
+/// What a project has to check a change with, as paths from its root, sorted: its build
+/// files, its test directories, and the scripts named build*, test* or check* at its root or
+/// in `scripts/`. Empty for a project with nothing to build or run: the model is told so,
+/// and is not sent back to run a build (T2, 2026-11-03: in projects of a few files Gemma
+/// wrote programs of its own to test an edit until the step limit came).
+pub fn project_checks(root: &Path) -> Vec<String> {
+    // a script, not `test.rs` or `checklist.md`
+    let script = |name: &str| {
+        let (stem, ext) = name.split_once('.').unwrap_or((name, ""));
+        let stem = stem.to_ascii_lowercase();
+        ["build", "test", "check"]
+            .iter()
+            .any(|p| stem.starts_with(p))
+            && [
+                "", "sh", "bash", "py", "js", "mjs", "ts", "rb", "pl", "ps1", "bat", "cmd",
+            ]
+            .contains(&ext)
+    };
+    let mut found = Vec::new();
+    for (dir, prefix) in [(root.to_owned(), ""), (root.join("scripts"), "scripts/")] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let Some(name) = e.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            let hit = if prefix.is_empty() && is_dir {
+                TEST_DIRS.contains(&name.as_str())
+            } else if is_dir {
+                false
+            } else {
+                (prefix.is_empty()
+                    && (BUILD_FILES.contains(&name.as_str())
+                        || Path::new(&name)
+                            .extension()
+                            .and_then(|x| x.to_str())
+                            .is_some_and(|x| BUILD_EXTENSIONS.contains(&x))))
+                    || script(&name)
+            };
+            if hit {
+                found.push(format!("{prefix}{name}{}", if is_dir { "/" } else { "" }));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
 /// The answer says a build or test ran or passed.
 pub fn claims_a_passing_run(answer: &str) -> bool {
     static RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -428,5 +522,34 @@ mod tests {
         assert!(!claims_changes(
             "The tolerance cascade is in crates/ognivo-tools/src/edit.rs."
         ));
+    }
+
+    #[test]
+    fn a_project_shows_what_checks_it_and_a_few_files_show_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/math.rs"), "").unwrap();
+        // a program written to test an edit is not the project's test
+        std::fs::write(root.join("test.rs"), "").unwrap();
+        std::fs::write(root.join("checklist.md"), "").unwrap();
+        assert!(project_checks(root).is_empty());
+        std::fs::write(root.join("Cargo.toml"), "").unwrap();
+        std::fs::write(root.join("app.csproj"), "").unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/check.sh"), "").unwrap();
+        std::fs::write(root.join("scripts/deploy.sh"), "").unwrap();
+        std::fs::write(root.join("build"), "").unwrap();
+        assert_eq!(
+            project_checks(root),
+            [
+                "Cargo.toml",
+                "app.csproj",
+                "build",
+                "scripts/check.sh",
+                "tests/"
+            ]
+        );
     }
 }

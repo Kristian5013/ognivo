@@ -158,6 +158,8 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir(&root).unwrap();
+    // a project with a build: the unverified answer is sent back once to run it
+    std::fs::write(root.join("Makefile"), "all:\n").unwrap();
     let root = root.canonicalize().unwrap();
     let socket = dir.path().join("run/core.sock");
     let mut child = core(dir.path(), "1");
