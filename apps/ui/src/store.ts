@@ -17,13 +17,17 @@ export type LiveEvent =
   /** A call's result, or the whole item as it ended (the core's events carry it). */
   | { type: "item_completed"; id: string; result?: ToolResult; item?: Item }
   | { type: "generation"; generation: Generation }
-  | { type: "turn_completed"; index: number; end: string; why?: string };
+  | { type: "turn_completed"; index: number; end: string; why?: string }
+  /** The turns from `turn` on were taken back: out of the conversation. */
+  | { type: "rewound"; turn: number };
 
 export type Row =
   | { kind: "user"; key: string; turn: number; text: string }
   /** `live` while it streams, or runs. */
   | { kind: "item"; key: string; item: Item; open: boolean; live: boolean }
-  | { kind: "end"; key: string; turn: number; end: string; why?: string };
+  | { kind: "end"; key: string; turn: number; end: string; why?: string }
+  /** Where the user took turns `from` to `to` back. */
+  | { kind: "rewound"; key: string; from: number; to: number };
 
 export type Info = Omit<Thread, "turns" | "generations">;
 
@@ -40,6 +44,11 @@ export class ThreadStore {
   private readonly opens: (item: Item) => boolean;
   private readonly schedule: Schedule;
   private rows: Row[] = [];
+  /** The turn each row belongs to, and the last turn begun. */
+  private turnOf: number[] = [];
+  private turn = 0;
+  /** The turns taken back, as ranges. */
+  private dropped: [number, number][] = [];
   private at = new Map<string, number>();
   private rowListeners = new Map<number, Set<() => void>>();
   private listListeners = new Set<() => void>();
@@ -109,6 +118,7 @@ export class ThreadStore {
   apply(e: LiveEvent): void {
     switch (e.type) {
       case "turn_started":
+        this.turn = e.index;
         this.add({ kind: "user", key: `u${e.index}`, turn: e.index, text: e.user });
         return;
       case "item_started":
@@ -151,7 +161,23 @@ export class ThreadStore {
       case "turn_completed":
         this.add({ kind: "end", key: `e${e.index}`, turn: e.index, end: e.end, why: e.why });
         return;
+      case "rewound": {
+        const to = this.turn;
+        if (e.turn > to) return;
+        this.dropped.push([e.turn, to]);
+        this.turnOf.forEach((t, i) => {
+          if (t >= e.turn && t <= to) this.touch(i);
+        });
+        this.add({ kind: "rewound", key: `r${e.turn}-${to}`, from: e.turn, to });
+        return;
+      }
     }
+  }
+
+  /** Whether row `index` belongs to a turn the user took back. */
+  isDropped(index: number): boolean {
+    const t = this.turnOf[index];
+    return this.rows[index]?.kind !== "rewound" && t !== undefined && this.dropped.some(([a, b]) => t >= a && t <= b);
   }
 
   setOpen(id: string, open: boolean): void {
@@ -240,6 +266,7 @@ export class ThreadStore {
 
   private add(row: Row): void {
     this.rows.push(row);
+    this.turnOf.push(this.turn);
     this.touchList();
   }
 

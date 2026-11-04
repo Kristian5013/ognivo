@@ -56,6 +56,31 @@ describe("the core's stream", () => {
     expect(s.changedFiles().map((f) => f.path)).toEqual(["main.rs"]);
   });
 
+  it("keeps the turns taken back, out of the way, and marks where", () => {
+    const s = new ThreadStore(
+      { id: "5", title: "", project: "", profile: "", model: "", server: "", system: "", conversations: {}, tools: [] },
+      { schedule: (flush) => flush() },
+    );
+    const message = { id: 1, turn: 2, generation: 1, kind: "agent_message", text: "Two." } as const;
+    const ended = (turn: number) => ({ event: "turn_completed", turn, end: "answer", why: null, answer: "x", verification: null });
+    const events = [
+      { event: "turn_started", turn: 1, user: "first" },
+      ended(1),
+      { event: "turn_started", turn: 2, user: "second" },
+      { event: "item_started", item: message },
+      { event: "item_completed", item: message },
+      ended(2),
+      { event: "thread_rewound", turn: 2 },
+      { event: "turn_started", turn: 3, user: "second, better" },
+    ];
+    events.forEach((e, i) => {
+      for (const l of toLive({ seq: i + 1, thread: 5, ...e } as Event)) s.apply(l);
+    });
+    expect(rows(s).map((r) => r.kind)).toEqual(["user", "end", "user", "item", "end", "rewound", "user"]);
+    expect(rows(s).map((_, i) => s.isDropped(i))).toEqual([false, false, true, true, true, false, false]);
+    expect(s.row(5)).toMatchObject({ kind: "rewound", from: 2, to: 2 });
+  });
+
   it("gives a subagent a thread of its own", () => {
     const sub = stream.find((e) => e.event === "thread_started" && e.info.kind === "subagent");
     expect(sub?.event === "thread_started" && sub.info.parent).toMatchObject({ thread: 11 });

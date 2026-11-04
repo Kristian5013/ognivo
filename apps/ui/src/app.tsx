@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 
 import { Composer } from "./components/composer.tsx";
 import { Wordmark } from "./components/logo.tsx";
 import { type Panel, SidePanel } from "./components/panels.tsx";
+import { Resizer, useWidth } from "./components/resizer.tsx";
 import { SettingsButton } from "./components/settings.tsx";
 import { ThreadView } from "./components/thread.tsx";
 import { count, ending, percent } from "./format.ts";
@@ -118,7 +119,7 @@ export function Hud({
   );
 }
 
-function Sidebar({ selected, onSelect }: { selected?: string; onSelect: (key: string) => void }) {
+function Sidebar({ selected, onSelect, width }: { selected?: string; onSelect: (key: string) => void; width: number }) {
   const groups = new Map<string, Session[]>();
   for (const s of sessions) {
     const list = groups.get(s.thread.profile) ?? [];
@@ -126,7 +127,7 @@ function Sidebar({ selected, onSelect }: { selected?: string; onSelect: (key: st
     groups.set(s.thread.profile, list);
   }
   return (
-    <nav className="flex w-72 shrink-0 flex-col border-r border-border bg-panel">
+    <nav style={{ width }} className="flex shrink-0 flex-col bg-panel">
       <div className="px-4 py-3">
         <Wordmark />
       </div>
@@ -179,6 +180,7 @@ export function App() {
   const [replay, setReplay] = useState<{ store: ThreadStore; stop: () => void }>();
   const [speed, setSpeed] = useState(() => Number(params.get("speed")) || 1);
   const [panel, setPanel] = useState<Panel | undefined>(PANEL);
+  const [sidebar, setSidebar] = useWidth("sidebar", 288, 200, 520);
   // `?generation=3` opens the Inspector at that generation (screenshots)
   const [generation, setGeneration] = useState<number | undefined>(() => {
     const g = params.get("generation");
@@ -219,12 +221,14 @@ export function App() {
     <div className="flex h-full">
       <Sidebar
         selected={selected}
+        width={sidebar}
         onSelect={(key) => {
           stop();
           setSelected(key);
           setGeneration(undefined);
         }}
       />
+      <Resizer width={sidebar} onWidth={setSidebar} side="left" initial={288} />
       <main className="flex min-w-0 flex-1 flex-col">
         {store ? (
           <>

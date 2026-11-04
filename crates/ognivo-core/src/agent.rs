@@ -803,6 +803,47 @@ impl Agent {
         self.save();
     }
 
+    /// Where each turn of the conversation begins, the last turn last: the user's messages,
+    /// not ognivo's notes. A turn before `/clear` or a compaction has none.
+    pub fn turn_starts(&self) -> Vec<usize> {
+        self.messages
+            .iter()
+            .enumerate()
+            .skip(self.head())
+            .filter(|(_, m)| matches!(m, ChatMessage::User(t) if !t.starts_with("[ognivo]")))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Takes the conversation back to before the user's message at `at`, one of
+    /// [`turn_starts`](Self::turn_starts): the turns from it on are gone from it, and the
+    /// model reads so with the next message. What they did to files stays, unreviewed. The
+    /// server's cache serves the conversation up to there.
+    pub fn rewind(&mut self, at: usize) {
+        let dropped = self.turn_starts().iter().filter(|&&i| i >= at).count();
+        self.messages.truncate(at.max(self.head()));
+        self.requests
+            .truncate(self.requests.len().saturating_sub(dropped));
+        let files: Vec<String> = self.changes().into_iter().map(|c| c.shown).collect();
+        let mut why = "The user took the conversation back to before this message and wrote it anew: the turns that followed it are gone from the conversation".to_owned();
+        if !files.is_empty() {
+            why.push_str(&format!(
+                ", but what they changed in files stays, unreviewed: {}. Read those files again before you edit them",
+                files.join(", ")
+            ));
+        }
+        why.push('.');
+        self.stopped = Some(why);
+        self.context = 0;
+        self.counted = 0;
+        self.repeats = Repeats::default();
+        let (notes, head) = (self.notes(), self.head());
+        if let Some(s) = self.session.as_mut() {
+            s.start_conversation(&self.messages, head, &notes, "rewind");
+        }
+        self.save();
+    }
+
     /// Runs one user turn to its end.
     pub async fn turn(
         &mut self,
@@ -2225,6 +2266,58 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_turn_taken_back_leaves_the_conversation_and_the_next_says_so() {
+        let mut r = agent(
+            vec![
+                answer("one"),
+                calls(
+                    &[(
+                        "edit",
+                        serde_json::json!({"path": "lib.rs", "old_string": "    1", "new_string": "    2"}),
+                    )],
+                    FinishReason::ToolCalls,
+                ),
+                answer("two"),
+                answer("two, again"),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        let mut on = |_: AgentEvent| {};
+        r.agent.turn("first", &mut on).await.unwrap();
+        r.agent.turn("second", &mut on).await.unwrap();
+        let starts = r.agent.turn_starts();
+        assert_eq!(starts.len(), 2);
+        assert!(matches!(&r.agent.messages()[starts[1]], ChatMessage::User(t) if t == "second"));
+        r.agent.rewind(starts[1]);
+        assert_eq!(r.agent.messages().len(), starts[1]);
+        assert_eq!(r.agent.turn_starts(), &starts[..1]);
+        r.agent.turn("second, better", &mut on).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        let sent = &seen.last().unwrap().messages;
+        // the history goes on from the first turn's answer, and the change stays, said
+        assert!(
+            matches!(&sent[starts[1] - 1], ChatMessage::Assistant { content, .. } if content == "one")
+        );
+        let ChatMessage::User(t) = &sent[starts[1]] else {
+            panic!("{sent:?}")
+        };
+        assert!(
+            t.starts_with("second, better\n\n[ognivo] The user took the conversation back to before this message and wrote it anew") && t.contains("unreviewed: lib.rs"),
+            "{t}"
+        );
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, ChatMessage::User(t) if t == "second"))
+        );
+        // the file keeps what the turn taken back did
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    2\n}\n"
+        );
     }
 
     #[tokio::test]

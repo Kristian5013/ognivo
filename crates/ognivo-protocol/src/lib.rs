@@ -76,6 +76,12 @@ pub enum EventKind {
     Generation {
         generation: Generation,
     },
+    /// The user took the conversation back to before turn `turn` and wrote its message anew:
+    /// the turns from it on are out of the conversation, the model no longer sees them, and
+    /// what they did to files stays. The next turn is numbered on.
+    ThreadRewound {
+        turn: TurnId,
+    },
     TurnCompleted {
         turn: TurnId,
         end: TurnEnd,

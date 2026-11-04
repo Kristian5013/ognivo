@@ -23,9 +23,11 @@ pub const THREAD_READ: &str = "thread/read";
 pub const THREAD_TRAJECTORY: &str = "thread/trajectory";
 pub const THREAD_CLEAR: &str = "thread/clear";
 pub const THREAD_CLOSE: &str = "thread/close";
+pub const THREAD_DELETE: &str = "thread/delete";
 pub const TURN_START: &str = "turn/start";
 pub const TURN_INTERRUPT: &str = "turn/interrupt";
 pub const TURN_ANSWER_NOW: &str = "turn/answer_now";
+pub const TURN_EDIT: &str = "turn/edit";
 pub const CHANGES_LIST: &str = "changes/list";
 pub const CHANGES_ACCEPT: &str = "changes/accept";
 pub const CHANGES_REVERT: &str = "changes/revert";
@@ -50,6 +52,8 @@ pub mod error {
     pub const JOURNAL: i64 = -32004;
     /// The thread's path cannot do it: only the Native path ends the reasoning.
     pub const UNSUPPORTED: i64 = -32005;
+    /// The turn is not in the conversation any more: a `/clear` or a compaction came after.
+    pub const NO_TURN: i64 = -32006;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -193,6 +197,16 @@ pub struct Trajectory {
 pub struct StartTurn {
     pub thread: ThreadId,
     /// The user's message.
+    pub text: String,
+}
+
+/// `turn/edit`: the conversation goes back to before `turn`, whose message becomes `text`,
+/// and a turn starts with it (an event `thread_rewound`, then the turn's). What the turns
+/// taken back did to files stays, and the model is told so.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct EditTurn {
+    pub thread: ThreadId,
+    pub turn: crate::TurnId,
     pub text: String,
 }
 

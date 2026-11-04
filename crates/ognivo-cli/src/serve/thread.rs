@@ -52,6 +52,8 @@ impl ThreadHandle {
 #[derive(Debug)]
 pub enum Command {
     Turn(String, oneshot::Sender<Reply>),
+    /// The conversation back to before this turn, and a turn with its message anew.
+    Edit(u32, String, oneshot::Sender<Reply>),
     Interrupt(oneshot::Sender<Reply>),
     AnswerNow(oneshot::Sender<Reply>),
     Changes(oneshot::Sender<Reply>),
@@ -66,6 +68,7 @@ impl Command {
     fn busy(self) {
         let reply = match self {
             Command::Turn(_, r)
+            | Command::Edit(_, _, r)
             | Command::Interrupt(r)
             | Command::AnswerNow(r)
             | Command::Changes(r)
@@ -156,6 +159,53 @@ fn split_server(server: &str) -> (String, Option<String>) {
         Some((url, model)) => (url.to_owned(), Some(model.to_owned())),
         None => (server.to_owned(), None),
     }
+}
+
+/// Deletes a thread, with its subagents' threads: its conversations, its events and its
+/// edit journal. One the core has open closes first; one with a running turn stays.
+pub async fn delete(hub: &Hub, a: rpc::ThreadRef) -> Reply {
+    let running = lock(&hub.threads)
+        .get(&a.thread.0)
+        .map(|h| h.running.load(Ordering::SeqCst));
+    match running {
+        Some(true) => {
+            return Err(RpcError::new(
+                rpc::error::BUSY,
+                "a turn is running: stop it first",
+            ));
+        }
+        Some(false) => {
+            command(hub, a.thread, Command::Close).await?;
+        }
+        None => {}
+    }
+    let mut store = lock(&hub.reader);
+    let row = store.session(a.thread.0).map_err(store_error)?;
+    match row {
+        // a session without turns is gone with its close
+        None => return done(),
+        Some(r) if r.kind == "subagent" => {
+            return Err(RpcError::new(
+                rpc::error::NO_THREAD,
+                format!(
+                    "thread {} is a subagent's: delete its session's",
+                    a.thread.0
+                ),
+            ));
+        }
+        Some(_) => {}
+    }
+    let children: Vec<i64> = store
+        .events(a.thread.0)
+        .map_err(store_error)?
+        .iter()
+        .filter(|e| e.kind == "subagent_session")
+        .filter_map(|e| serde_json::from_str::<Value>(&e.data).ok()?["session"].as_i64())
+        .collect();
+    for id in children.into_iter().chain([a.thread.0]) {
+        store.delete_session(id).map_err(store_error)?;
+    }
+    done()
 }
 
 pub fn read(hub: &Hub, a: rpc::ReadThread) -> Reply {
@@ -326,10 +376,12 @@ async fn open(
         ));
     };
     let thread = p::ThreadId(id);
+    let mut conversation = Vec::new();
     *lock(&shared) = match &stored {
         Some(row) => {
-            let (turns, items, generations) = numbers(hub, id, row.turns);
-            Projector::resumed(thread, info.clone(), turns, items, generations)
+            let n = numbers(hub, id, row.turns);
+            conversation = n.conversation;
+            Projector::resumed(thread, info.clone(), n.turns, n.items, n.generations)
         }
         None => Projector::new(thread, info.clone()),
     };
@@ -392,6 +444,7 @@ async fn open(
         first,
         answer_now,
         running,
+        conversation,
     };
     tokio::spawn(actor.run(received));
     reply(rpc::Opened {
@@ -402,12 +455,22 @@ async fn open(
     })
 }
 
-/// Where a thread's numbers stand in the kept stream: its last turn, item and generation.
-/// A thread from before the core kept its events, or with turns in `chat` since, goes on
-/// from the turns its session counted.
-fn numbers(hub: &Hub, id: i64, turns: u32) -> (u32, u32, u32) {
+/// Where a thread stands in the kept stream.
+struct Numbers {
+    /// Its last turn, item and generation.
+    turns: u32,
+    items: u32,
+    generations: u32,
+    /// The turns that have not been taken back, oldest first.
+    conversation: Vec<u32>,
+}
+
+/// Where a thread's numbers stand in the kept stream. A thread from before the core kept
+/// its events, or with turns in `chat` since, goes on from the turns its session counted.
+fn numbers(hub: &Hub, id: i64, turns: u32) -> Numbers {
     let rows = lock(&hub.reader).wire(id, 0).unwrap_or_default();
     let (mut turn, mut item, mut generation) = (0, 0, 0);
+    let mut conversation = Vec::new();
     for row in rows {
         let Ok(e) = serde_json::from_str::<p::Event>(&row) else {
             continue;
@@ -416,13 +479,24 @@ fn numbers(hub: &Hub, id: i64, turns: u32) -> (u32, u32, u32) {
             continue;
         }
         match e.kind {
-            p::EventKind::TurnStarted { turn: t, .. } => turn = turn.max(t.0),
+            p::EventKind::TurnStarted { turn: t, .. } => {
+                turn = turn.max(t.0);
+                conversation.push(t.0);
+            }
+            p::EventKind::ThreadRewound { turn: t } => conversation.retain(|&c| c < t.0),
             p::EventKind::ItemStarted { item: i } => item = item.max(i.id.0),
             p::EventKind::Generation { generation: g } => generation = generation.max(g.index),
             _ => {}
         }
     }
-    (turn.max(turns), item, generation)
+    // turns in `chat` since
+    conversation.extend(turn + 1..=turns);
+    Numbers {
+        turns: turn.max(turns),
+        items: item,
+        generations: generation,
+        conversation,
+    }
 }
 
 /// The conversation's instruction files, for the first item of its next turn.
@@ -460,6 +534,9 @@ struct Actor {
     first: Option<AgentEvent>,
     answer_now: Option<AnswerNow>,
     running: Arc<AtomicBool>,
+    /// The thread's turns that have not been taken back, oldest first: the last of them are
+    /// those of the agent's conversation, which a `/clear` or a compaction starts anew.
+    conversation: Vec<u32>,
 }
 
 /// How a turn came out.
@@ -477,6 +554,17 @@ impl Actor {
             };
             let answer = match command {
                 Command::Turn(text, reply) => {
+                    let _ = reply.send(done());
+                    match self.turn(&text, &mut commands).await {
+                        Some(close) => break Some(close),
+                        None => continue,
+                    }
+                }
+                Command::Edit(turn, text, reply) => {
+                    if let Err(e) = self.rewind(turn) {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
                     let _ = reply.send(done());
                     match self.turn(&text, &mut commands).await {
                         Some(close) => break Some(close),
@@ -516,6 +604,7 @@ impl Actor {
         if let Some(a) = &self.answer_now {
             a.clear();
         }
+        self.conversation.push(lock(&self.projector).turns() + 1);
         let (hub, projector, thread) = (self.hub.clone(), self.projector.clone(), self.thread);
         let mut first = self.first.take();
         let mut closing = None;
@@ -586,6 +675,31 @@ impl Actor {
         self.running.store(false, Ordering::SeqCst);
         self.hub.running(-1);
         closing
+    }
+
+    /// The conversation back to before `turn`: the agent's history, and an event that says
+    /// so. Each turn of the conversation has one message of the user's: the last of them
+    /// are those of the turns not taken back.
+    fn rewind(&mut self, turn: u32) -> Result<(), RpcError> {
+        let starts = self.agent.turn_starts();
+        let turns = &self.conversation[self.conversation.len().saturating_sub(starts.len())..];
+        let at = turns
+            .iter()
+            .position(|&t| t == turn)
+            .map(|i| starts[starts.len() - turns.len() + i]);
+        let Some(at) = at else {
+            return Err(RpcError::new(
+                rpc::error::NO_TURN,
+                format!(
+                    "turn {turn} is not in the conversation any more: a /clear or a compaction came after it"
+                ),
+            ));
+        };
+        self.agent.rewind(at);
+        self.conversation.retain(|&t| t < turn);
+        let out = lock(&self.projector).rewound(turn);
+        self.hub.emit(self.thread, out);
+        Ok(())
     }
 
     fn changes(&mut self) -> Reply {

@@ -4,10 +4,15 @@ import { summary } from "../format.ts";
 import type { SubagentItem } from "../model.ts";
 import type { ThreadStore } from "../store.ts";
 
-/** The threads a thread's rows may lead to: a subagent's, on the core. */
+/** What a thread's rows can do on the core: lead to a subagent's thread, and write a turn's
+ * message anew. */
 export interface ThreadNav {
   store(thread: number): ThreadStore | undefined;
   open(thread: number): void;
+  /** Takes the conversation back to before `turn` and sends `text` in its place. */
+  edit?(turn: number, text: string): Promise<void>;
+  /** A turn runs: nothing is written anew meanwhile. */
+  busy?: boolean;
 }
 
 export const ThreadNavContext = createContext<ThreadNav | undefined>(undefined);

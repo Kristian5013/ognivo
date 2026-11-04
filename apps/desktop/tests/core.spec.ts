@@ -192,3 +192,58 @@ test("subagents show as lanes, and their threads open", async () => {
     await close();
   }
 });
+
+test("a message written anew, panels that resize, a session deleted", async () => {
+  const { page, close } = await launch([answer("First answer."), answer("Second answer."), answer("Second, better.")]);
+  try {
+    await page.getByRole("button", { name: "Start" }).click();
+    const composer = page.locator("textarea");
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+    for (const [text, answered] of [
+      ["first", "First answer."],
+      ["second", "Second answer."],
+    ]) {
+      await composer.fill(text!);
+      await composer.press("Enter");
+      await expect(page.getByText(answered!)).toBeVisible({ timeout: 30_000 });
+    }
+
+    // the second message, written anew: its turn leaves the conversation, and stays to read
+    const second = page.locator(".group\\/user").filter({ has: page.getByText("second", { exact: true }) });
+    await second.hover();
+    await second.getByRole("button", { name: "Edit" }).click();
+    const anew = page.getByRole("textbox", { name: "The message, written anew" });
+    await anew.fill("second, better");
+    await page.getByRole("button", { name: "Send", exact: true }).first().click();
+    await expect(page.getByText("Second, better.")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/Turn 2 taken back/)).toBeVisible();
+    await expect(page.getByText("Second answer.")).toBeVisible();
+    await page.screenshot({ path: "test-results/core-rewound.png" });
+
+    // the list is as wide as the user drags it, and stays so
+    const nav = page.locator("nav");
+    const before = await nav.evaluate((el) => el.getBoundingClientRect().width);
+    const edge = page.getByRole("separator").first();
+    const box = (await edge.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + 200);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 120, box.y + 200, { steps: 6 });
+    await page.mouse.up();
+    const after = await nav.evaluate((el) => el.getBoundingClientRect().width);
+    expect(Math.round(after - before)).toBe(120);
+    await page.reload();
+    await expect.poll(() => nav.evaluate((el) => Math.round(el.getBoundingClientRect().width)), { timeout: 30_000 }).toBe(
+      Math.round(after),
+    );
+
+    // deleted, the session is gone from the list
+    const session = nav.locator(".group\\/session").filter({ hasText: "first" });
+    await session.hover();
+    await session.getByRole("button", { name: "Delete the session" }).click();
+    await nav.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(nav.getByText("first")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "New session" })).toBeVisible();
+  } finally {
+    await close();
+  }
+});

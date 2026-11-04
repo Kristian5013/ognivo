@@ -114,6 +114,21 @@ impl Projector {
         self.thread
     }
 
+    /// The number of the thread's last turn; 0 before the first.
+    pub fn turns(&self) -> u32 {
+        self.turn
+    }
+
+    /// The turns from `turn` on were taken back; the next turn is numbered on.
+    pub fn rewound(&self, turn: u32) -> Out {
+        vec![(
+            self.thread,
+            p::EventKind::ThreadRewound {
+                turn: p::TurnId(turn),
+            },
+        )]
+    }
+
     /// The thread's start.
     pub fn started(&self) -> Out {
         vec![(

@@ -519,3 +519,106 @@ async fn the_projects_allow_rules_count_once_a_client_trusts_them() {
     core.kill().unwrap();
     core.wait().unwrap();
 }
+
+#[tokio::test]
+async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
+    let (url, bodies) = fake_server(vec![
+        answer_stream("First."),
+        answer_stream("Second."),
+        answer_stream("Better."),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    for text in ["first", "second"] {
+        a.ok("turn/start", json!({"thread": thread, "text": text}))
+            .await;
+        a.until(|m| event(m, "turn_completed")).await;
+    }
+
+    // the second message, written anew: the conversation goes back to before it
+    a.ok(
+        "turn/edit",
+        json!({"thread": thread, "turn": 2, "text": "second, better"}),
+    )
+    .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    let names: Vec<&str> = got
+        .iter()
+        .filter(|m| m["method"] == "event")
+        .map(|m| m["params"]["event"].as_str().unwrap())
+        .take(2)
+        .collect();
+    assert_eq!(names, ["thread_rewound", "turn_started"]);
+    let rewound = got.iter().find(|m| event(m, "thread_rewound")).unwrap();
+    assert_eq!(rewound["params"]["turn"], 2);
+    let started = got.iter().find(|m| event(m, "turn_started")).unwrap();
+    assert_eq!(
+        (&started["params"]["turn"], &started["params"]["user"]),
+        (&json!(3), &json!("second, better"))
+    );
+    assert_eq!(got.last().unwrap()["params"]["answer"], "Better.");
+    let sent = bodies.lock().unwrap().last().unwrap()["messages"].clone();
+    let users: Vec<&str> = sent
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users.len(), 3, "{users:?}");
+    assert_eq!(users[1], "first");
+    assert!(
+        users[2].starts_with(
+            "second, better\n\n[ognivo] The user took the conversation back to before this message"
+        ),
+        "{users:?}"
+    );
+    // what is not in the conversation cannot be written anew
+    for turn in [0, 2, 9] {
+        let e = a
+            .call(
+                "turn/edit",
+                json!({"thread": thread, "turn": turn, "text": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(e["code"], -32006, "turn {turn}: {e}");
+    }
+    // the store keeps the rewind as it went
+    let read = a
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert!(
+        read["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["event"] == "thread_rewound")
+    );
+
+    // deleted, it is gone from the list and the store, and closed
+    a.ok("thread/delete", json!({"thread": thread})).await;
+    let list = a
+        .ok("thread/list", json!({"project": root, "limit": null}))
+        .await;
+    assert_eq!(list["threads"], json!([]));
+    let read = a
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert_eq!(read["events"], json!([]));
+    let e = a
+        .call("turn/start", json!({"thread": thread, "text": "more"}))
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], -32001);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}

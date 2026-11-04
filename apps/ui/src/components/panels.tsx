@@ -7,8 +7,12 @@ import * as P from "../protocol.ts";
 import type { ThreadStore } from "../store.ts";
 import { EditDiff } from "./diff.tsx";
 import { Inspector } from "./inspector.tsx";
+import { Resizer, useWidth } from "./resizer.tsx";
 
 export type Panel = "changes" | "approvals" | "inspector";
+
+/** The side panel's first width. */
+const PANEL = 440;
 
 export type ApprovalAsk = Extract<Ask, { method: "approval/ask" }>;
 
@@ -446,6 +450,7 @@ export function SidePanel({
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeChanges(l), [store]);
   useSyncExternalStore(subscribe, () => store.changesVersion);
+  const [width, setWidth] = useWidth("panel", PANEL, 300, 900);
   const files = store.changedFiles();
   const refused = store.refusedCalls();
   const tab = (id: Panel, label: string, count?: number) => (
@@ -458,23 +463,26 @@ export function SidePanel({
     </button>
   );
   return (
-    <aside className="panel-in flex w-[440px] shrink-0 flex-col border-l border-border bg-panel">
-      <div className="flex shrink-0 gap-1 border-b border-border px-2 text-[12px]">
-        {tab("changes", "Changes", files.length)}
-        {tab("approvals", "Approvals", live ? live.asks.length : refused.length)}
-        {tab("inspector", "Inspector")}
-      </div>
-      {panel === "changes" ? (
-        live?.open ? (
-          <LiveChanges live={live} refresh={`${live.version}.${store.changesVersion}`} />
+    <>
+      <Resizer width={width} onWidth={setWidth} side="right" initial={PANEL} />
+      <aside style={{ width }} className="panel-in flex shrink-0 flex-col bg-panel">
+        <div className="flex shrink-0 gap-1 border-b border-border px-2 text-[12px]">
+          {tab("changes", "Changes", files.length)}
+          {tab("approvals", "Approvals", live ? live.asks.length : refused.length)}
+          {tab("inspector", "Inspector")}
+        </div>
+        {panel === "changes" ? (
+          live?.open ? (
+            <LiveChanges live={live} refresh={`${live.version}.${store.changesVersion}`} />
+          ) : (
+            <Changes files={files} />
+          )
+        ) : panel === "approvals" ? (
+          <Approvals calls={refused} live={live} />
         ) : (
-          <Changes files={files} />
-        )
-      ) : panel === "approvals" ? (
-        <Approvals calls={refused} live={live} />
-      ) : (
-        <Inspector store={store} generation={generation} onGeneration={onGeneration} />
-      )}
-    </aside>
+          <Inspector store={store} generation={generation} onGeneration={onGeneration} />
+        )}
+      </aside>
+    </>
   );
 }

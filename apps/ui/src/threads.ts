@@ -60,6 +60,14 @@ export class Threads {
     return () => this.listeners.delete(listener);
   }
 
+  /** Lets go of a deleted thread, and of its subagents' threads. */
+  forget(thread: number): void {
+    for (const [t, entry] of this.entries) {
+      if (t === thread || entry.info?.parent?.thread === thread) this.entries.delete(t);
+    }
+    this.changed();
+  }
+
   /** The thread's store, filled with what happened in it so far. */
   open(thread: number, title = ""): Promise<ThreadStore> {
     const have = this.entries.get(thread);

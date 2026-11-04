@@ -11,7 +11,7 @@ seq: number, thread: ThreadId, } & ({ "event": "thread_started", info: ThreadInf
 /**
  * The user's message, as the user wrote it; for a subagent, its task.
  */
-user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
+user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
 /**
  * Why it ended so, when it did not end with an answer.
  */
@@ -29,7 +29,7 @@ export type EventKind = { "event": "thread_started", info: ThreadInfo, } | { "ev
 /**
  * The user's message, as the user wrote it; for a subagent, its task.
  */
-user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
+user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
 /**
  * Why it ended so, when it did not end with an answer.
  */
@@ -429,6 +429,8 @@ export type StartTurn = { thread: ThreadId,
  */
 text: string, };
 
+export type EditTurn = { thread: ThreadId, turn: TurnId, text: string, };
+
 export type Changes = { files: Array<ChangedFile>, 
 /**
  * Commands with side effects, which a revert does not undo.
@@ -546,9 +548,11 @@ export type Methods = {
   "thread/trajectory": { params: ThreadRef; result: Trajectory };
   "thread/clear": { params: ThreadRef; result: Done };
   "thread/close": { params: ThreadRef; result: Done };
+  "thread/delete": { params: ThreadRef; result: Done };
   "turn/start": { params: StartTurn; result: Done };
   "turn/interrupt": { params: ThreadRef; result: Done };
   "turn/answer_now": { params: ThreadRef; result: Done };
+  "turn/edit": { params: EditTurn; result: Done };
   "changes/list": { params: ThreadRef; result: Changes };
   "changes/accept": { params: Accept; result: Accepted };
   "changes/revert": { params: Revert; result: Reverted };
@@ -563,4 +567,4 @@ export type Asks = {
 export const NOTIFY_EVENT = "event";
 export const NOTIFY_CANCEL = "$/cancelRequest";
 
-export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005 } as const;
+export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005, noTurn: -32006 } as const;

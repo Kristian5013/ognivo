@@ -9,6 +9,7 @@ import { Hud } from "./app.tsx";
 import { Composer, type Sending } from "./components/composer.tsx";
 import { Logo, Wordmark } from "./components/logo.tsx";
 import { type ApprovalAsk, ApprovalCard, type Panel, SidePanel } from "./components/panels.tsx";
+import { Resizer, useWidth } from "./components/resizer.tsx";
 import { SettingsButton } from "./components/settings.tsx";
 import { ThreadNavContext } from "./components/subagent.tsx";
 import { ThreadView } from "./components/thread.tsx";
@@ -61,6 +62,8 @@ function basename(path: string): string {
   return path.replace(/\/+$/, "").split("/").at(-1) || path;
 }
 
+const SIDEBAR = 288;
+
 function ThreadList({
   list,
   selected,
@@ -69,6 +72,8 @@ function ThreadList({
   running,
   onSelect,
   onNew,
+  onDelete,
+  width,
 }: {
   list: P.ThreadSummary[];
   selected?: number;
@@ -78,11 +83,15 @@ function ThreadList({
   running: (thread: number) => boolean;
   onSelect: (t: P.ThreadSummary) => void;
   onNew: () => void;
+  onDelete: (t: P.ThreadSummary) => Promise<void>;
+  width: number;
 }) {
+  const [asking, setAsking] = useState<number>();
+  const [error, setError] = useState<string>();
   const groups = new Map<string, P.ThreadSummary[]>();
   for (const t of list) groups.set(t.project, [...(groups.get(t.project) ?? []), t]);
   return (
-    <nav className="flex w-72 shrink-0 flex-col border-r border-border bg-panel">
+    <nav style={{ width }} className="flex shrink-0 flex-col bg-panel">
       <div className="flex items-center px-4 py-3">
         <Wordmark />
         <button
@@ -105,26 +114,76 @@ function ThreadList({
             {threads.map((t) => {
               const asks = waiting.get(t.thread) ?? 0;
               const runs = running(t.thread) || t.running;
+              if (asking === t.thread) {
+                return (
+                  <div key={t.thread} className="rise border-l-2 border-err/60 bg-raised px-4 py-2 text-[12px]">
+                    <p className="line-clamp-1 font-medium">{t.title || "New session"}</p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      Delete the session: its conversation and its edit journal
+                      {t.unreviewed > 0 ? `; ${t.unreviewed} unreviewed ${t.unreviewed === 1 ? "file" : "files"} can no longer be reverted` : ""}.
+                    </p>
+                    {error && <p className="mt-0.5 text-err">{error}</p>}
+                    <div className="mt-1.5 flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          onDelete(t).then(
+                            () => setAsking(undefined),
+                            (e: unknown) => setError(message(e)),
+                          )
+                        }
+                        className="rounded bg-err px-2 py-0.5 font-medium text-background hover:opacity-90"
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAsking(undefined)}
+                        className="rounded border border-border px-2 py-0.5 hover:bg-panel"
+                      >
+                        Keep
+                      </button>
+                    </div>
+                  </div>
+                );
+              }
               return (
-                <button
-                  key={t.thread}
-                  type="button"
-                  onClick={() => onSelect(t)}
-                  className={`block w-full border-l-2 px-4 py-1.5 text-left hover:bg-raised ${t.thread === selected && !creating ? "border-spark bg-raised" : "border-transparent"}`}
-                >
-                  <span className="flex items-start gap-2">
-                    <span className="line-clamp-2 min-w-0 flex-1 leading-5">{t.title || "New session"}</span>
-                    {runs && <span className="ember-dot mt-1.5" title="A turn runs" />}
-                  </span>
-                  <span className="flex gap-2 text-[11px] text-muted-foreground">
-                    <span>{t.profile}</span>
-                    <span>
-                      {t.turns} {t.turns === 1 ? "turn" : "turns"}
+                <div key={t.thread} className="group/session relative">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(t)}
+                    className={`block w-full border-l-2 px-4 py-1.5 pr-8 text-left hover:bg-raised ${t.thread === selected && !creating ? "border-spark bg-raised" : "border-transparent"}`}
+                  >
+                    <span className="flex items-start gap-2">
+                      <span className="line-clamp-2 min-w-0 flex-1 leading-5">{t.title || "New session"}</span>
+                      {runs && <span className="ember-dot mt-1.5" title="A turn runs" />}
                     </span>
-                    {t.unreviewed > 0 && <span className="text-warn">{t.unreviewed} unreviewed</span>}
-                    {asks > 0 && <span className="rounded bg-spark/15 px-1 text-spark">asks</span>}
-                  </span>
-                </button>
+                    <span className="flex gap-2 text-[11px] text-muted-foreground">
+                      <span>{t.profile}</span>
+                      <span>
+                        {t.turns} {t.turns === 1 ? "turn" : "turns"}
+                      </span>
+                      {t.unreviewed > 0 && <span className="text-warn">{t.unreviewed} unreviewed</span>}
+                      {asks > 0 && <span className="rounded bg-spark/15 px-1 text-spark">asks</span>}
+                    </span>
+                  </button>
+                  {!runs && (
+                    <button
+                      type="button"
+                      aria-label="Delete the session"
+                      title="Delete the session"
+                      onClick={() => {
+                        setError(undefined);
+                        setAsking(t.thread);
+                      }}
+                      className="absolute top-1.5 right-2 grid size-6 place-items-center rounded text-muted-foreground opacity-0 group-hover/session:opacity-100 hover:bg-panel hover:text-err focus:opacity-100"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                        <path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
               );
             })}
           </section>
@@ -310,8 +369,10 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const [generation, setGeneration] = useState<number>();
   const [error, setError] = useState<string>();
   const [settings, setSettings] = useState(loadSettings);
+  const [listed, setListed] = useState(0);
+  const [sidebar, setSidebar] = useWidth("sidebar", SIDEBAR, 200, 520);
 
-  // the list follows the threads' starts and turns
+  // the list follows the threads' starts and turns, and deletes
   useEffect(() => {
     let current = true;
     core.call("thread/list", { project: null, limit: 200 }).then(
@@ -321,7 +382,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
     return () => {
       current = false;
     };
-  }, [core, threadsVersion]);
+  }, [core, threadsVersion, listed]);
 
   const select = (thread: number, title = "") => {
     shown.current = thread;
@@ -342,8 +403,17 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
     if (o.answer_now) setNative((s) => new Set(s).add(o.thread));
   };
 
-  // a subagent's lane opens its thread
-  const nav = useMemo(() => ({ store: (t: number) => threads.store(t), open: (t: number) => select(t) }), [threads]);
+  const remove = async (t: P.ThreadSummary) => {
+    await core.call("thread/delete", { thread: t.thread });
+    threads.forget(t.thread);
+    if (shown.current === t.thread) {
+      shown.current = undefined;
+      setSelected(undefined);
+      setStore(undefined);
+      setCreating(true);
+    }
+    setListed((n) => n + 1);
+  };
 
   const start = async (form: Settings, project: string) => {
     const o = await core.call("thread/start", {
@@ -371,30 +441,45 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const last = store?.row(store.length - 1);
   const stopped = !running && !parent && last?.kind === "end" && last.end !== "answer" ? last : undefined;
 
+  /** `call`, after picking the thread up again when the core does not have it open. */
+  const onCore = async (thread: number, call: () => Promise<unknown>) => {
+    try {
+      await call();
+    } catch (e) {
+      if (!(e instanceof CoreError) || e.code !== P.ERRORS.noThread) throw e;
+      opened(
+        await core.call("thread/resume", {
+          thread,
+          server: null,
+          native: settings.native,
+          priors: false,
+          subagents: settings.subagents,
+        }),
+      );
+      await call();
+    }
+  };
+
+  // a subagent's lane opens its thread; a message of the user's is written anew
+  const nav = useMemo(
+    () => ({
+      store: (t: number) => threads.store(t),
+      open: (t: number) => select(t),
+      edit:
+        selected === undefined || parent
+          ? undefined
+          : (turn: number, text: string) => onCore(selected, () => core.call("turn/edit", { thread: selected, turn, text })),
+      busy: running,
+    }),
+    [threads, core, selected, parent, running, settings],
+  );
+
   const sending: Sending | undefined =
     selected === undefined
       ? undefined
       : {
           running,
-          send: async (text) => {
-            const turn = () => core.call("turn/start", { thread: selected, text });
-            try {
-              await turn();
-            } catch (e) {
-              if (!(e instanceof CoreError) || e.code !== P.ERRORS.noThread) throw e;
-              // a thread the core does not have open: picked up again where it ended
-              opened(
-                await core.call("thread/resume", {
-                  thread: selected,
-                  server: null,
-                  native: settings.native,
-                  priors: false,
-                  subagents: settings.subagents,
-                }),
-              );
-              await turn();
-            }
-          },
+          send: (text) => onCore(selected, () => core.call("turn/start", { thread: selected, text })),
           stop: () => void core.call("turn/interrupt", { thread: selected }).catch((e: unknown) => setError(message(e))),
           answerNow:
             native.has(selected) || summary?.answer_now
@@ -431,7 +516,10 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
         running={(t) => threads.running(t)}
         onSelect={(t) => select(t.thread, t.title)}
         onNew={() => setCreating(true)}
+        onDelete={remove}
+        width={sidebar}
       />
+      <Resizer width={sidebar} onWidth={setSidebar} side="left" initial={SIDEBAR} />
       <main className={`flex min-w-0 flex-1 flex-col ${creating || selected === undefined ? "hearth" : ""}`}>
         {creating || selected === undefined ? (
           <NewThread key={settings.projects[0] ?? ""} settings={settings} onStart={start} />

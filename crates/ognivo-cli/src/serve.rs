@@ -309,6 +309,12 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
             let p: rpc::StartTurn = parse(params)?;
             thread::command(hub, p.thread, |reply| thread::Command::Turn(p.text, reply)).await
         }
+        rpc::TURN_EDIT => {
+            let p: rpc::EditTurn = parse(params)?;
+            let command = |reply| thread::Command::Edit(p.turn.0, p.text, reply);
+            thread::command(hub, p.thread, command).await
+        }
+        rpc::THREAD_DELETE => thread::delete(hub, parse(params)?).await,
         rpc::CHANGES_ACCEPT => {
             let p: rpc::Accept = parse(params)?;
             thread::command(hub, p.thread, |reply| {

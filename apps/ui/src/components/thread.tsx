@@ -1,12 +1,12 @@
 import * as Collapsible from "@radix-ui/react-collapsible";
-import { memo, useCallback, useState, useSyncExternalStore } from "react";
+import { memo, useCallback, useContext, useState, useSyncExternalStore } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { Streamdown } from "streamdown";
 
 import { ending, seconds } from "../format.ts";
 import type { VoidItem } from "../model.ts";
 import type { Row, ThreadStore } from "../store.ts";
-import { SubagentCard } from "./subagent.tsx";
+import { SubagentCard, ThreadNavContext } from "./subagent.tsx";
 import { ToolCard } from "./tool.tsx";
 
 function Chevron({ open }: { open: boolean }) {
@@ -79,12 +79,101 @@ function Void({ item }: { item: VoidItem }) {
   );
 }
 
-function Content({ store, row }: { store: ThreadStore; row: Row }) {
+/** The user's message; on the core, written anew from here, the turns after it leave the
+ * conversation. */
+function UserMessage({ row, dropped }: { row: Extract<Row, { kind: "user" }>; dropped: boolean }) {
+  const nav = useContext(ThreadNavContext);
+  const [text, setText] = useState<string>();
+  const [error, setError] = useState<string>();
+  const [sending, setSending] = useState(false);
+  const edit = nav?.edit;
+  if (text !== undefined && edit) {
+    const send = () => {
+      if (!text.trim() || sending) return;
+      setSending(true);
+      setError(undefined);
+      edit(row.turn, text)
+        .then(() => setText(undefined))
+        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+        .finally(() => setSending(false));
+    };
+    return (
+      <form
+        className="mt-5 rounded-lg border border-spark/50 bg-raised p-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          send();
+        }}
+      >
+        <textarea
+          autoFocus
+          aria-label="The message, written anew"
+          value={text}
+          rows={Math.min(12, text.split("\n").length + 1)}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setText(undefined);
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              e.preventDefault();
+              send();
+            }
+          }}
+          className="composer block w-full resize-y rounded-md border border-border bg-panel px-3 py-2 leading-5 outline-none"
+        />
+        <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+          <span className="min-w-0 flex-1 text-muted-foreground">
+            The turns from this one on leave the conversation; what they changed in files stays. Ctrl+Enter sends.
+          </span>
+          {error && <span className="w-full text-err">{error}</span>}
+          <button
+            type="button"
+            onClick={() => setText(undefined)}
+            className="rounded border border-border px-2 py-0.5 hover:bg-panel"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={sending || !text.trim() || nav?.busy}
+            className="rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90 disabled:opacity-40"
+          >
+            Send
+          </button>
+        </div>
+      </form>
+    );
+  }
+  return (
+    <div className="group/user relative mt-5 rounded-lg bg-raised px-4 py-3">
+      <Streamdown className="leading-6">{row.text}</Streamdown>
+      {edit && !dropped && !nav?.busy && (
+        <button
+          type="button"
+          onClick={() => setText(row.text)}
+          className="absolute top-2 right-2 rounded border border-border bg-panel px-2 py-0.5 text-[12px] text-muted-foreground opacity-0 group-hover/user:opacity-100 hover:text-foreground focus:opacity-100"
+        >
+          Edit
+        </button>
+      )}
+    </div>
+  );
+}
+
+function Content({ store, row, dropped }: { store: ThreadStore; row: Row; dropped: boolean }) {
   switch (row.kind) {
     case "user":
+      return <UserMessage row={row} dropped={dropped} />;
+    case "rewound":
       return (
-        <div className="mt-5 rounded-lg bg-raised px-4 py-3">
-          <Streamdown className="leading-6">{row.text}</Streamdown>
+        <div className="mt-2 mb-4 flex items-center gap-3 text-[12px] text-muted-foreground">
+          <span className="h-px flex-1 bg-border" />
+          <span>
+            ↶{" "}
+            {row.from === row.to
+              ? `Turn ${row.from} taken back: what it changed in files stays`
+              : `Turns ${row.from}–${row.to} taken back: what they changed in files stays`}
+          </span>
+          <span className="h-px flex-1 bg-border" />
         </div>
       );
     case "end":
@@ -146,8 +235,10 @@ const RowView = memo(function RowView({
   const [rising] = useState(() => row?.kind === "item" && row.live);
   if (!row) return null;
   const generation = row.kind === "item" ? row.item.generation : undefined;
+  // a turn taken back stays to be read, out of the way
+  const dropped = store.isDropped(index);
   return (
-    <div className={`row group relative mx-auto max-w-3xl px-6 ${rising ? "rise" : ""}`}>
+    <div className={`row group relative mx-auto max-w-3xl px-6 ${rising ? "rise" : ""} ${dropped ? "opacity-45" : ""}`}>
       {onInspect && generation !== undefined && (
         <button
           type="button"
@@ -159,7 +250,7 @@ const RowView = memo(function RowView({
           ⌕
         </button>
       )}
-      <Content store={store} row={row} />
+      <Content store={store} row={row} dropped={dropped} />
     </div>
   );
 });

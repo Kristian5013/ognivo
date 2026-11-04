@@ -55,6 +55,7 @@ fn typescript() -> String {
         ThreadEvents::decl(&cfg),
         Trajectory::decl(&cfg),
         StartTurn::decl(&cfg),
+        EditTurn::decl(&cfg),
         Changes::decl(&cfg),
         ChangedFile::decl(&cfg),
         Accept::decl(&cfg),
@@ -81,9 +82,11 @@ fn typescript() -> String {
         method::<ThreadRef, Trajectory>(&cfg, rpc::THREAD_TRAJECTORY),
         method::<ThreadRef, Done>(&cfg, rpc::THREAD_CLEAR),
         method::<ThreadRef, Done>(&cfg, rpc::THREAD_CLOSE),
+        method::<ThreadRef, Done>(&cfg, rpc::THREAD_DELETE),
         method::<StartTurn, Done>(&cfg, rpc::TURN_START),
         method::<ThreadRef, Done>(&cfg, rpc::TURN_INTERRUPT),
         method::<ThreadRef, Done>(&cfg, rpc::TURN_ANSWER_NOW),
+        method::<EditTurn, Done>(&cfg, rpc::TURN_EDIT),
         method::<ThreadRef, Changes>(&cfg, rpc::CHANGES_LIST),
         method::<Accept, Accepted>(&cfg, rpc::CHANGES_ACCEPT),
         method::<Revert, Reverted>(&cfg, rpc::CHANGES_REVERT),
@@ -111,12 +114,13 @@ fn typescript() -> String {
         rpc::CANCEL
     ));
     out.push_str(&format!(
-        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {}, unsupported: {} }} as const;\n",
+        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {}, unsupported: {}, noTurn: {} }} as const;\n",
         rpc::error::NO_THREAD,
         rpc::error::BUSY,
         rpc::error::NOT_STARTED,
         rpc::error::JOURNAL,
-        rpc::error::UNSUPPORTED
+        rpc::error::UNSUPPORTED,
+        rpc::error::NO_TURN
     ));
     out
 }

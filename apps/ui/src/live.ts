@@ -26,6 +26,8 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
       return [{ type: "generation", generation: toGeneration(e.generation, offset) }];
     case "turn_completed":
       return [{ type: "turn_completed", index: e.turn, end: e.end, why: e.why ?? undefined }];
+    case "thread_rewound":
+      return [{ type: "rewound", turn: e.turn }];
   }
 }
 
