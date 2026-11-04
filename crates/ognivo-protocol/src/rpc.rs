@@ -37,6 +37,7 @@ pub const EVENT: &str = "event";
 /// The core's requests.
 pub const APPROVAL_ASK: &str = "approval/ask";
 pub const RULES_TRUST: &str = "rules/trust";
+pub const MCP_TRUST: &str = "mcp/trust";
 /// The core's notification that a request of its own no longer waits for an answer.
 pub const CANCEL: &str = "$/cancelRequest";
 
@@ -327,6 +328,21 @@ pub struct Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct TrustAnswer {
     pub trust: bool,
+}
+
+/// `mcp/trust`: the project's `.mcp.json` starts servers, each a command of the project's
+/// or a URL; they start once the user trusts exactly them. The answer is `TrustAnswer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpTrustAsked {
+    pub project: String,
+    pub servers: Vec<McpServer>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpServer {
+    pub name: String,
+    /// What starts it: the command line, or the URL.
+    pub command: String,
 }
 
 /// `$/cancelRequest`: the core's request `id` no longer waits for an answer.

@@ -30,6 +30,8 @@ const PROPS_TIMEOUT: Duration = Duration::from_secs(3);
 const LOAD_TIMEOUT: Duration = Duration::from_secs(600);
 /// Steps of a turn, unless the user says.
 pub const MAX_STEPS: u32 = 200;
+/// How long the start waits for an MCP server: `npx` may fetch it first.
+const MCP_START: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Args)]
 pub struct SessionArgs {
@@ -121,10 +123,44 @@ pub struct Connected {
     /// The files with rules, and the rules that could not be used, with why.
     pub rule_files: Vec<String>,
     pub rule_problems: Vec<String>,
+    /// The MCP servers configured for the project; [`Connected::start_mcp`] starts them.
+    pub mcp: ognivo_mcp::Loaded,
     pub opts: AgentOptions,
 }
 
 impl Connected {
+    /// The key under which the user's trust in the project's MCP servers is kept.
+    pub fn mcp_key(&self) -> String {
+        format!("mcp\n{}", self.mcp.pending_key())
+    }
+
+    /// Starts the MCP servers the session may start, the user's and the project's it was
+    /// let start, and gives their tools to the agent. A line for each server and problem,
+    /// and whether it is a warning.
+    pub async fn start_mcp(&mut self) -> Vec<(String, bool)> {
+        let mut lines: Vec<(String, bool)> = self
+            .mcp
+            .problems
+            .iter()
+            .map(|p| (format!("mcp: {p}"), true))
+            .collect();
+        if self.mcp.servers.is_empty() {
+            return lines;
+        }
+        let gateway = ognivo_mcp::Gateway::start(&self.mcp.servers, MCP_START).await;
+        for s in gateway.started() {
+            lines.push(match &s.outcome {
+                Ok(n) => (
+                    format!("mcp {}: {n} tool{}", s.name, if *n == 1 { "" } else { "s" }),
+                    false,
+                ),
+                Err(why) => (format!("mcp {} did not start: {why}", s.name), true),
+            });
+        }
+        self.opts.mcp = Some(Arc::new(gateway));
+        lines
+    }
+
     /// The agent of a new session, kept in `store` from the start.
     pub fn new_agent(
         self,
@@ -334,6 +370,9 @@ impl SessionArgs {
         });
         let changed = changed_files(&root);
         let (home, claude_dir) = user_dirs();
+        let mcp = ognivo_mcp::config::load(&root, home.as_deref(), claude_dir.as_deref(), |v| {
+            std::env::var(v).ok()
+        });
         let loaded = rules::load(&Places {
             root: root.clone(),
             home,
@@ -369,7 +408,9 @@ impl SessionArgs {
                 },
                 writable: None,
                 subagents,
+                mcp: None,
             },
+            mcp,
             changed,
             pending: loaded.pending,
             rule_files: loaded.files,
@@ -557,7 +598,7 @@ fn user_instructions() -> UserInstructions {
 }
 
 /// `$HOME`, canonical, and Claude Code's `CLAUDE_CONFIG_DIR` if it is set.
-fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
+pub fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)

@@ -340,6 +340,48 @@ async fn open(
             );
         }
     }
+    if !s.mcp.pending.is_empty() {
+        let key = s.mcp_key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let asked = rpc::McpTrustAsked {
+                    project: root.display().to_string(),
+                    servers: s
+                        .mcp
+                        .pending
+                        .iter()
+                        .map(|m| rpc::McpServer {
+                            name: m.name.clone(),
+                            command: m.shown(),
+                        })
+                        .collect(),
+                };
+                let answer = hub
+                    .ask(rpc::MCP_TRUST, json!(asked))
+                    .await
+                    .and_then(|v| serde_json::from_value::<rpc::TrustAnswer>(v).ok());
+                let yes = answer.is_some_and(|a| a.trust);
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    notes.push(format!("the answer about the MCP servers is not kept: {e}"));
+                }
+                yes
+            }
+            Err(e) => {
+                notes.push(format!("the session store: {e}"));
+                false
+            }
+        };
+        if trusted {
+            s.mcp.trust();
+        } else {
+            notes.push(
+                "the project's MCP servers do not start: you did not trust them (they are asked about again when .mcp.json changes)"
+                    .into(),
+            );
+        }
+    }
+    notes.extend(s.start_mcp().await.into_iter().map(|(line, _)| line));
     let (limit, planned) = (
         compact::limit(&s.opts.context, s.opts.n_ctx),
         compact::limit(&s.opts.context, None),

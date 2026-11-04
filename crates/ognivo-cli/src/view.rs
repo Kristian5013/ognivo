@@ -300,6 +300,14 @@ impl View {
     fn title(&self, name: &str, arguments: &str, call: Option<&Call>) -> String {
         let what = match call {
             Some(Call::Shell { command, .. }) => return format!("→ $ {}", first_line(command)),
+            Some(Call::Mcp {
+                server,
+                tool,
+                arguments,
+            }) => {
+                let line = format!("→ mcp {server} · {tool} {}", first_line(arguments));
+                return short(&line, LINE_CHARS + 2);
+            }
             Some(Call::Read { path, .. } | Call::Edit { path, .. } | Call::Write { path, .. }) => {
                 self.path(path)
             }
@@ -425,6 +433,7 @@ fn name_of(call: &Call) -> &'static str {
         Call::Grep { .. } => "grep",
         Call::Glob { .. } => "glob",
         Call::Delegate { .. } => "delegate",
+        Call::Mcp { .. } => "mcp",
     }
 }
 

@@ -248,6 +248,8 @@ impl Agent {
                 },
                 writable: task.write.then(|| files.clone()),
                 subagents: None,
+                // a read task changes nothing, and an MCP tool may: they stay the session's
+                mcp: None,
                 ..self.opts.clone()
             };
             let seed = opts.seed;

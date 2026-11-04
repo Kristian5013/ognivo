@@ -218,7 +218,11 @@ end: TurnEnd | null, steps: number | null,
  */
 changed: Array<string>, };
 
-export type Call = { "name": "Read", path: string, offset: number | null, limit: number | null, } | { "name": "Edit", path: string, old: string, new: string, replace_all: boolean, } | { "name": "Write", path: string, content: string, } | { "name": "ApplyPatch", patch: string, } | { "name": "Bash", command: string, timeout_ms: number | null, } | { "name": "Grep", pattern: string, path: string | null, glob: string | null, } | { "name": "Glob", pattern: string, path: string | null, } | { "name": "Task", tasks: Array<Task>, };
+export type Call = { "name": "Read", path: string, offset: number | null, limit: number | null, } | { "name": "Edit", path: string, old: string, new: string, replace_all: boolean, } | { "name": "Write", path: string, content: string, } | { "name": "ApplyPatch", patch: string, } | { "name": "Bash", command: string, timeout_ms: number | null, } | { "name": "Grep", pattern: string, path: string | null, glob: string | null, } | { "name": "Glob", pattern: string, path: string | null, } | { "name": "Task", tasks: Array<Task>, } | { "name": "Mcp", server: string, tool: string, 
+/**
+ * The arguments as the model wrote them, a JSON object.
+ */
+arguments: string, };
 
 export type Task = { title: string, goal: string, context: string | null, write: boolean, files: Array<string>, };
 
@@ -536,6 +540,14 @@ any: boolean, };
 
 export type TrustAnswer = { trust: boolean, };
 
+export type McpTrustAsked = { project: string, servers: Array<McpServer>, };
+
+export type McpServer = { name: string, 
+/**
+ * What starts it: the command line, or the URL.
+ */
+command: string, };
+
 export type Cancel = { id: number, };
 
 /** The core's methods. */
@@ -562,6 +574,7 @@ export type Methods = {
 export type Asks = {
   "approval/ask": { params: ApprovalAsked; result: ApprovalAnswer };
   "rules/trust": { params: TrustAsked; result: TrustAnswer };
+  "mcp/trust": { params: McpTrustAsked; result: TrustAnswer };
 };
 
 export const NOTIFY_EVENT = "event";

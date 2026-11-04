@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 ognivo-core.workspace = true
+ognivo-mcp.workspace = true
 ognivo-models.workspace = true
 ognivo-protocol.workspace = true
 ognivo-store.workspace = true

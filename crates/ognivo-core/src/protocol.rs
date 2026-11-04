@@ -641,6 +641,15 @@ fn call_of(c: &Call) -> p::Call {
                 })
                 .collect(),
         },
+        Call::Mcp {
+            server,
+            tool,
+            arguments,
+        } => p::Call::Mcp {
+            server,
+            tool,
+            arguments,
+        },
     }
 }
 

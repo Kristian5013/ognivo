@@ -247,3 +247,40 @@ test("a message written anew, panels that resize, a session deleted", async () =
     await close();
   }
 });
+
+test("the project's MCP server: trusted, its tool asks and answers", async () => {
+  const { page, project, close } = await launch([
+    call("m1", "mcp__repo__echo", { text: "hello from mcp" }),
+    answer("The server said hello."),
+  ]);
+  const echo = fileURLToPath(new URL("../../../crates/ognivo-mcp/tests/fixtures/echo.py", import.meta.url));
+  writeFileSync(
+    join(project, ".mcp.json"),
+    JSON.stringify({ mcpServers: { repo: { command: "python3", args: ["-I", echo] } } }),
+  );
+  try {
+    await page.getByRole("button", { name: "Start" }).click();
+    // its command shows before it runs
+    const trust = page.getByRole("dialog", { name: "Trust the project's MCP servers" });
+    await expect(trust.getByText(/python3 -I .*echo\.py/)).toBeVisible({ timeout: 30_000 });
+    await trust.getByRole("button", { name: "Start them" }).click();
+    const composer = page.locator("textarea");
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+    await expect(page.getByText("mcp repo: 3 tools")).toBeVisible();
+    await composer.fill("Ask the server to say hello.");
+    await composer.press("Enter");
+
+    // a tool of a server no rule allows asks first
+    const allow = page.getByRole("button", { name: "Allow", exact: true });
+    await allow.waitFor({ timeout: 30_000 });
+    await expect(page.getByText("repo · echo").first()).toBeVisible();
+    await allow.click();
+    await expect(page.getByText("The server said hello.")).toBeVisible({ timeout: 30_000 });
+    const card = page.locator("button", { hasText: "repo · echo" }).first();
+    await card.click();
+    await expect(page.getByText("hello from mcp").last()).toBeVisible();
+    await page.screenshot({ path: "test-results/core-mcp.png" });
+  } finally {
+    await close();
+  }
+});

@@ -258,6 +258,7 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         toolset: Default::default(),
         writable: None,
         subagents: None,
+        mcp: None,
     }
 }
 

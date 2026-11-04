@@ -69,6 +69,12 @@ that is not loaded the router is asked to load. Requests are not pinned to a slo
 into whichever slot the conversation comes to. When the server's slots are all busy, the
 next step goes by priority, the user's agent first, across ognivo sessions too.
 
+MCP servers come from the project's `.mcp.json`, `~/.ognivo/mcp.json` and Claude Code's
+`~/.claude.json`, over stdio or Streamable HTTP: their tools are `mcp__<server>__<tool>` to
+the model, as in Claude Code, and each call asks unless a rule such as `mcp__github` allows
+it. A project's servers start once you trust exactly their commands (`chat` and the GUI ask).
+`ognivo mcp` shows which servers a session here gets, and their tools.
+
 `run --events` writes the session in the clients' event model (`ognivo-protocol`, frozen as
 version 1): what the GUI gets of a session, one JSON event a line.
 

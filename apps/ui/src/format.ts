@@ -41,6 +41,8 @@ export function summary(call: Call): string {
     }
     case "Task":
       return `${call.tasks.length} ${call.tasks.length === 1 ? "task" : "tasks"}: ${call.tasks.map((t) => t.title).join(", ")}`;
+    case "Mcp":
+      return `${call.server} · ${call.tool}`;
   }
 }
 
@@ -54,7 +56,7 @@ export function header(item: ToolItem): string | undefined {
 /** A result without the header line, which the card shows itself. */
 export function body(item: ToolItem): string {
   const text = item.result?.text ?? "";
-  return /^\[(read|edit|write|grep|glob|shell)[: ]/.test(text)
+  return /^\[(read|edit|write|grep|glob|shell|mcp)[: ]/.test(text)
     ? text.slice(text.indexOf("\n") + 1 || text.length)
     : text;
 }

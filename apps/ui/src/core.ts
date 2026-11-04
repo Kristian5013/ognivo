@@ -108,7 +108,7 @@ export class Core {
     } else if (m.method === P.NOTIFY_CANCEL) {
       if (this.asks.delete((m.params as P.Cancel).id)) this.changed();
     } else if (m.method !== undefined && m.id !== undefined) {
-      if (m.method === "approval/ask" || m.method === "rules/trust") {
+      if (m.method === "approval/ask" || m.method === "rules/trust" || m.method === "mcp/trust") {
         this.asks.set(m.id, { id: m.id, method: m.method, params: m.params } as Ask);
         this.changed();
       }

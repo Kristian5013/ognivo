@@ -38,12 +38,22 @@ function Text({ text }: { text: string }) {
   );
 }
 
+/** JSON as it reads best, or the text as it came. */
+function pretty(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function Body({ item }: { item: ToolItem }) {
   const call = item.call;
   if (item.result && item.result.outcome !== "ok") return <Text text={item.result.text} />;
   if (call?.name === "Edit") return <EditDiff path={call.path} before={call.old} after={call.new} />;
   if (call?.name === "Write") return <Text text={call.content} />;
   if (call?.name === "ApplyPatch") return <Text text={call.patch} />;
+  if (call?.name === "Mcp") return <Text text={`${pretty(call.arguments)}\n\n${body(item)}`} />;
   if (!call) return <Text text={JSON.stringify(item.raw, null, 2)} />;
   return <Text text={body(item)} />;
 }
@@ -69,7 +79,7 @@ export function ToolCard({
         className="flex w-full min-w-0 cursor-pointer items-center gap-3 px-3 text-left hover:bg-raised"
       >
         <span className="w-11 shrink-0 font-mono text-[11px] tracking-wide text-spark uppercase">
-          {item.call?.name === "ApplyPatch" ? "Patch" : (item.call?.name ?? item.shown)}
+          {item.call?.name === "ApplyPatch" ? "Patch" : item.call?.name === "Mcp" ? "MCP" : (item.call?.name ?? item.shown)}
         </span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
           {item.call ? summary(item.call) : `${item.shown} ${JSON.stringify(item.raw)}`}

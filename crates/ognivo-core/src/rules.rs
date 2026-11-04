@@ -24,7 +24,9 @@
 //!   its cwd, `~/…` against the home, the value of `--opt=PATH`; `cat .env` meets
 //!   `Read(./.env)`. Paths a shell builds (globs, `grep -r .`) are
 //!   not seen; a command that should never run needs a Bash rule of its own.
-//! - Rules for tools ognivo does not have yet (WebFetch, mcp__…) are kept for later.
+//! - `mcp__server` and `mcp__server__*` match every tool of an MCP server, `mcp__server__tool`
+//!   one; a tool of an MCP server no rule allows asks.
+//! - Rules for tools ognivo does not have yet (WebFetch) are kept for later.
 
 use std::path::{Path, PathBuf};
 
@@ -47,6 +49,7 @@ enum Kind {
     Bash,
     Read,
     Edit,
+    Mcp,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +61,11 @@ enum Pattern {
         prefix: bool,
     },
     Path(Vec<GlobMatcher>),
+    /// A server's tools: all of them, or one.
+    Mcp {
+        server: String,
+        tool: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -272,12 +280,36 @@ fn parse(
         "Read" | "Grep" | "Glob" | "LS" => Kind::Read,
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Kind::Edit,
         "WebFetch" | "WebSearch" | "Task" | "TodoWrite" | "NotebookRead" => return Ok(None),
-        t if t.starts_with("mcp__") => return Ok(None),
+        t if t.starts_with("mcp__") => {
+            if spec.is_some() {
+                return Err("an MCP rule has no parentheses".into());
+            }
+            let rest = &t["mcp__".len()..];
+            let (server, tool) = match rest.split_once("__") {
+                Some((s, "*")) => (s, None),
+                Some((s, t)) => (s, Some(t.to_owned())),
+                None => (rest, None),
+            };
+            if server.is_empty() {
+                return Err("no server".into());
+            }
+            return Ok(Some(Rule {
+                action,
+                kind: Kind::Mcp,
+                pattern: Pattern::Mcp {
+                    server: server.to_owned(),
+                    tool,
+                },
+                text: text.to_owned(),
+                source: source.to_owned(),
+            }));
+        }
         _ => return Err(format!("no tool {tool:?}")),
     };
     let pattern = match (kind, spec.map(str::trim)) {
         (_, None) | (Kind::Bash, Some("*")) => Pattern::Any,
         (_, Some("")) => return Err("empty parentheses".into()),
+        (Kind::Mcp, Some(_)) => return Err("an MCP rule has no parentheses".into()),
         (Kind::Bash, Some(spec)) => {
             let (spec, prefix) = match spec.strip_suffix(":*").or_else(|| spec.strip_suffix(" *")) {
                 Some(head) => (head.trim_end(), true),
@@ -366,6 +398,28 @@ impl Rules {
         self.rules
             .iter()
             .filter(move |r| r.kind == kind && r.action == action)
+    }
+
+    /// A tool of an MCP server: what a rule says, or a question.
+    pub fn mcp(&self, server: &str, tool: &str) -> Ruling {
+        let hit = |action| {
+            self.of(Kind::Mcp, action).find(|r| match &r.pattern {
+                Pattern::Mcp { server: s, tool: t } => {
+                    s == server && t.as_deref().is_none_or(|t| t == tool)
+                }
+                _ => false,
+            })
+        };
+        if let Some(r) = hit(Action::Deny) {
+            return Ruling::Deny(r.named());
+        }
+        if hit(Action::Ask).is_some() {
+            return Ruling::Ask;
+        }
+        if hit(Action::Allow).is_some() {
+            return Ruling::Allow;
+        }
+        Ruling::Ask
     }
 
     /// A shell command run in `cwd`, given the policy's decision on it. `read_only` says
@@ -488,7 +542,7 @@ impl Rule {
                 words: rule,
                 prefix: false,
             } => words == rule.as_slice(),
-            Pattern::Path(_) => false,
+            Pattern::Path(_) | Pattern::Mcp { .. } => false,
         }
     }
 
@@ -496,7 +550,7 @@ impl Rule {
         match &self.pattern {
             Pattern::Any => true,
             Pattern::Path(globs) => globs.iter().any(|g| g.is_match(path)),
-            Pattern::Words { .. } => false,
+            Pattern::Words { .. } | Pattern::Mcp { .. } => false,
         }
     }
 }
@@ -604,6 +658,31 @@ mod tests {
         assert_eq!(r.command_in("echo $(id)", asks, ro), Ruling::Ask);
         let all = rules(&["Bash"], &[], &[]);
         assert_eq!(all.command_in("echo $(id)", asks, ro), Ruling::Allow);
+    }
+
+    #[test]
+    fn an_mcp_tool_meets_its_servers_rules_and_asks_without_one() {
+        let r = rules(
+            &["mcp__github", "mcp__docs__search"],
+            &["mcp__github__merge_pr"],
+            &["mcp__github__delete_repo", "mcp__shell__*"],
+        );
+        assert_eq!(r.mcp("github", "list_issues"), Ruling::Allow);
+        assert_eq!(r.mcp("github", "merge_pr"), Ruling::Ask);
+        assert!(
+            matches!(r.mcp("github", "delete_repo"), Ruling::Deny(why) if why.starts_with("mcp__github__delete_repo"))
+        );
+        assert!(matches!(r.mcp("shell", "run"), Ruling::Deny(_)));
+        assert_eq!(r.mcp("docs", "search"), Ruling::Allow);
+        assert_eq!(r.mcp("docs", "fetch"), Ruling::Ask);
+        assert_eq!(r.mcp("other", "x"), Ruling::Ask);
+        let places = Places {
+            root: PathBuf::from("/p"),
+            home: None,
+            claude_dir: None,
+        };
+        assert!(parse("mcp__github(x)", Action::Allow, "t", &places).is_err());
+        assert!(parse("mcp__", Action::Allow, "t", &places).is_err());
     }
 
     #[test]

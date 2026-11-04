@@ -2,6 +2,7 @@
 //! `core`, which the GUI talks to (docs/architecture.md §3, §10).
 
 mod chat;
+mod mcp;
 mod run;
 mod serve;
 mod session;
@@ -58,6 +59,8 @@ enum Command {
     Sessions(sessions::SessionsArgs),
     /// Serve the GUI: the core, on a Unix socket only you can open
     Core(serve::CoreArgs),
+    /// The MCP servers of this project's sessions, started, with their tools
+    Mcp(mcp::McpArgs),
 }
 
 #[tokio::main]
@@ -112,6 +115,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         Command::Chat(args) => chat::chat(args).await,
         Command::Sessions(args) => sessions::sessions(args),
         Command::Core(args) => serve::serve(args).await,
+        Command::Mcp(args) => mcp::mcp(args).await,
     }
 }
 

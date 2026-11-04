@@ -318,6 +318,37 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
   );
 }
 
+/** The project's `.mcp.json` starts servers, each a command of the project's: they start
+ * once trusted. */
+function McpTrustDialog({ ask, core }: { ask: Extract<Ask, { method: "mcp/trust" }>; core: Core }) {
+  const answer = (trust: boolean) => core.answer<"mcp/trust">(ask.id, { trust });
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50">
+      <div role="dialog" aria-label="Trust the project's MCP servers" className="panel-in w-[560px] rounded-lg border border-border bg-panel p-4">
+        <p className="font-medium">{basename(ask.params.project)}: the project's .mcp.json starts these MCP servers</p>
+        <ul className="my-3 space-y-1 font-mono text-[12px]">
+          {ask.params.servers.map((s) => (
+            <li key={s.name} className="break-all">
+              <span className="text-spark">{s.name}</span>: {s.command}
+            </li>
+          ))}
+        </ul>
+        <p className="mb-3 text-[12px] text-muted-foreground">
+          Each runs on your machine as you. The answer is kept until .mcp.json changes.
+        </p>
+        <div className="flex gap-2 text-[13px]">
+          <button type="button" onClick={() => answer(true)} className="rounded border border-border px-3 py-1 hover:bg-raised">
+            Start them
+          </button>
+          <button type="button" onClick={() => answer(false)} className="rounded border border-border px-3 py-1 hover:bg-raised">
+            Don't
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** The project's settings allow actions without a question: they count once trusted. */
 function TrustDialog({ ask, core }: { ask: Extract<Ask, { method: "rules/trust" }>; core: Core }) {
   const answer = (trust: boolean) => core.answer<"rules/trust">(ask.id, { trust });
@@ -491,6 +522,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const approvals = asks.filter((a): a is ApprovalAsk => a.method === "approval/ask");
   const here = approvals.filter((a) => a.params.thread === selected);
   const trust = asks.find((a): a is Extract<Ask, { method: "rules/trust" }> => a.method === "rules/trust");
+  const mcpTrust = asks.find((a): a is Extract<Ask, { method: "mcp/trust" }> => a.method === "mcp/trust");
   const waiting = new Map<number, number>();
   for (const a of approvals) waiting.set(a.params.thread, (waiting.get(a.params.thread) ?? 0) + 1);
 
@@ -610,7 +642,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
           live={{ core, thread: selected, open: isOpen, version: threadsVersion, asks: here }}
         />
       )}
-      {trust && <TrustDialog ask={trust} core={core} />}
+      {trust ? <TrustDialog ask={trust} core={core} /> : mcpTrust && <McpTrustDialog ask={mcpTrust} core={core} />}
     </div>
   );
 }

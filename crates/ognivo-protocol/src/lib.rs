@@ -242,6 +242,13 @@ pub enum Call {
     Task {
         tasks: Vec<Task>,
     },
+    /// A tool of an MCP server, `mcp__<server>__<tool>` to the model.
+    Mcp {
+        server: String,
+        tool: String,
+        /// The arguments as the model wrote them, a JSON object.
+        arguments: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

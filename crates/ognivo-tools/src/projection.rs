@@ -68,6 +68,13 @@ pub enum Call {
     Delegate {
         tasks: Vec<Task>,
     },
+    /// A tool of an MCP server, by the server's names; the arguments as the model wrote
+    /// them, a JSON object.
+    Mcp {
+        server: String,
+        tool: String,
+        arguments: String,
+    },
 }
 
 /// One task of `delegate`, for one subagent.
@@ -95,6 +102,10 @@ impl Call {
             Call::Grep { .. } => ToolId::Grep,
             Call::Glob { .. } => ToolId::Glob,
             Call::Delegate { .. } => ToolId::Delegate,
+            Call::Mcp { server, tool, .. } => ToolId::Mcp {
+                server: server.clone(),
+                tool: tool.clone(),
+            },
         }
     }
 }

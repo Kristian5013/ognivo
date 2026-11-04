@@ -105,6 +105,17 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             ),
         }
     }
+    if !s.mcp.pending.is_empty() {
+        match store.trusted(&root, &s.mcp_key()) {
+            Ok(Some(true)) => s.mcp.trust(),
+            _ => eprintln!(
+                "· the project's MCP servers do not start: trust them once in ognivo chat"
+            ),
+        }
+    }
+    for (line, _) in s.start_mcp().await {
+        eprintln!("· {line}");
+    }
     let seed = s.opts.seed;
     s.opts.time_limit = a.time_limit.map(Duration::from_secs);
     let (profile, level, model) = (s.profile.clone(), s.level.clone(), s.model.clone());

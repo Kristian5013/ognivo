@@ -351,6 +351,8 @@ pub struct AgentOptions {
     pub writable: Option<Vec<PathBuf>>,
     /// Where the subagents of `delegate` come from.
     pub subagents: Option<Arc<dyn Subagents>>,
+    /// The session's MCP servers, whose tools come after ognivo's.
+    pub mcp: Option<Arc<ognivo_mcp::Gateway>>,
 }
 
 /// The time limit of the running turn.
@@ -473,6 +475,27 @@ impl std::fmt::Debug for Agent {
     }
 }
 
+/// How long an MCP tool may take; a turn's time limit cuts it shorter.
+const MCP_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The tools an agent declares: ognivo's for its family and layout, then those of its MCP
+/// servers, by name.
+fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset) -> Vec<ToolDecl> {
+    let mut tools = projection::declarations_for(family, opts.layout, toolset);
+    if let Some(g) = &opts.mcp {
+        tools.extend(g.tools().iter().map(|t| ToolDecl {
+            name: t.name.clone(),
+            description: if t.description.is_empty() {
+                format!("A tool of the MCP server {}.", t.server)
+            } else {
+                format!("{} (MCP server {})", t.description, t.server)
+            },
+            parameters: t.schema.clone(),
+        }));
+    }
+    tools
+}
+
 /// The fixed instructions of every session. Short on purpose: the reference agents that
 /// work best with small models keep their prefix small (docs/research/2026-10-29). Nothing
 /// of the project is in it, so every session on a server starts with the same tokens and
@@ -535,7 +558,7 @@ impl Agent {
                 ChatMessage::System(system_prompt(opts.layout)),
                 ChatMessage::User(project_context(&opts.root, &prompt_instructions.text)),
             ],
-            tools: projection::declarations_for(family, opts.layout, toolset),
+            tools: tools_of(family, &opts, toolset),
             toolset,
             driver,
             family,
@@ -1405,13 +1428,22 @@ impl Agent {
     ) -> String {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
-        let parsed = projection::parse_for(
-            self.family,
-            self.opts.layout,
-            self.toolset,
-            &call.name,
-            &call.arguments,
-        );
+        // a tool of an MCP server is the server's to check
+        let mcp = self.opts.mcp.as_ref().and_then(|g| g.tool(&call.name));
+        let parsed = match mcp {
+            Some(t) => Ok(Call::Mcp {
+                server: t.server.clone(),
+                tool: t.tool.clone(),
+                arguments: call.arguments.clone(),
+            }),
+            None => projection::parse_for(
+                self.family,
+                self.opts.layout,
+                self.toolset,
+                &call.name,
+                &call.arguments,
+            ),
+        };
         self.emit(
             on,
             AgentEvent::ToolStarted {
@@ -1682,6 +1714,45 @@ impl Agent {
                 }
             }
             Call::Delegate { tasks } => self.delegate(tasks, on).await,
+            Call::Mcp {
+                server,
+                tool: name,
+                arguments,
+            } => {
+                let Some(gateway) = self.opts.mcp.clone() else {
+                    return "[error] this session has no MCP servers".into();
+                };
+                let ruling = self.opts.rules.mcp(&server, &name);
+                // the question is the tool's: allowed for the session, it runs with any
+                // arguments
+                let mut shown: String = arguments.chars().take(300).collect();
+                if shown.len() < arguments.len() {
+                    shown.push('…');
+                }
+                let reason =
+                    format!("an MCP tool, which does what its server does; arguments {shown}");
+                if let Some(refusal) = self
+                    .permit(
+                        tool,
+                        ruling,
+                        &format!("{server} · {name}"),
+                        &reason,
+                        Vec::new(),
+                        on,
+                    )
+                    .await
+                {
+                    return refusal;
+                }
+                let timeout = self
+                    .clock
+                    .as_ref()
+                    .map_or(MCP_TIMEOUT, |c| c.left().min(MCP_TIMEOUT));
+                match gateway.call(tool, &arguments, timeout).await {
+                    Ok(text) => text,
+                    Err(why) => format!("[error] {why}"),
+                }
+            }
             Call::Patch { patch } => {
                 let seen = &self.seen;
                 let planned =
@@ -2161,6 +2232,7 @@ mod tests {
             toolset: Toolset::All,
             writable: None,
             subagents: None,
+            mcp: None,
         }
     }
 

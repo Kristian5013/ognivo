@@ -16,6 +16,7 @@ rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ognivo-mcp.workspace = true
 ognivo-models.workspace = true
 ognivo-protocol.workspace = true
 ognivo-store.workspace = true

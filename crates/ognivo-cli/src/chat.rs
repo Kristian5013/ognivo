@@ -147,6 +147,31 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             untrusted = true;
         }
     }
+    // the project's MCP servers run its commands: they start once trusted
+    let mut mcp_untrusted = false;
+    if !s.mcp.pending.is_empty() {
+        let key = s.mcp_key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let yes = trust_mcp(&screen, &input, &s.mcp.pending).await;
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    screen.line(&format!("· the answer is not kept: {e}"), Paint::Yellow);
+                }
+                yes
+            }
+            Err(e) => {
+                screen.line(&format!("· the session store: {e}"), Paint::Yellow);
+                false
+            }
+        };
+        if trusted {
+            s.mcp.trust();
+        } else {
+            mcp_untrusted = true;
+        }
+    }
+    let mcp_lines = s.start_mcp().await;
     let agent = match &stored {
         Some(row) => s.resumed_agent(row, store, Box::new(approver)),
         None => s.new_agent("chat", &a.session.url, store, Box::new(approver)),
@@ -205,6 +230,16 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     if untrusted {
         screen.line(
             "· the project's allow rules are not used: you did not trust them (they are asked about again when they change)",
+            Paint::Dim,
+        );
+    }
+    for (line, warn) in &mcp_lines {
+        let paint = if *warn { Paint::Yellow } else { Paint::Plain };
+        screen.line(&printable(line), paint);
+    }
+    if mcp_untrusted {
+        screen.line(
+            "· the project's MCP servers do not start: you did not trust them (they are asked about again when .mcp.json changes)",
             Paint::Dim,
         );
     }
@@ -390,6 +425,22 @@ async fn trust(screen: &Screen, input: &Input, pending: &Pending) -> bool {
     }
     matches!(
         input.read("  use them? [y]es [n]o > ").await,
+        Read::Line(line) if answer(&line) == Some(Answer::Yes)
+    )
+}
+
+/// Whether the project's MCP servers may start: each runs a command the project names.
+async fn trust_mcp(screen: &Screen, input: &Input, servers: &[ognivo_mcp::ServerConfig]) -> bool {
+    screen.line(
+        "? the project's .mcp.json starts these MCP servers:",
+        Paint::Bold,
+    );
+    for s in servers {
+        let line = format!("    {}: {}", printable(&s.name), printable(&s.shown()));
+        screen.line(&line, Paint::Plain);
+    }
+    matches!(
+        input.read("  start them? [y]es [n]o > ").await,
         Read::Line(line) if answer(&line) == Some(Answer::Yes)
     )
 }

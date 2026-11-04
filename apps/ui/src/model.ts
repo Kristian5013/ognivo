@@ -15,7 +15,9 @@ export type Call =
   /** gpt-oss's `apply_patch`, in the V4A format. */
   | { name: "ApplyPatch"; patch: string }
   /** `delegate`: tasks for subagents. */
-  | { name: "Task"; tasks: { title: string; write: boolean; files: string[] }[] };
+  | { name: "Task"; tasks: { title: string; write: boolean; files: string[] }[] }
+  /** A tool of an MCP server; the arguments as the model wrote them. */
+  | { name: "Mcp"; server: string; tool: string; arguments: string };
 
 export interface ToolResult {
   /** `refused` when it needed an approval it did not get, `error` when it failed. */
