@@ -112,7 +112,8 @@ export class Core {
         m.method === "approval/ask" ||
         m.method === "rules/trust" ||
         m.method === "mcp/trust" ||
-        m.method === "mcp/sign_in"
+        m.method === "mcp/sign_in" ||
+        m.method === "hooks/trust"
       ) {
         this.asks.set(m.id, { id: m.id, method: m.method, params: m.params } as Ask);
         this.changed();

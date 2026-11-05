@@ -255,6 +255,11 @@ pub enum Call {
     ToolSearch {
         query: String,
     },
+    /// The skill tool: a skill of the user or the project, loaded for the model.
+    Skill {
+        skill: String,
+        arguments: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -264,6 +269,8 @@ pub struct Task {
     pub context: Option<String>,
     pub write: bool,
     pub files: Vec<String>,
+    /// The subagent of `.claude/agents` it went to; `None`: the general-purpose one.
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -5,7 +5,8 @@
 //! The run is kept in the session store like a chat (`ognivo sessions` lists it), the end
 //! event names its session, and `--atif FILE` writes its trajectory in ATIF for Harbor.
 //!
-//! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage;
+//! Exit codes: 0 the model answered; 1 it hit the step limit or got stuck; 2 bad usage (a
+//! command of the user's that could not run among it);
 //! 3 the server failed; 124 the time limit ran out (as with `timeout`); 128 + N stopped by
 //! signal N (TERM from `timeout`, INT from ^C): the turn is dropped, which kills the process
 //! group of a running command, and the end event is still written. Without an answer the
@@ -113,6 +114,15 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             ),
         }
     }
+    for p in &s.hooks.problems {
+        eprintln!("· hook: {p}");
+    }
+    if !s.hooks.pending.is_empty() {
+        match store.trusted(&root, &s.hooks_key()) {
+            Ok(Some(true)) => s.hooks.trust(),
+            _ => eprintln!("· the project's hooks do not run: trust them once in ognivo chat"),
+        }
+    }
     for (line, _) in s.start_mcp().await {
         eprintln!("· {line}");
     }
@@ -187,6 +197,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
             stream.write(out);
         }
     }
+    agent.end_session("other").await;
     if let Some(e) = agent.store_failure() {
         eprintln!("ognivo run: the session store failed: {e}; the session is not saved in full");
     }
@@ -222,6 +233,10 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
                 a.time_limit.unwrap_or_default()
             );
             (124, None, Some("time_limit"))
+        }
+        Ok(TurnEnd::NotRun(why)) => {
+            eprintln!("ognivo run: {why}");
+            (2, None, Some("not_run"))
         }
         Err(e) => {
             eprintln!("ognivo run: {e}");

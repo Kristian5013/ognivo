@@ -26,7 +26,10 @@
 //!   not seen; a command that should never run needs a Bash rule of its own.
 //! - `mcp__server` and `mcp__server__*` match every tool of an MCP server, `mcp__server__tool`
 //!   one; a tool of an MCP server no rule allows asks.
-//! - Rules for tools ognivo does not have yet (WebFetch) are kept for later.
+//! - A skill's `allowed-tools` are allow rules for the turn that runs it
+//!   ([`Rules::activate`]); a project's skill's wait for trust with the project's other
+//!   allow rules.
+//! - Rules for tools ognivo does not have yet (WebFetch, `Skill(name)`) are kept for later.
 
 use std::path::{Path, PathBuf};
 
@@ -77,6 +80,8 @@ pub struct Rule {
     pub text: String,
     /// The file it came from, as the user names it: `~/.ognivo/config.toml`.
     pub source: String,
+    /// The skill whose turn it counts in, for a rule of a skill's `allowed-tools`.
+    skill: Option<String>,
 }
 
 impl Rule {
@@ -91,6 +96,8 @@ pub struct Rules {
     rules: Vec<Rule>,
     /// For `~/` in a command's arguments.
     home: Option<PathBuf>,
+    /// The skills run in this turn, whose rules count.
+    active: Vec<String>,
 }
 
 /// The project's allow rules, waiting for the user's trust.
@@ -279,7 +286,8 @@ fn parse(
         "Bash" => Kind::Bash,
         "Read" | "Grep" | "Glob" | "LS" => Kind::Read,
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Kind::Edit,
-        "WebFetch" | "WebSearch" | "Task" | "TodoWrite" | "NotebookRead" => return Ok(None),
+        "WebFetch" | "WebSearch" | "Task" | "Agent" | "TodoWrite" | "NotebookRead" | "Skill"
+        | "SlashCommand" => return Ok(None),
         t if t.starts_with("mcp__") => {
             if spec.is_some() {
                 return Err("an MCP rule has no parentheses".into());
@@ -302,6 +310,7 @@ fn parse(
                 },
                 text: text.to_owned(),
                 source: source.to_owned(),
+                skill: None,
             }));
         }
         _ => return Err(format!("no tool {tool:?}")),
@@ -331,7 +340,30 @@ fn parse(
         pattern,
         text: text.to_owned(),
         source: source.to_owned(),
+        skill: None,
     }))
+}
+
+/// The allow rules of a skill's `allowed-tools`, which count in a turn that runs the skill
+/// `skill` ([`Rules::activate`]), and the texts that are not rules, with why.
+pub fn for_skill(
+    texts: &[String],
+    skill: &str,
+    source: &str,
+    places: &Places,
+) -> (Vec<Rule>, Vec<String>) {
+    let (mut rules, mut problems) = (Vec::new(), Vec::new());
+    for text in texts {
+        match parse(text, Action::Allow, source, places) {
+            Ok(Some(mut rule)) => {
+                rule.skill = Some(skill.to_owned());
+                rules.push(rule);
+            }
+            Ok(None) => {}
+            Err(why) => problems.push(format!("{text} in {source}: {why}")),
+        }
+    }
+    (rules, problems)
 }
 
 /// The globs a path rule matches: the path, and what is under it when it has no wildcards.
@@ -389,10 +421,40 @@ impl Rules {
         Ok(rules)
     }
 
+    /// Rules that ask about what `texts` name: a filter that meets a command when it meets
+    /// any part of it, as a hook's `if`.
+    pub fn asking(texts: &[&str], source: &str) -> Result<Rules, String> {
+        let places = Places::default();
+        let mut rules = Rules::default();
+        for text in texts {
+            rules
+                .rules
+                .extend(parse(text, Action::Ask, source, &places)?);
+        }
+        Ok(rules)
+    }
+
     /// Adds the project's allow rules the user trusted.
     pub fn trust(&mut self, pending: Pending) {
-        self.rules.extend(pending.rules);
+        self.add(pending.rules);
+    }
+
+    /// Adds rules that need no trust: those of the user's skills.
+    pub fn add(&mut self, rules: Vec<Rule>) {
+        self.rules.extend(rules);
         self.order();
+    }
+
+    /// The rules of the skill `skill` count until [`Rules::deactivate`]: the turn runs it.
+    pub fn activate(&mut self, skill: &str) {
+        if !self.active.iter().any(|s| s == skill) {
+            self.active.push(skill.to_owned());
+        }
+    }
+
+    /// The turn ended: no skill's rules count.
+    pub fn deactivate(&mut self) {
+        self.active.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -408,9 +470,17 @@ impl Rules {
         });
     }
 
+    /// The rules in force: a skill's only in a turn that runs it.
+    fn live(&self) -> impl Iterator<Item = &Rule> {
+        self.rules.iter().filter(|r| {
+            r.skill
+                .as_ref()
+                .is_none_or(|s| self.active.iter().any(|a| a == s))
+        })
+    }
+
     fn of(&self, kind: Kind, action: Action) -> impl Iterator<Item = &Rule> {
-        self.rules
-            .iter()
+        self.live()
             .filter(move |r| r.kind == kind && r.action == action)
     }
 
@@ -471,7 +541,7 @@ impl Rules {
             })
             .collect();
         let named = |action| {
-            self.rules.iter().find(|r| {
+            self.live().find(|r| {
                 r.kind != Kind::Bash
                     && r.action == action
                     && paths.iter().any(|p| r.matches_path(p))
@@ -538,8 +608,7 @@ impl Rules {
 
     /// Whether grep and glob leave out this file: a deny or ask rule names it.
     pub fn hides(&self, path: &Path) -> bool {
-        self.rules
-            .iter()
+        self.live()
             .any(|r| r.kind == Kind::Read && r.action != Action::Allow && r.matches_path(path))
     }
 }
@@ -618,6 +687,29 @@ mod tests {
         }
         rules.order();
         rules
+    }
+
+    #[test]
+    fn a_skills_rules_count_only_in_a_turn_that_runs_it() {
+        let places = Places {
+            root: PathBuf::from("/p"),
+            home: Some(PathBuf::from("/h")),
+            claude_dir: None,
+        };
+        let texts = ["Bash(git add *)", "Nope(", "Skill(x)"].map(String::from);
+        let (skill, problems) = for_skill(&texts, "commit", ".claude/commands/commit.md", &places);
+        assert_eq!(
+            problems,
+            ["Nope( in .claude/commands/commit.md: a rule in parentheses ends with `)`"]
+        );
+        let mut rules = Rules::default();
+        rules.add(skill);
+        let add = |r: &Rules| r.command("git add src", Path::new("/p"), Decision::Ask, |_| false);
+        assert_eq!(add(&rules), Ruling::Ask);
+        rules.activate("commit");
+        assert_eq!(add(&rules), Ruling::Allow);
+        rules.deactivate();
+        assert_eq!(add(&rules), Ruling::Ask);
     }
 
     #[test]

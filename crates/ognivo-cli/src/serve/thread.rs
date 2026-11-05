@@ -382,6 +382,49 @@ async fn open(
             );
         }
     }
+    if !s.hooks.pending.is_empty() {
+        let key = s.hooks_key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let asked = rpc::HooksTrustAsked {
+                    project: root.display().to_string(),
+                    hooks: s
+                        .hooks
+                        .pending
+                        .iter()
+                        .map(|h| rpc::HookShown {
+                            hook: h.shown(),
+                            source: h.source.clone(),
+                        })
+                        .collect(),
+                };
+                let answer = hub
+                    .ask(rpc::HOOKS_TRUST, json!(asked))
+                    .await
+                    .and_then(|v| serde_json::from_value::<rpc::TrustAnswer>(v).ok());
+                let yes = answer.is_some_and(|a| a.trust);
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    notes.push(format!("the answer about the hooks is not kept: {e}"));
+                }
+                yes
+            }
+            Err(e) => {
+                notes.push(format!("the session store: {e}"));
+                false
+            }
+        };
+        if trusted {
+            s.hooks.trust();
+        } else {
+            notes.push(
+                "the project's hooks do not run: you did not trust them (they are asked about again when they change)"
+                    .into(),
+            );
+        }
+    }
+    notes.extend(s.hooks.problems.iter().map(|p| format!("hook {p}")));
+    notes.extend(s.skill_problems.iter().map(|p| format!("skill {p}")));
     let mut started: Vec<String> = s
         .start_mcp()
         .await
@@ -669,6 +712,7 @@ impl Actor {
             let _ = answer.0.send(answer.1);
         };
         lock(&self.hub.threads).remove(&self.thread.0);
+        self.agent.end_session("other").await;
         self.agent.close();
         if let Some(reply) = closed {
             let _ = reply.send(done());

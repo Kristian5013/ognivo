@@ -116,6 +116,8 @@ function toCall(c: P.Call): Call | undefined {
       return { name: "Mcp", server: c.server, tool: c.tool, arguments: c.arguments };
     case "ToolSearch":
       return { name: "ToolSearch", query: c.query };
+    case "Skill":
+      return { name: "Skill", skill: c.skill, arguments: c.arguments ?? undefined };
   }
 }
 

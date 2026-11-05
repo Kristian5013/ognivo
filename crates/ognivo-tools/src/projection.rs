@@ -79,6 +79,12 @@ pub enum Call {
     ToolSearch {
         query: String,
     },
+    /// A skill of the user or the project, loaded for the model (Claude Code's `Skill`).
+    Skill {
+        name: String,
+        /// What it should work on, as the words after `/name` would be.
+        arguments: Option<String>,
+    },
 }
 
 /// One task of `delegate`, for one subagent.
@@ -93,6 +99,8 @@ pub struct Task {
     pub write: bool,
     /// For a write task the files it may change; for a read task where to start.
     pub files: Vec<String>,
+    /// The subagent of `.claude/agents` to give it to; `None`: the general-purpose one.
+    pub agent: Option<String>,
 }
 
 impl Call {
@@ -111,6 +119,7 @@ impl Call {
                 tool: tool.clone(),
             },
             Call::ToolSearch { .. } => ToolId::ToolSearch,
+            Call::Skill { .. } => ToolId::Skill,
         }
     }
 }
@@ -235,7 +244,7 @@ fn delegate_parameters() -> Value {
 }
 
 /// `delegate` by the name each family knows such a tool by: Claude Code's for Qwen.
-fn delegate_name(family: Family) -> &'static str {
+pub fn delegate_name(family: Family) -> &'static str {
     match family {
         Family::QwenXml => "Task",
         Family::Harmony | Family::Gemma4 => "delegate",
@@ -858,6 +867,14 @@ pub fn declarations_for(family: Family, layout: Layout, toolset: Toolset) -> Vec
     decls
 }
 
+/// The tool a model-facing name stands for in `family` and `layout`.
+pub fn id_of(family: Family, layout: Layout, name: &str) -> Option<ToolId> {
+    table(family, layout)
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.id.clone())
+}
+
 /// The model-facing name of a tool, for messages about it.
 pub fn name_of(family: Family, layout: Layout, id: &ToolId) -> Option<&'static str> {
     table(family, layout)
@@ -1084,6 +1101,7 @@ fn delegate(tool: &str, arguments: &str) -> Result<Call, ArgError> {
             context: text("context"),
             write,
             files,
+            agent: text("agent"),
         });
     }
     Ok(Call::Delegate { tasks })
@@ -1222,6 +1240,7 @@ mod tests {
                         context: None,
                         write: false,
                         files: vec!["src".into()],
+                        agent: None,
                     },
                     Task {
                         title: "Rename".into(),
@@ -1229,6 +1248,7 @@ mod tests {
                         context: Some("x is in a.rs".into()),
                         write: true,
                         files: vec!["src/a.rs".into()],
+                        agent: None,
                     },
                 ]
             }

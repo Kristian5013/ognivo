@@ -346,6 +346,10 @@ impl View {
                 .collect::<Vec<_>>()
                 .join(", "),
             Some(Call::ToolSearch { query }) => format!("«{query}»"),
+            Some(Call::Skill { name, arguments }) => match arguments {
+                Some(a) if !a.trim().is_empty() => format!("{name} «{a}»"),
+                _ => name.clone(),
+            },
             None => arguments.to_owned(),
         };
         format!("→ {name} {}", short(&what, LINE_CHARS))
@@ -436,6 +440,7 @@ fn name_of(call: &Call) -> &'static str {
         Call::Delegate { .. } => "delegate",
         Call::Mcp { .. } => "mcp",
         Call::ToolSearch { .. } => "tool_search",
+        Call::Skill { .. } => "skill",
     }
 }
 

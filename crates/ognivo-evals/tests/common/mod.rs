@@ -259,6 +259,10 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         writable: None,
         subagents: None,
         mcp: None,
+        skills: Default::default(),
+        hooks: Default::default(),
+        agents: Default::default(),
+        only: None,
     }
 }
 

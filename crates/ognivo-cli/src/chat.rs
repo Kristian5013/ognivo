@@ -123,6 +123,8 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     let answer_now = s.answer_now.take();
     let rule_files = std::mem::take(&mut s.rule_files);
     let rule_problems = std::mem::take(&mut s.rule_problems);
+    let skill_problems = std::mem::take(&mut s.skill_problems);
+    let skills_line = crate::session::skills_line(&s.opts.skills);
     let mut untrusted = false;
     if let Some(pending) = s.pending.take() {
         let key = pending.key();
@@ -171,6 +173,32 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             mcp_untrusted = true;
         }
     }
+    // the project's hooks run its commands too
+    let mut hooks_untrusted = false;
+    if !s.hooks.pending.is_empty() {
+        let key = s.hooks_key();
+        let trusted = match store.trusted(&root, &key) {
+            Ok(Some(answer)) => answer,
+            Ok(None) => {
+                let yes = trust_hooks(&screen, &input, &s.hooks.pending).await;
+                if let Err(e) = store.set_trusted(&root, &key, yes) {
+                    screen.line(&format!("· the answer is not kept: {e}"), Paint::Yellow);
+                }
+                yes
+            }
+            Err(e) => {
+                screen.line(&format!("· the session store: {e}"), Paint::Yellow);
+                false
+            }
+        };
+        if trusted {
+            s.hooks.trust();
+        } else {
+            hooks_untrusted = true;
+        }
+    }
+    let hook_files = s.hooks.files.clone();
+    let hook_problems = s.hooks.problems.clone();
     let mut mcp_lines = s.start_mcp().await;
     // a remote server that wants a sign-in: now, in the browser, if the user says so
     let mut signed = false;
@@ -254,6 +282,25 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     for p in &rule_problems {
         screen.line(&format!("· not a rule: {}", printable(p)), Paint::Yellow);
     }
+    if let Some(line) = &skills_line {
+        screen.line(&printable(line), Paint::Plain);
+    }
+    for p in &skill_problems {
+        screen.line(&format!("· skill {}", printable(p)), Paint::Yellow);
+    }
+    if !hook_files.is_empty() {
+        let line = format!("hooks {}", printable(&hook_files.join(", ")));
+        screen.line(&line, Paint::Plain);
+    }
+    for p in &hook_problems {
+        screen.line(&format!("· hook {}", printable(p)), Paint::Yellow);
+    }
+    if hooks_untrusted {
+        screen.line(
+            "· the project's hooks do not run: you did not trust them (they are asked about again when they change)",
+            Paint::Dim,
+        );
+    }
     if untrusted {
         screen.line(
             "· the project's allow rules are not used: you did not trust them (they are asked about again when they change)",
@@ -310,6 +357,9 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Entry::Message(text) => text,
             Entry::Help => {
                 screen.line(HELP, Paint::Plain);
+                for line in commands_help(&agent) {
+                    screen.line(&printable(&line), Paint::Plain);
+                }
                 continue;
             }
             Entry::Clear => {
@@ -331,6 +381,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 continue;
             }
             Entry::Exit => {
+                agent.end_session("prompt_input_exit").await;
                 if let Some(id) = agent.close() {
                     screen.line(
                         &format!("· session {id} is kept: ognivo chat --resume {id}"),
@@ -468,6 +519,22 @@ async fn trust_mcp(screen: &Screen, input: &Input, servers: &[ognivo_mcp::Server
     }
     matches!(
         input.read("  start them? [y]es [n]o > ").await,
+        Read::Line(line) if answer(&line) == Some(Answer::Yes)
+    )
+}
+
+/// Whether the project's hooks may run: they are its commands.
+async fn trust_hooks(screen: &Screen, input: &Input, hooks: &[ognivo_core::hooks::Hook]) -> bool {
+    screen.line(
+        "? the project's settings run these commands on the agent's events:",
+        Paint::Bold,
+    );
+    for h in hooks {
+        let line = format!("    {} ({})", printable(&h.shown()), printable(&h.source));
+        screen.line(&line, Paint::Plain);
+    }
+    matches!(
+        input.read("  run them? [y]es [n]o > ").await,
         Read::Line(line) if answer(&line) == Some(Answer::Yes)
     )
 }
@@ -725,11 +792,39 @@ async fn confirmed(screen: &Screen, input: &Input, name: &str) -> bool {
     )
 }
 
+/// The user's commands and skills, for `/help`: `/name hint  what it does`.
+fn commands_help(agent: &Agent) -> Vec<String> {
+    let mut lines: Vec<String> = agent
+        .skills()
+        .all()
+        .iter()
+        .filter(|s| s.user_invocable)
+        .map(|s| {
+            let mut line = format!("  /{}", s.name);
+            if let Some(hint) = &s.argument_hint {
+                line.push(' ');
+                line.push_str(hint);
+            }
+            let about: String = s.description.chars().take(80).collect();
+            if !about.is_empty() {
+                line.push_str("  ");
+                line.push_str(&about);
+            }
+            line
+        })
+        .collect();
+    if !lines.is_empty() {
+        lines.insert(0, "commands and skills of the user and the project:".into());
+    }
+    lines
+}
+
 fn why(end: &TurnEnd, max_steps: u32) -> String {
     match end {
         TurnEnd::StepLimit(_) => format!("the step limit ({max_steps}) was reached"),
         TurnEnd::Stuck(why) => why.clone(),
         TurnEnd::TimeLimit => "the time limit ran out".to_owned(),
+        TurnEnd::NotRun(why) => why.clone(),
         TurnEnd::Answer(_) => "answered".to_owned(),
     }
 }

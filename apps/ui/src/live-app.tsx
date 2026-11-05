@@ -349,6 +349,37 @@ function McpTrustDialog({ ask, core }: { ask: Extract<Ask, { method: "mcp/trust"
   );
 }
 
+/** The project's settings run commands on the agent's events (Claude Code's hooks): they run
+ * once trusted. */
+function HooksTrustDialog({ ask, core }: { ask: Extract<Ask, { method: "hooks/trust" }>; core: Core }) {
+  const answer = (trust: boolean) => core.answer<"hooks/trust">(ask.id, { trust });
+  return (
+    <div className="fixed inset-0 z-10 flex items-center justify-center bg-black/50">
+      <div role="dialog" aria-label="Trust the project's hooks" className="panel-in w-[560px] rounded-lg border border-border bg-panel p-4">
+        <p className="font-medium">{basename(ask.params.project)}: the project's settings run these commands on the agent's events</p>
+        <ul className="my-3 space-y-1 font-mono text-[12px]">
+          {ask.params.hooks.map((h) => (
+            <li key={`${h.source}:${h.hook}`} className="break-all">
+              {h.hook} <span className="text-muted-foreground">({h.source})</span>
+            </li>
+          ))}
+        </ul>
+        <p className="mb-3 text-[12px] text-muted-foreground">
+          Each runs on your machine as you. The answer is kept until the hooks change.
+        </p>
+        <div className="flex gap-2 text-[13px]">
+          <button type="button" onClick={() => answer(true)} className="rounded border border-border px-3 py-1 hover:bg-raised">
+            Run them
+          </button>
+          <button type="button" onClick={() => answer(false)} className="rounded border border-border px-3 py-1 hover:bg-raised">
+            Don't
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** A remote MCP server wants the user to sign in: yes opens the browser on its page, and
  * the thread starts once the browser comes back. */
 function McpSignInDialog({ ask, core }: { ask: Extract<Ask, { method: "mcp/sign_in" }>; core: Core }) {
@@ -552,6 +583,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const here = approvals.filter((a) => a.params.thread === selected);
   const trust = asks.find((a): a is Extract<Ask, { method: "rules/trust" }> => a.method === "rules/trust");
   const mcpTrust = asks.find((a): a is Extract<Ask, { method: "mcp/trust" }> => a.method === "mcp/trust");
+  const hooksTrust = asks.find((a): a is Extract<Ask, { method: "hooks/trust" }> => a.method === "hooks/trust");
   const mcpSignIn = asks.find((a): a is Extract<Ask, { method: "mcp/sign_in" }> => a.method === "mcp/sign_in");
   const waiting = new Map<number, number>();
   for (const a of approvals) waiting.set(a.params.thread, (waiting.get(a.params.thread) ?? 0) + 1);
@@ -676,6 +708,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
         <TrustDialog ask={trust} core={core} />
       ) : mcpTrust ? (
         <McpTrustDialog ask={mcpTrust} core={core} />
+      ) : hooksTrust ? (
+        <HooksTrustDialog ask={hooksTrust} core={core} />
       ) : (
         mcpSignIn && <McpSignInDialog key={mcpSignIn.id} ask={mcpSignIn} core={core} />
       )}

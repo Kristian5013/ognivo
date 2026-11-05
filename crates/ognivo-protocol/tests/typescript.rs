@@ -74,6 +74,8 @@ fn typescript() -> String {
         McpServer::decl(&cfg),
         McpSignInAsked::decl(&cfg),
         SignInAnswer::decl(&cfg),
+        HooksTrustAsked::decl(&cfg),
+        HookShown::decl(&cfg),
         Cancel::decl(&cfg),
     ];
     // what a client may call, and what the core may ask it
@@ -100,6 +102,7 @@ fn typescript() -> String {
         method::<TrustAsked, TrustAnswer>(&cfg, rpc::RULES_TRUST),
         method::<McpTrustAsked, TrustAnswer>(&cfg, rpc::MCP_TRUST),
         method::<McpSignInAsked, SignInAnswer>(&cfg, rpc::MCP_SIGN_IN),
+        method::<HooksTrustAsked, TrustAnswer>(&cfg, rpc::HOOKS_TRUST),
     ];
     let mut out = String::from(
         "// The event model of ognivo, generated from crates/ognivo-protocol: edit the Rust types,\n// then `OGNIVO_BLESS=1 cargo test -p ognivo-protocol` writes this again.\n\n",

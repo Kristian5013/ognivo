@@ -14,6 +14,7 @@ use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
+use ognivo_core::skills::{self, Scope, Skills};
 use ognivo_models::llama::{LlamaServer, RouterModel};
 use ognivo_models::{
     AnswerNow, ChatDriver, Endpoint, Family, ModelDriver, ModelProfile, NativeDriver, Priority,
@@ -128,6 +129,10 @@ pub struct Connected {
     /// The files with rules, and the rules that could not be used, with why.
     pub rule_files: Vec<String>,
     pub rule_problems: Vec<String>,
+    /// The skill files that could not be used, with why.
+    pub skill_problems: Vec<String>,
+    /// The hooks of the settings; the project's run once trusted ([`Connected::hooks_key`]).
+    pub hooks: ognivo_core::hooks::Loaded,
     /// The MCP servers configured for the project; [`Connected::start_mcp`] starts them.
     pub mcp: ognivo_mcp::Loaded,
     mcp_tools: ognivo_mcp::Listing,
@@ -137,6 +142,11 @@ pub struct Connected {
 }
 
 impl Connected {
+    /// The key under which the user's trust in the project's hooks is kept.
+    pub fn hooks_key(&self) -> String {
+        self.hooks.pending_key()
+    }
+
     /// The key under which the user's trust in the project's MCP servers is kept.
     pub fn mcp_key(&self) -> String {
         format!("mcp\n{}", self.mcp.pending_key())
@@ -213,7 +223,7 @@ impl Connected {
 
     /// The agent of a new session, kept in `store` from the start.
     pub fn new_agent(
-        self,
+        mut self,
         kind: &str,
         url: &str,
         store: Store,
@@ -231,6 +241,7 @@ impl Connected {
             seed: self.opts.seed,
         };
         let session = Session::create(store, &new).map_err(store_failure)?;
+        self.opts.hooks = Arc::new(self.hooks.hooks.clone());
         let mut agent = Agent::new(self.driver, self.family, approver, self.opts);
         agent.keep_in(session);
         Ok(agent)
@@ -247,6 +258,7 @@ impl Connected {
         let (session, left) = Session::open(store, row.id).map_err(Failure::usage)?;
         let known: Vec<PathBuf> = left.journal.files.iter().map(|f| f.path.clone()).collect();
         self.opts.workspace = state(self.changed.as_deref(), &known);
+        self.opts.hooks = Arc::new(self.hooks.hooks.clone());
         Ok(Agent::resume(
             self.driver,
             self.family,
@@ -256,6 +268,44 @@ impl Connected {
             left,
         ))
     }
+}
+
+/// The rules of the skills' `allowed-tools`: the user's count, the project's wait for trust
+/// with the project's other allow rules.
+fn add_skill_rules(skills: &Skills, places: &Places, loaded: &mut rules::Loaded) {
+    for s in skills.all() {
+        let (found, problems) = rules::for_skill(&s.allowed_tools, &s.name, &s.shown, places);
+        loaded.problems.extend(problems);
+        if found.is_empty() {
+            continue;
+        }
+        loaded.files.push(format!("{} ({})", s.shown, found.len()));
+        match (s.scope, &mut loaded.pending) {
+            (Scope::User, _) => loaded.rules.add(found),
+            (Scope::Project, Some(pending)) => pending.rules.extend(found),
+            (Scope::Project, None) => loaded.pending = Some(Pending { rules: found }),
+        }
+    }
+}
+
+/// What a session has of skills, for the lines at its start: the names, and those the user
+/// runs as `/name`.
+pub fn skills_line(skills: &Skills) -> Option<String> {
+    if skills.all().is_empty() {
+        return None;
+    }
+    let names: Vec<String> = skills
+        .all()
+        .iter()
+        .map(|s| {
+            if s.user_invocable {
+                format!("/{}", s.name)
+            } else {
+                s.name.clone()
+            }
+        })
+        .collect();
+    Some(format!("skills {}", names.join(", ")))
 }
 
 impl SessionArgs {
@@ -424,11 +474,18 @@ impl SessionArgs {
             std::env::var(v).ok()
         });
         let mcp_signed = home.as_deref().map(ognivo_mcp::oauth::credentials_dir);
-        let loaded = rules::load(&Places {
+        let places = Places {
             root: root.clone(),
             home,
             claude_dir,
-        });
+        };
+        let mut loaded = rules::load(&places);
+        let skills = skills::load(&places);
+        add_skill_rules(&skills, &places, &mut loaded);
+        let hooks = ognivo_core::hooks::load(&places);
+        let agents = ognivo_core::agents::load(&places);
+        let mut skill_problems = skills.problems.clone();
+        skill_problems.extend(agents.problems.iter().map(|p| format!("(subagent) {p}")));
         Ok(Connected {
             driver,
             model,
@@ -460,6 +517,10 @@ impl SessionArgs {
                 writable: None,
                 subagents,
                 mcp: None,
+                skills,
+                hooks: Arc::default(),
+                agents,
+                only: None,
             },
             mcp,
             mcp_tools: self.mcp_tools,
@@ -468,6 +529,8 @@ impl SessionArgs {
             pending: loaded.pending,
             rule_files: loaded.files,
             rule_problems: loaded.problems,
+            skill_problems,
+            hooks,
         })
     }
 

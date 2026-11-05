@@ -192,6 +192,9 @@ impl Agent {
     ) -> Agent {
         let mut agent = Agent::new(driver, family, approver, opts);
         agent.messages[0] = ChatMessage::System(subagent_prompt(agent.opts.layout));
+        // its stop is a SubagentStop, and it starts no session of its own
+        agent.subagent = Some("general-purpose".into());
+        agent.session_start = None;
         agent
     }
 
@@ -213,6 +216,24 @@ impl Agent {
         let Some(subagents) = self.opts.subagents.clone() else {
             return "[error] this session has no subagents".to_owned();
         };
+        let unknown = tasks
+            .iter()
+            .filter_map(|t| t.agent.as_deref())
+            .find(|a| *a != "general-purpose" && self.opts.agents.get(a).is_none());
+        if let Some(name) = unknown {
+            let mut names: Vec<&str> = self
+                .opts
+                .agents
+                .all
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect();
+            names.push("general-purpose");
+            return format!(
+                "[error] there is no subagent {name}; the subagents are: {}",
+                names.join(", ")
+            );
+        }
         // they must end before the turn's limit
         let time_limit = match self.room() {
             Ok(room) => room,
@@ -232,8 +253,25 @@ impl Agent {
                 .iter()
                 .map(|f| files::resolve(&self.opts.root, f))
                 .collect();
+            let template = task
+                .agent
+                .as_deref()
+                .and_then(|a| self.opts.agents.get(a))
+                .cloned();
+            // a template that changes no file makes a read task of any
+            let write = task.write && template.as_ref().is_none_or(|t| t.edits());
+            let task = &Task {
+                write,
+                ..task.clone()
+            };
             let opts = AgentOptions {
-                max_steps: SUBAGENT_STEPS.min(self.opts.max_steps),
+                max_steps: template
+                    .as_ref()
+                    .and_then(|t| t.max_turns)
+                    .unwrap_or(SUBAGENT_STEPS)
+                    .min(SUBAGENT_STEPS)
+                    .min(self.opts.max_steps),
+                only: template.as_ref().map(|t| t.tools.clone()),
                 seed: self
                     .opts
                     .seed
@@ -241,15 +279,21 @@ impl Agent {
                     .wrapping_add(7919 * (i as u32 + 1)),
                 workspace,
                 time_limit,
-                toolset: if task.write {
+                toolset: if write {
                     Toolset::All
                 } else {
                     Toolset::Reading
                 },
-                writable: task.write.then(|| files.clone()),
+                writable: write.then(|| files.clone()),
                 subagents: None,
                 // a read task changes nothing, and an MCP tool may: they stay the session's
                 mcp: None,
+                // the skills the main agent's turn runs are its own
+                rules: {
+                    let mut rules = self.opts.rules.clone();
+                    rules.deactivate();
+                    rules
+                },
                 ..self.opts.clone()
             };
             let seed = opts.seed;
@@ -259,6 +303,9 @@ impl Agent {
                 who: task.title.clone(),
             });
             let mut sub = Agent::subagent(subagents.driver(), self.family, approver, opts);
+            if let Some(t) = &template {
+                sub.subagent = Some(t.name.clone());
+            }
             if let Some(session) = self
                 .session
                 .as_mut()
@@ -277,7 +324,16 @@ impl Agent {
                 .into_iter()
                 .map(|f| locks.entry(f).or_default().clone())
                 .collect();
-            let brief = brief(task);
+            let brief = match &template {
+                Some(t) => format!(
+                    "[ognivo] You work as the subagent {} of {}, which is:\n\n{}\n\n{}",
+                    t.name,
+                    t.shown,
+                    t.body,
+                    brief(task)
+                ),
+                None => brief(task),
+            };
             self.emit(
                 on,
                 AgentEvent::SubagentStarted {
@@ -390,6 +446,7 @@ impl Agent {
                 "time_limit",
                 "the turn's time limit ran out before its report.".to_owned(),
             ),
+            Ok(TurnEnd::NotRun(why)) => ("not_run", format!("did not start: {why}.")),
             Err(e) => ("error", format!("failed: {e}.")),
         };
         let changed: Vec<String> = changes

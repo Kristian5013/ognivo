@@ -39,6 +39,7 @@ pub const APPROVAL_ASK: &str = "approval/ask";
 pub const RULES_TRUST: &str = "rules/trust";
 pub const MCP_TRUST: &str = "mcp/trust";
 pub const MCP_SIGN_IN: &str = "mcp/sign_in";
+pub const HOOKS_TRUST: &str = "hooks/trust";
 /// The core's notification that a request of its own no longer waits for an answer.
 pub const CANCEL: &str = "$/cancelRequest";
 
@@ -358,6 +359,22 @@ pub struct McpSignInAsked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct SignInAnswer {
     pub sign_in: bool,
+}
+
+/// `hooks/trust`: the project's settings run commands on the agent's events (Claude Code's
+/// hooks); they run once the user trusts exactly them. The answer is `TrustAnswer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HooksTrustAsked {
+    pub project: String,
+    pub hooks: Vec<HookShown>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HookShown {
+    /// The event and the matcher, then the command: `PreToolUse Bash: ./check.sh`.
+    pub hook: String,
+    /// The settings file it comes from.
+    pub source: String,
 }
 
 /// `$/cancelRequest`: the core's request `id` no longer waits for an answer.

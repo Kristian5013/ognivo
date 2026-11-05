@@ -4,17 +4,23 @@
 //! edit journal ([`journal`]), AGENTS.md and CLAUDE.md ([`instructions`]), the session in
 //! the store ([`session`]), compaction in the middle of a turn ([`compact`]), permission
 //! rules ([`rules`]), traces in ATIF ([`trace`]), the record of what a turn verified
-//! ([`verify`]), the detector of repeated calls ([`repeats`]) and the clients' event model
-//! made of the agent's events ([`protocol`]).
+//! ([`verify`]), the detector of repeated calls ([`repeats`]), the clients' event model
+//! made of the agent's events ([`protocol`]), and Claude Code's skills and commands
+//! ([`skills`]) with the frontmatter of their files ([`frontmatter`]) and its hooks
+//! ([`hooks`]) and subagent templates ([`agents`]).
 
 pub mod agent;
+pub mod agents;
 pub mod approval;
 pub mod compact;
+pub mod frontmatter;
+pub mod hooks;
 pub mod instructions;
 pub mod journal;
 pub mod protocol;
 pub mod repeats;
 pub mod rules;
 pub mod session;
+pub mod skills;
 pub mod trace;
 pub mod verify;

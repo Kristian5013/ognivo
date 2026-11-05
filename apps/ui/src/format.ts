@@ -45,6 +45,8 @@ export function summary(call: Call): string {
       return `${call.server} · ${call.tool}`;
     case "ToolSearch":
       return `«${call.query}»`;
+    case "Skill":
+      return call.arguments?.trim() ? `${call.skill} «${call.arguments}»` : call.skill;
   }
 }
 

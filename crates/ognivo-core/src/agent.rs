@@ -24,7 +24,7 @@
 
 mod delegate;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,18 +41,21 @@ use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
 use ognivo_tools::projection::{self, ArgError, Call};
 pub use ognivo_tools::projection::{Layout, Toolset};
-use ognivo_tools::{Effect, ExecContext, classify_command, search};
+use ognivo_tools::{Effect, ExecContext, ToolId, classify_command, search};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+use crate::agents::Templates;
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
 use crate::compact;
+use crate::hooks::{self, Event, Hooks, Permission};
 use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
 use crate::journal::{FileChange, Journal, JournalError, Reverted};
 use crate::repeats::{Check, Fingerprint, Repeats};
 use crate::rules::{Rules, Ruling};
 use crate::session::{Notes, Resumed, Session};
+use crate::skills::{self, Part, Skill, Skills, Vars};
 use crate::verify::{self, Ledger, Run, Verification};
 
 pub use delegate::{SameModel, Subagents};
@@ -319,6 +322,8 @@ pub enum TurnEnd {
     Stuck(String),
     /// The turn's time limit ran out before an answer.
     TimeLimit,
+    /// Nothing reached the model: the user's command could not be rendered.
+    NotRun(String),
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +359,14 @@ pub struct AgentOptions {
     pub subagents: Option<Arc<dyn Subagents>>,
     /// The session's MCP servers, whose tools come after ognivo's.
     pub mcp: Option<Arc<ognivo_mcp::Gateway>>,
+    /// The user's and the project's skills and commands ([`crate::skills`]).
+    pub skills: Skills,
+    /// The hooks of the user's and the project's settings ([`crate::hooks`]).
+    pub hooks: Arc<Hooks>,
+    /// The subagent templates of `.claude/agents`, which `delegate` gives tasks to.
+    pub agents: Templates,
+    /// A subagent of a template: the only tools it has.
+    pub only: Option<Vec<ToolId>>,
 }
 
 /// The time limit of the running turn.
@@ -433,6 +446,18 @@ pub struct Agent {
     instructions: Instructions,
     /// The instruction files of the system prompt.
     prompt_instructions: Load,
+    /// The skills, and which of those of subdirectories the conversation has heard of.
+    skills: Skills,
+    /// The skills the conversation has loaded, with the text each gave.
+    loaded_skills: HashMap<String, String>,
+    /// What the PreToolUse hooks decided about the running call, and whether it edits.
+    hook_permission: Option<(Permission, bool)>,
+    /// The SessionStart and SessionEnd hooks due before the next turn: their source and
+    /// reason.
+    session_start: Option<&'static str>,
+    session_end: Option<&'static str>,
+    /// A subagent's type: its stop is a SubagentStop.
+    subagent: Option<String>,
     journal: Journal,
     /// Why the last turn was stopped, for the model's next message.
     stopped: Option<String>,
@@ -490,11 +515,150 @@ const TOOL_SEARCH: &str = "tool_search";
 const MCP_CALL: &str = "mcp_call";
 /// Tools one search gives at most.
 const SEARCH_LIMIT: usize = 5;
+/// How long a command of a skill's body may run.
+const SKILL_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+/// Times in a row a Stop hook may send the model back (Claude Code: 8).
+const STOP_CONTINUES: u32 = 8;
+
+/// The skill tool by the name each family knows such a tool by: Claude Code's for Qwen.
+pub fn skill_tool_name(family: Family) -> &'static str {
+    match family {
+        Family::QwenXml => "Skill",
+        Family::Harmony | Family::Gemma4 => "skill",
+    }
+}
+
+/// The skill tool's arguments in `family`'s terms: the skill, then what it should work on.
+/// Gemma writes keys in alphabetical order, so its second one sorts after `name`.
+fn skill_keys(family: Family) -> (&'static str, &'static str) {
+    match family {
+        Family::QwenXml => ("skill", "args"),
+        Family::Harmony => ("name", "arguments"),
+        Family::Gemma4 => ("name", "task"),
+    }
+}
+
+/// The skill tool, when there are skills the model may load. Its names are all of them,
+/// those of subdirectories too, so that it stays the same for the whole session.
+fn skill_tool(family: Family, skills: &Skills) -> Option<ToolDecl> {
+    let names: Vec<Value> = skills.for_model().iter().map(|s| json!(s.name)).collect();
+    if names.is_empty() {
+        return None;
+    }
+    let (name, args) = skill_keys(family);
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        name.into(),
+        json!({"type": "string", "enum": names, "description": "The skill."}),
+    );
+    properties.insert(
+        args.into(),
+        json!({"type": "string", "description": "What the skill should work on, if it takes anything: the words that would follow its name, such as an issue number. Leave it out otherwise."}),
+    );
+    Some(ToolDecl {
+        name: skill_tool_name(family).into(),
+        description: "Loads a skill: instructions for a kind of task, from the user or the project, which the project message lists with what each is for. When the task fits one, load it before you start and follow it; the files it names are in its directory.".into(),
+        parameters: json!({
+            "type": "object",
+            "properties": properties,
+            "required": [name],
+            "additionalProperties": false,
+        }),
+    })
+}
+
+/// A skill tool call: the skill and what it should work on.
+fn skill_call(family: Family, arguments: &str) -> Result<Call, ArgError> {
+    let tool = || skill_tool_name(family).to_owned();
+    let (name_key, args_key) = skill_keys(family);
+    let v: Value =
+        serde_json::from_str(arguments).map_err(|_| ArgError::NotObject { tool: tool() })?;
+    let Some(m) = v.as_object() else {
+        return Err(ArgError::NotObject { tool: tool() });
+    };
+    if let Some(k) = m.keys().find(|k| *k != name_key && *k != args_key) {
+        return Err(ArgError::Unknown {
+            tool: tool(),
+            arg: k.clone(),
+            known: format!("{name_key}, {args_key}"),
+        });
+    }
+    let name = match m.get(name_key) {
+        Some(Value::String(n)) if !n.trim().is_empty() => n.trim().trim_start_matches('/'),
+        _ => {
+            return Err(ArgError::Missing {
+                tool: tool(),
+                arg: name_key.into(),
+            });
+        }
+    };
+    let arguments = match m.get(args_key) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(a)) => Some(a.trim().to_owned()).filter(|a| !a.is_empty()),
+        Some(_) => {
+            return Err(ArgError::Type {
+                tool: tool(),
+                arg: args_key.into(),
+                want: "string",
+            });
+        }
+    };
+    Ok(Call::Skill {
+        name: name.to_owned(),
+        arguments,
+    })
+}
+
+/// A command's output without the status lines exec puts before it.
+fn shell_output(text: &str) -> &str {
+    let mut rest = text;
+    for status in ["[shell: ", "[cwd: "] {
+        if rest.starts_with(status) {
+            rest = rest.split_once('\n').map_or("", |(_, r)| r);
+        }
+    }
+    rest
+}
 
 /// The tools an agent declares: ognivo's for its family and layout, then those of its MCP
 /// servers, by name, or `tool_search` and `mcp_call` in their place.
 fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset, by_name: bool) -> Vec<ToolDecl> {
     let mut tools = projection::declarations_for(family, opts.layout, toolset);
+    tools.extend(skill_tool(family, &opts.skills));
+    if toolset == Toolset::Delegating && !opts.agents.all.is_empty() {
+        let name = projection::delegate_name(family);
+        if let Some(d) = tools.iter_mut().find(|t| t.name == name) {
+            let mut names: Vec<Value> = opts.agents.all.iter().map(|a| json!(a.name)).collect();
+            if opts.agents.get("general-purpose").is_none() {
+                names.push(json!("general-purpose"));
+            }
+            d.parameters["properties"]["tasks"]["items"]["properties"]["agent"] = json!({
+                "type": "string",
+                "enum": names,
+                "description": "The subagent to give it to, by what it is for; general-purpose when none fits.",
+            });
+            let list: Vec<String> = opts
+                .agents
+                .all
+                .iter()
+                .map(|a| {
+                    let about: String = a.description.chars().take(300).collect();
+                    format!("- {}: {about}", a.name)
+                })
+                .collect();
+            d.description.push_str(&format!(
+                "\nThe subagents of the project and the user, for `agent`:\n{}",
+                list.join("\n")
+            ));
+        }
+    }
+    if let Some(only) = &opts.only {
+        let skill = skill_tool_name(family);
+        tools.retain(|t| match projection::id_of(family, opts.layout, &t.name) {
+            Some(id) => only.contains(&id),
+            None => t.name == skill && only.contains(&ToolId::Skill),
+        });
+    }
     if let Some(g) = &opts.mcp {
         if g.searched() {
             tools.extend(search_tools(g, by_name));
@@ -749,12 +913,13 @@ pub fn system_prompt(layout: Layout) -> String {
 const PROJECT_AT: &str = "[ognivo] The project is at ";
 
 /// The project's part of a conversation's start, the message after the system prompt:
-/// where the project is, what checks a change in it, and the text of the user's and the
-/// project's instruction files.
+/// where the project is, what checks a change in it, what its MCP servers and skills are
+/// for, and the text of the user's and the project's instruction files.
 pub fn project_context(
     root: &Path,
     instructions: &str,
     mcp: Option<&ognivo_mcp::Gateway>,
+    skills: Option<&str>,
 ) -> String {
     let mut text = format!("{PROJECT_AT}{}.", root.display());
     let checks = verify::project_checks(root);
@@ -771,6 +936,10 @@ pub fn project_context(
     if let Some(note) = mcp.and_then(mcp_note) {
         text.push_str("\n\n");
         text.push_str(&note);
+    }
+    if let Some(note) = skills {
+        text.push_str("\n\n");
+        text.push_str(note);
     }
     if !instructions.is_empty() {
         text.push_str("\n\n");
@@ -841,6 +1010,7 @@ impl Agent {
                     &opts.root,
                     &prompt_instructions.text,
                     opts.mcp.as_deref(),
+                    opts.skills.note(skill_tool_name(family)).as_deref(),
                 )),
             ],
             tools: tools_of(family, &opts, toolset, driver.calls_undeclared()),
@@ -854,6 +1024,12 @@ impl Agent {
             clock: None,
             instructions,
             prompt_instructions,
+            skills: opts.skills.clone(),
+            loaded_skills: HashMap::new(),
+            hook_permission: None,
+            session_start: Some("startup"),
+            session_end: None,
+            subagent: None,
             journal: Journal::new(opts.workspace.unreviewed_changes),
             stopped: None,
             reverted: Vec::new(),
@@ -904,6 +1080,7 @@ impl Agent {
         resumed: Resumed,
     ) -> Self {
         let mut agent = Self::new(driver, family, approver, opts);
+        agent.session_start = Some("resume");
         let Resumed {
             messages,
             notes,
@@ -971,6 +1148,11 @@ impl Agent {
     /// The instruction files of the system prompt, and those it could not take.
     pub fn instructions(&self) -> &Load {
         &self.prompt_instructions
+    }
+
+    /// The user's and the project's skills and commands.
+    pub fn skills(&self) -> &Skills {
+        &self.skills
     }
 
     /// What the current or last turn's tool calls show, answer or not.
@@ -1094,12 +1276,17 @@ impl Agent {
     pub fn clear(&mut self) {
         self.prompt_instructions = self.instructions.start();
         self.stopped = None;
+        self.skills.forget();
+        self.loaded_skills.clear();
+        self.session_end = Some("clear");
+        self.session_start = Some("clear");
         self.messages = vec![
             ChatMessage::System(system_prompt(self.opts.layout)),
             ChatMessage::User(project_context(
                 &self.opts.root,
                 &self.prompt_instructions.text,
                 self.opts.mcp.as_deref(),
+                self.skills.note(skill_tool_name(self.family)).as_deref(),
             )),
         ];
         self.seen.clear();
@@ -1132,6 +1319,7 @@ impl Agent {
     pub fn rewind(&mut self, at: usize) {
         let dropped = self.turn_starts().iter().filter(|&&i| i >= at).count();
         self.messages.truncate(at.max(self.head()));
+        self.loaded_skills.clear();
         self.requests
             .truncate(self.requests.len().saturating_sub(dropped));
         let files: Vec<String> = self.changes().into_iter().map(|c| c.shown).collect();
@@ -1170,6 +1358,8 @@ impl Agent {
         });
         let end = self.steps(user, on).await;
         self.in_turn = false;
+        // a skill's allowed-tools count in the turn that ran it
+        self.opts.rules.deactivate();
         let facts = || verify::summary(&self.ledger.status(&self.opts.root));
         on(match &end {
             Ok(TurnEnd::Answer(a)) => AgentEvent::TurnEnded {
@@ -1199,6 +1389,12 @@ impl Agent {
                 answer: None,
                 verification: facts(),
             },
+            Ok(TurnEnd::NotRun(why)) => AgentEvent::TurnEnded {
+                end: "not_run".into(),
+                why: Some(why.clone()),
+                answer: None,
+                verification: None,
+            },
             Err(e) => AgentEvent::TurnEnded {
                 end: "error".into(),
                 why: Some(e.to_string()),
@@ -1217,6 +1413,7 @@ impl Agent {
             ),
             Ok(TurnEnd::Stuck(why)) => (json!({"end": "stuck", "why": why}), None),
             Ok(TurnEnd::TimeLimit) => (json!({"end": "time_limit"}), None),
+            Ok(TurnEnd::NotRun(why)) => (json!({"end": "not_run", "why": why}), None),
             Err(e) => (json!({"end": "error", "why": e.to_string()}), None),
         };
         self.save();
@@ -1403,6 +1600,26 @@ impl Agent {
             }
             return Ok(Some(TurnEnd::Stuck(why)));
         }
+        let o = self
+            .hook(
+                Event::PreCompact,
+                "auto",
+                None,
+                json!({"trigger": "auto", "custom_instructions": null}),
+                on,
+            )
+            .await;
+        if let Some(why) = o.blocked {
+            self.emit(
+                on,
+                AgentEvent::Notice {
+                    text: format!(
+                        "[ognivo] a PreCompact hook kept the history from being compacted: {why}"
+                    ),
+                },
+            );
+            return Ok(None);
+        }
         self.idle_compactions = idle;
         self.news = false;
         self.emit(on, AgentEvent::Compacting { tokens, limit });
@@ -1427,6 +1644,20 @@ impl Agent {
         let head = self.head();
         let replaced = self.messages.len() - head;
         self.messages.truncate(head);
+        let mut note = note;
+        let o = self
+            .hook(
+                Event::SessionStart,
+                "compact",
+                None,
+                json!({"source": "compact"}),
+                on,
+            )
+            .await;
+        if let Some(n) = hook_note(Event::SessionStart, &o.context) {
+            note.push_str("\n\n");
+            note.push_str(&n);
+        }
         self.messages.push(ChatMessage::User(note));
         self.messages.extend(kept);
         self.turn_start = head;
@@ -1435,6 +1666,7 @@ impl Agent {
         // its memory of results is gone with them
         self.repeats = Repeats::default();
         self.instructions.forget_near();
+        self.loaded_skills.clear();
         self.stats.compactions += 1;
         // a new cache epoch: the session's next conversation
         let notes = self.notes();
@@ -1521,7 +1753,77 @@ impl Agent {
             limit,
             told: 0,
         });
-        let mut user = user.to_owned();
+        // §9: every turn starts in the project root
+        self.cwd = self.opts.root.clone();
+        self.ledger = Ledger::default();
+        self.repeats = Repeats::default();
+        self.turn_reads.clear();
+        self.news = true;
+        self.idle_compactions = 0;
+        // the hooks that come before the model sees the prompt
+        let mut hook_notes = Vec::new();
+        if let Some(reason) = self.session_end.take() {
+            self.hook(
+                Event::SessionEnd,
+                reason,
+                None,
+                json!({"reason": reason}),
+                on,
+            )
+            .await;
+        }
+        if let Some(source) = self.session_start.take() {
+            let o = self
+                .hook(
+                    Event::SessionStart,
+                    source,
+                    None,
+                    json!({"source": source}),
+                    on,
+                )
+                .await;
+            hook_notes.extend(hook_note(Event::SessionStart, &o.context));
+        }
+        let o = self
+            .hook(
+                Event::UserPromptSubmit,
+                "",
+                None,
+                json!({"prompt": request}),
+                on,
+            )
+            .await;
+        if let Some(why) = o.blocked.or(o.stop) {
+            return Ok(TurnEnd::NotRun(format!(
+                "a UserPromptSubmit hook blocked the prompt: {why}"
+            )));
+        }
+        hook_notes.extend(hook_note(Event::UserPromptSubmit, &o.context));
+        // a command or skill the user runs: the model gets the line and what it says
+        let command = self
+            .skills
+            .command(request)
+            .map(|(skill, arguments)| (skill.clone(), arguments));
+        let mut user = match command {
+            Some((skill, arguments)) => match self.render_skill(&skill, &arguments).await {
+                Ok(body) => {
+                    self.loaded_skills.insert(skill.name.clone(), body.clone());
+                    format!(
+                        "{request}\n\n[ognivo] The user ran /{}, {} {}, which says:\n\n{}{body}",
+                        skill.name,
+                        skill.kind(),
+                        skill.shown,
+                        base_line(&skill)
+                    )
+                }
+                Err(why) => return Ok(TurnEnd::NotRun(format!("/{}: {why}", skill.name))),
+            },
+            None => request.to_owned(),
+        };
+        for note in hook_notes {
+            user.push_str("\n\n");
+            user.push_str(&note);
+        }
         if let Some(why) = self.stopped.take() {
             user.push_str(&format!("\n\n[ognivo] {why}"));
         }
@@ -1542,15 +1844,9 @@ impl Agent {
         self.turn_start = self.messages.len() - 1;
         self.requests.push(request.to_owned());
         self.save();
-        // §9: every turn starts in the project root
-        self.cwd = self.opts.root.clone();
-        self.ledger = Ledger::default();
-        self.repeats = Repeats::default();
-        self.turn_reads.clear();
-        self.news = true;
-        self.idle_compactions = 0;
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
+        let mut stop_continues = 0;
         for step in 0..self.opts.max_steps {
             if let Some(note) = self.clock.as_mut().and_then(Clock::note) {
                 self.emit(on, AgentEvent::Notice { text: note.clone() });
@@ -1624,6 +1920,17 @@ impl Agent {
                         })
                     } else {
                         None
+                    };
+                    let back = match back {
+                        Some(note) => Some(note),
+                        None if stop_continues < STOP_CONTINUES => {
+                            let held = self.stop_hooks(&f.content, stop_continues > 0, on).await;
+                            if held.is_some() {
+                                stop_continues += 1;
+                            }
+                            held
+                        }
+                        None => None,
                     };
                     if let Some(note) = back {
                         self.stats.answers_sent_back += 1;
@@ -1782,7 +2089,7 @@ impl Agent {
         let gateway = self.opts.mcp.clone();
         let searched = gateway.as_ref().is_some_and(|g| g.searched());
         let mcp = gateway.as_ref().and_then(|g| g.tool(&call.name));
-        let parsed = match (mcp, gateway.as_deref()) {
+        let mut parsed = match (mcp, gateway.as_deref()) {
             (Some(t), _) => Ok(Call::Mcp {
                 server: t.server.clone(),
                 tool: t.tool.clone(),
@@ -1792,6 +2099,9 @@ impl Agent {
             (None, Some(g)) if searched && call.name == MCP_CALL => {
                 mcp_call(g, &call.arguments, self.family)
             }
+            (None, _) if self.has_skill_tool() && call.name == skill_tool_name(self.family) => {
+                skill_call(self.family, &call.arguments)
+            }
             (None, _) => projection::parse_for(
                 self.family,
                 self.opts.layout,
@@ -1800,6 +2110,34 @@ impl Agent {
                 &call.arguments,
             ),
         };
+        // a subagent of a template has only its tools
+        if let (Some(only), Ok(c)) = (&self.opts.only, &parsed)
+            && !only.contains(&c.id())
+        {
+            let names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
+            parsed = Err(ArgError::UnknownTool(call.name.clone(), names.join(", ")));
+        }
+        // the hooks before the call: they may block it, decide its question or change it
+        self.hook_permission = None;
+        let mut blocked = None;
+        if let Ok(c) = &parsed
+            && self.opts.hooks.has(Event::PreToolUse)
+        {
+            match self.pre_tool_use(c, &call.id, on).await {
+                Ok((changed, permission)) => {
+                    let edits =
+                        matches!(changed.id(), ToolId::Edit | ToolId::Write | ToolId::Patch);
+                    self.hook_permission = permission.map(|p| (p, edits));
+                    parsed = Ok(changed);
+                }
+                Err(refusal) => blocked = Some(refusal),
+            }
+        }
+        let hooked = parsed.as_ref().ok().cloned().filter(|_| {
+            blocked.is_none()
+                && (self.opts.hooks.has(Event::PostToolUse)
+                    || self.opts.hooks.has(Event::PostToolUseFailure))
+        });
         self.emit(
             on,
             AgentEvent::ToolStarted {
@@ -1826,13 +2164,17 @@ impl Agent {
         let mut near = Load::default();
         let result = match self.repeats.check(&key) {
             Check::Run => {
-                let mut result = match parsed {
-                    Ok(parsed) => self.run(&call.name, parsed, on).await,
-                    Err(e) => {
+                let mut result = match (blocked, parsed) {
+                    (Some(refusal), _) => refusal,
+                    (None, Ok(parsed)) => self.run(&call.name, parsed, on).await,
+                    (None, Err(e)) => {
                         self.stats.bad_arguments += 1;
                         format!("[error] {e}")
                     }
                 };
+                if let Some(c) = &hooked {
+                    self.post_tool_use(c, &call.id, &mut result, on).await;
+                }
                 if let Some(note) = self.repeats.record(key, &result) {
                     self.stats.repeated += 1;
                     result.push_str("\n\n");
@@ -1843,6 +2185,12 @@ impl Agent {
                     if !near.text.is_empty() {
                         result.push_str("\n\n");
                         result.push_str(&near.text);
+                    }
+                    if self.has_skill_tool()
+                        && let Some(note) = self.skills.near(&path, skill_tool_name(self.family))
+                    {
+                        result.push_str("\n\n");
+                        result.push_str(&note);
                     }
                 }
                 result
@@ -2070,6 +2418,10 @@ impl Agent {
                 }
             }
             Call::Delegate { tasks } => self.delegate(tasks, on).await,
+            Call::Skill { name, arguments } => {
+                self.load_skill(&name, arguments.as_deref().unwrap_or(""))
+                    .await
+            }
             Call::ToolSearch { query } => match self.opts.mcp.clone() {
                 Some(g) => self.search_result(&g, &query),
                 None => "[error] this session has no MCP servers".into(),
@@ -2375,6 +2727,337 @@ impl Agent {
 
     /// What `tool_search` gives the model: the tools that fit `query`, declared as its
     /// prompt declares tools, and how to call them; all their names when none fits.
+    /// What a hook is told of the session and where it runs.
+    fn hook_context(&self) -> hooks::Context {
+        hooks::Context {
+            session_id: self
+                .session_id()
+                .map(|id| id.to_string())
+                .unwrap_or_default(),
+            cwd: self.cwd.clone(),
+            root: self.opts.root.clone(),
+        }
+    }
+
+    /// Runs the hooks of `event` for `target`, shows the user their notices, and gives what
+    /// they said.
+    async fn hook(
+        &mut self,
+        event: Event,
+        target: &str,
+        command: Option<&str>,
+        fields: Value,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> hooks::Outcome {
+        if !self.opts.hooks.has(event) {
+            return hooks::Outcome::default();
+        }
+        let (hooks, ctx) = (self.opts.hooks.clone(), self.hook_context());
+        let fields = match fields {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        let out = hooks.run(event, target, command, fields, &ctx).await;
+        for n in &out.notices {
+            self.emit(
+                on,
+                AgentEvent::Notice {
+                    text: format!("[hook] {n}"),
+                },
+            );
+        }
+        out
+    }
+
+    /// The PreToolUse hooks of a call (of each file, for a patch): the call as they leave it
+    /// and their decision about its question, or the refusal when one blocks it.
+    async fn pre_tool_use(
+        &mut self,
+        call: &Call,
+        id: &str,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> Result<(Call, Option<Permission>), String> {
+        let targets = hook_targets(call, &self.cwd);
+        let command = match call {
+            Call::Shell { command, .. } => Some(command.clone()),
+            _ => None,
+        };
+        let mut permission = None;
+        let mut changed = None;
+        for (name, input) in &targets {
+            let o = self
+                .hook(
+                    Event::PreToolUse,
+                    name,
+                    command.as_deref(),
+                    json!({"tool_name": name, "tool_input": input, "tool_use_id": id}),
+                    on,
+                )
+                .await;
+            if let Some(why) = o.stop {
+                self.stuck = Some(format!("a PreToolUse hook stopped the turn: {why}"));
+                return Err(format!(
+                    "[refused] a PreToolUse hook stopped the turn: {why}"
+                ));
+            }
+            if let Some(why) = o.blocked {
+                self.stats.refused += 1;
+                return Err(format!("[refused] a PreToolUse hook blocked {name}: {why}"));
+            }
+            permission = match (permission, o.permission) {
+                (Some(Permission::Ask), _) | (_, Some(Permission::Ask)) => Some(Permission::Ask),
+                (p, None) => p,
+                (_, Some(Permission::Allow)) => Some(Permission::Allow),
+            };
+            if let (Some(update), 1) = (o.updated_input, targets.len()) {
+                let mut merged = input.clone();
+                if let (Value::Object(m), Value::Object(u)) = (&mut merged, update) {
+                    m.extend(u);
+                }
+                changed = from_hook_input(call, &merged);
+            }
+        }
+        Ok((changed.unwrap_or_else(|| call.clone()), permission))
+    }
+
+    /// The PostToolUse (or, for a failed call, PostToolUseFailure) hooks of a call that ran:
+    /// what they tell the model goes after its result.
+    async fn post_tool_use(
+        &mut self,
+        call: &Call,
+        id: &str,
+        result: &mut String,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) {
+        let first = result.lines().next().unwrap_or_default();
+        if first.starts_with("[refused]")
+            || first.starts_with("[ognivo] Not run")
+            || first.starts_with("[error] not run")
+        {
+            return;
+        }
+        let event = if first.starts_with("[error]") {
+            Event::PostToolUseFailure
+        } else {
+            Event::PostToolUse
+        };
+        let command = match call {
+            Call::Shell { command, .. } => Some(command.clone()),
+            _ => None,
+        };
+        for (name, input) in hook_targets(call, &self.cwd) {
+            let mut fields = json!({"tool_name": name, "tool_input": input, "tool_use_id": id});
+            if event == Event::PostToolUse {
+                fields["tool_response"] = hook_response(call, &input, result);
+            } else {
+                fields["error"] = json!(result.clone());
+            }
+            let o = self
+                .hook(event, &name, command.as_deref(), fields, on)
+                .await;
+            if let Some(note) = hook_note(event, &o.context) {
+                result.push_str("\n\n");
+                result.push_str(&note);
+            }
+            if let Some(why) = o.stop {
+                self.stuck = Some(format!("a {} hook stopped the turn: {why}", event.name()));
+            }
+        }
+    }
+
+    /// The Stop hooks (SubagentStop for a subagent) of an answer: the note that sends the
+    /// model back when one does not let the turn end.
+    async fn stop_hooks(
+        &mut self,
+        answer: &str,
+        active: bool,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> Option<String> {
+        let (event, target) = match &self.subagent {
+            Some(kind) => (Event::SubagentStop, kind.clone()),
+            None => (Event::Stop, String::new()),
+        };
+        let mut fields = json!({"stop_hook_active": active, "last_assistant_message": answer});
+        if event == Event::SubagentStop {
+            fields["agent_type"] = json!(target);
+            fields["agent_id"] = json!(self.hook_context().session_id);
+            fields["agent_transcript_path"] = json!("");
+        }
+        let o = self.hook(event, &target, None, fields, on).await;
+        let why = match (o.blocked, o.context.is_empty()) {
+            (Some(why), _) => why,
+            (None, false) => o.context.join("\n\n"),
+            (None, true) => return None,
+        };
+        Some(format!(
+            "[ognivo] Not finished yet: a {} hook does not let the turn end: {why}",
+            event.name()
+        ))
+    }
+
+    /// Runs the SessionEnd hooks: the session ends for `reason` (`prompt_input_exit`,
+    /// `other`); one cleared before them runs first.
+    pub async fn end_session(&mut self, reason: &'static str) {
+        let mut quiet = |_: AgentEvent| {};
+        if let Some(cleared) = self.session_end.take() {
+            self.hook(
+                Event::SessionEnd,
+                cleared,
+                None,
+                json!({"reason": cleared}),
+                &mut quiet,
+            )
+            .await;
+        }
+        self.hook(
+            Event::SessionEnd,
+            reason,
+            None,
+            json!({"reason": reason}),
+            &mut quiet,
+        )
+        .await;
+    }
+
+    /// Whether the model has the skill tool.
+    fn has_skill_tool(&self) -> bool {
+        let name = skill_tool_name(self.family);
+        self.tools.iter().any(|t| t.name == name)
+    }
+
+    /// A skill the model loads: its rendered body, or why it does not get it.
+    async fn load_skill(&mut self, name: &str, arguments: &str) -> String {
+        let Some(skill) = self.skills.get(name).cloned() else {
+            let names: Vec<&str> = self
+                .skills
+                .for_model()
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect();
+            return format!(
+                "[error] there is no skill {name}; the skills are: {}",
+                names.join(", ")
+            );
+        };
+        if !skill.model_invocable {
+            return format!(
+                "[error] the skill {name} is the user's to run, as /{name}; do not do what it does another way."
+            );
+        }
+        let body = match self.render_skill(&skill, arguments).await {
+            Ok(body) => body,
+            Err(why) => return format!("[error] the skill {name} did not load: {why}"),
+        };
+        if self.loaded_skills.get(name) == Some(&body) {
+            return format!(
+                "[ognivo] The skill {name} is loaded above already, with this same text: follow it there."
+            );
+        }
+        self.loaded_skills.insert(name.to_owned(), body.clone());
+        format!("{}{body}", base_line(&skill))
+    }
+
+    /// A skill's body rendered: its placeholders filled and the output of its commands in
+    /// their place. Its `allowed-tools` count from now to the end of the turn, for its own
+    /// commands too. Nothing asks while a skill renders (as in Claude Code), so a command
+    /// that the rules and the policy do not allow without a question stops it, as does one
+    /// that fails.
+    async fn render_skill(&mut self, skill: &Skill, arguments: &str) -> Result<String, String> {
+        self.opts.rules.activate(&skill.name);
+        let session_id = self
+            .session_id()
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let root = self.opts.root.clone();
+        let vars = Vars {
+            project_dir: &root,
+            session_id: &session_id,
+        };
+        let mut text = String::new();
+        for part in skill.render(arguments, &vars)? {
+            let (command, block) = match part {
+                Part::Text(t) => {
+                    text.push_str(&t);
+                    continue;
+                }
+                Part::Run { command, block } => (command, block),
+            };
+            let pattern = Part::pattern(&command, block);
+            let ctx = ExecContext {
+                root: root.clone(),
+                cwd: root.clone(),
+            };
+            let effect = classify_command(&command, &ctx);
+            let decision = approval::decide(effect, self.workspace());
+            let ruling = self.opts.rules.command(&command, &root, decision, |part| {
+                classify_command(part, &ctx) == Effect::ReadOnly
+            });
+            match ruling {
+                Ruling::Allow => {}
+                Ruling::Deny(rule) => {
+                    return Err(format!(
+                        "Shell command permission check failed for pattern \"{pattern}\": {rule} denies it"
+                    ));
+                }
+                Ruling::Ask => {
+                    return Err(format!(
+                        "Shell command permission check failed for pattern \"{pattern}\": it would need a question, and nothing asks while a skill renders; the skill's allowed-tools or a permission rule can allow it"
+                    ));
+                }
+            }
+            let room = self.room()?;
+            let opts = ShellOptions {
+                cwd: root.clone(),
+                timeout: room.map_or(SKILL_COMMAND_TIMEOUT, |r| r.min(SKILL_COMMAND_TIMEOUT)),
+                output_budget: exec::DEFAULT_OUTPUT_BUDGET,
+                log_dir: self.opts.data_dir.join("logs"),
+            };
+            let r = exec::run(&command, &opts)
+                .await
+                .map_err(|e| format!("Shell command failed for pattern \"{pattern}\": {e}"))?;
+            if verify::is_build_or_test(&command) {
+                self.ledger.ran(Run {
+                    command: command.clone(),
+                    exit_code: r.exit_code,
+                    timed_out: r.timed_out,
+                });
+            } else if effect == Effect::SideEffects {
+                self.ledger.side_effect(&command);
+            }
+            if effect == Effect::SideEffects {
+                self.journal.side_effect(&command);
+            }
+            if effect != Effect::ReadOnly {
+                self.changed();
+            }
+            let output = shell_output(&r.text);
+            let ok = match r.exit_code {
+                Some(0) => true,
+                Some(1) => skills::tolerates_one(&command),
+                _ => false,
+            };
+            if !ok {
+                let status = r.text.lines().next().unwrap_or_default();
+                let mut shown: String = output.chars().take(500).collect();
+                if shown.len() < output.len() {
+                    shown.push('…');
+                }
+                return Err(format!(
+                    "Shell command failed for pattern \"{pattern}\": {status}\n{shown}"
+                ));
+            }
+            if block {
+                text.push_str(output);
+                if !output.ends_with('\n') {
+                    text.push('\n');
+                }
+            } else {
+                text.push_str(output.trim_end_matches('\n'));
+            }
+        }
+        Ok(text)
+    }
+
     fn search_result(&self, g: &ognivo_mcp::Gateway, query: &str) -> String {
         let found = g.search(query, SEARCH_LIMIT);
         let mut text = String::new();
@@ -2429,6 +3112,14 @@ impl Agent {
             },
             agent: None,
         };
+        // a PreToolUse hook's decision: ask over any allow; allow over a question, but not
+        // over a rule's refusal nor an edit's question, which always asks (§8)
+        let ruling = match (ruling, self.hook_permission) {
+            (Ruling::Deny(rule), _) => Ruling::Deny(rule),
+            (_, Some((Permission::Ask, _))) => Ruling::Ask,
+            (Ruling::Ask, Some((Permission::Allow, false))) => Ruling::Allow,
+            (ruling, _) => ruling,
+        };
         match ruling {
             Ruling::Allow => return None,
             Ruling::Ask => {}
@@ -2460,6 +3151,22 @@ impl Agent {
             allowed,
         };
         on(asked(None));
+        if self.approver.can_ask() && self.opts.hooks.has(Event::Notification) {
+            let (hooks, ctx) = (self.opts.hooks.clone(), self.hook_context());
+            let message = format!("ognivo needs your permission to use {tool}");
+            tokio::spawn(async move {
+                let fields = json!({"message": message, "notification_type": "permission_prompt"});
+                hooks
+                    .run(
+                        Event::Notification,
+                        "permission_prompt",
+                        None,
+                        fields.as_object().cloned().unwrap_or_default(),
+                        &ctx,
+                    )
+                    .await;
+            });
+        }
         let verdict = self.approver.approve(&req).await;
         if let Some(s) = self.session.as_mut() {
             s.approval(&req, verdict == Verdict::Allow);
@@ -2479,6 +3186,207 @@ impl Agent {
                 Some(format!("[refused] {text}"))
             }
         }
+    }
+}
+
+/// What hooks tell the model, as a note after the text they are about.
+fn hook_note(event: Event, context: &[String]) -> Option<String> {
+    (!context.is_empty()).then(|| {
+        format!(
+            "[ognivo] From the {} hooks of the settings:\n{}",
+            event.name(),
+            context.join("\n\n")
+        )
+    })
+}
+
+/// A call as hooks see it: Claude Code's tool name and input, with absolute paths and
+/// without the fields left out. A patch is a Write of each file it adds and an Edit of each
+/// it changes or removes.
+fn hook_targets(call: &Call, cwd: &Path) -> Vec<(String, Value)> {
+    let abs = |p: &str| files::resolve(cwd, p).display().to_string();
+    let clean = |mut v: Value| {
+        if let Value::Object(m) = &mut v {
+            m.retain(|_, x| !x.is_null());
+        }
+        v
+    };
+    let one = |name: &str, v: Value| vec![(name.to_owned(), clean(v))];
+    match call {
+        Call::Shell { command, timeout } => one(
+            "Bash",
+            json!({"command": command, "timeout": timeout.map(|t| t.as_millis() as u64)}),
+        ),
+        Call::Read {
+            path,
+            offset,
+            limit,
+        } => one(
+            "Read",
+            json!({"file_path": abs(path), "offset": offset, "limit": limit}),
+        ),
+        Call::Edit {
+            path,
+            old,
+            new,
+            replace_all,
+        } => one(
+            "Edit",
+            json!({"file_path": abs(path), "old_string": old, "new_string": new, "replace_all": replace_all}),
+        ),
+        Call::Write { path, content } => one(
+            "Write",
+            json!({"file_path": abs(path), "content": content}),
+        ),
+        Call::Grep {
+            pattern,
+            path,
+            glob,
+        } => one(
+            "Grep",
+            json!({"pattern": pattern, "path": path.as_deref().map(abs), "glob": glob}),
+        ),
+        Call::Glob { pattern, path } => one(
+            "Glob",
+            json!({"pattern": pattern, "path": path.as_deref().map(abs)}),
+        ),
+        Call::Patch { patch } => {
+            let mut targets = Vec::new();
+            let mut adding: Option<(String, String)> = None;
+            for line in patch.lines() {
+                let header = |m: &str| line.trim().strip_prefix(m).map(str::trim);
+                if line.starts_with("***") {
+                    if let Some((file, content)) = adding.take() {
+                        targets.push(("Write".to_owned(), json!({"file_path": file, "content": content})));
+                    }
+                    if let Some(p) = header("*** Add File:") {
+                        adding = Some((abs(p), String::new()));
+                    } else if let Some(p) =
+                        header("*** Update File:").or_else(|| header("*** Delete File:"))
+                    {
+                        targets.push(("Edit".to_owned(), json!({"file_path": abs(p)})));
+                    }
+                } else if let (Some((_, content)), Some(added)) =
+                    (adding.as_mut(), line.strip_prefix('+'))
+                {
+                    content.push_str(added);
+                    content.push('\n');
+                }
+            }
+            if let Some((file, content)) = adding {
+                targets.push(("Write".to_owned(), json!({"file_path": file, "content": content})));
+            }
+            targets
+        }
+        Call::Mcp {
+            server,
+            tool,
+            arguments,
+        } => one(
+            &format!("mcp__{server}__{tool}"),
+            serde_json::from_str(arguments).unwrap_or_else(|_| json!({})),
+        ),
+        Call::Delegate { tasks } => tasks
+            .iter()
+            .map(|t| {
+                (
+                    "Task".to_owned(),
+                    json!({"description": t.title, "prompt": t.goal, "subagent_type": "general-purpose"}),
+                )
+            })
+            .collect(),
+        Call::Skill { name, arguments } => {
+            one("Skill", json!({"skill": name, "args": arguments}))
+        }
+        Call::ToolSearch { query } => one("ToolSearch", json!({"query": query})),
+    }
+}
+
+/// A call's result as PostToolUse hooks see it, in Claude Code's shape where it has one.
+fn hook_response(call: &Call, input: &Value, result: &str) -> Value {
+    match call {
+        Call::Shell { .. } => json!({
+            "stdout": shell_output(result),
+            "stderr": "",
+            "interrupted": false,
+            "isImage": false,
+        }),
+        Call::Read { .. } => json!({
+            "type": "text",
+            "file": {"filePath": input["file_path"], "content": result},
+        }),
+        Call::Edit { .. } => json!({
+            "filePath": input["file_path"],
+            "oldString": input["old_string"],
+            "newString": input["new_string"],
+            "replaceAll": input["replace_all"],
+            "userModified": false,
+        }),
+        Call::Write { .. } | Call::Patch { .. } => json!({
+            "filePath": input["file_path"],
+            "success": true,
+        }),
+        Call::Mcp { .. } => json!([{"type": "text", "text": result}]),
+        _ => json!({"content": result}),
+    }
+}
+
+/// The call a PreToolUse hook's `updatedInput` makes of `call`, in Claude Code's shape.
+fn from_hook_input(call: &Call, v: &Value) -> Option<Call> {
+    let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+    let n = |k: &str| v.get(k).and_then(Value::as_u64).map(|n| n as usize);
+    Some(match call {
+        Call::Shell { timeout, .. } => Call::Shell {
+            command: s("command")?,
+            timeout: v
+                .get("timeout")
+                .and_then(Value::as_u64)
+                .map(Duration::from_millis)
+                .or(*timeout),
+        },
+        Call::Read { .. } => Call::Read {
+            path: s("file_path")?,
+            offset: n("offset"),
+            limit: n("limit"),
+        },
+        Call::Edit { .. } => Call::Edit {
+            path: s("file_path")?,
+            old: s("old_string")?,
+            new: s("new_string")?,
+            replace_all: v
+                .get("replace_all")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        },
+        Call::Write { .. } => Call::Write {
+            path: s("file_path")?,
+            content: s("content")?,
+        },
+        Call::Grep { .. } => Call::Grep {
+            pattern: s("pattern")?,
+            path: s("path"),
+            glob: s("glob"),
+        },
+        Call::Glob { .. } => Call::Glob {
+            pattern: s("pattern")?,
+            path: s("path"),
+        },
+        Call::Mcp { server, tool, .. } => Call::Mcp {
+            server: server.clone(),
+            tool: tool.clone(),
+            arguments: v.to_string(),
+        },
+        _ => return None,
+    })
+}
+
+/// Where a skill's files are, before its body, as Claude Code gives it; a command has none
+/// of its own.
+fn base_line(skill: &Skill) -> String {
+    if skill.command {
+        String::new()
+    } else {
+        format!("Base directory for this skill: {}\n\n", skill.dir.display())
     }
 }
 
@@ -2638,6 +3546,10 @@ mod tests {
             writable: None,
             subagents: None,
             mcp: None,
+            skills: Skills::default(),
+            hooks: Arc::default(),
+            agents: Templates::default(),
+            only: None,
         }
     }
 
@@ -4690,5 +5602,366 @@ mod tests {
             opts,
         );
         assert!(a.tools.iter().all(|t| t.name != "delegate"));
+    }
+
+    /// An agent of the project at `root` with the skills found there and in `home`, their
+    /// allowed-tools trusted, that plays `steps`.
+    fn with_skills(
+        root: &Path,
+        home: &Path,
+        steps: Vec<ChatCompletion>,
+    ) -> (Agent, Arc<Mutex<Vec<StepRequest>>>) {
+        let places = crate::rules::Places {
+            root: root.to_owned(),
+            home: Some(home.to_owned()),
+            claude_dir: None,
+        };
+        let skills = skills::load(&places);
+        let mut opts = options(root, WorkspaceState::CLEAN, None);
+        for s in skills.all() {
+            let (rules, problems) =
+                crate::rules::for_skill(&s.allowed_tools, &s.name, &s.shown, &places);
+            assert!(problems.is_empty(), "{problems:?}");
+            opts.rules.add(rules);
+        }
+        opts.skills = skills;
+        let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
+        let agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        (agent, seen)
+    }
+
+    #[tokio::test]
+    async fn the_model_loads_a_skill_whose_commands_run_and_whose_tools_its_turn_allows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let home = root.parent().unwrap().join("home");
+        std::fs::create_dir_all(root.join(".claude/skills/release")).unwrap();
+        std::fs::create_dir_all(root.join(".claude/commands")).unwrap();
+        std::fs::write(root.join("VERSION"), "1.2.3\n").unwrap();
+        std::fs::write(
+            root.join(".claude/skills/release/SKILL.md"),
+            "---\ndescription: Prepares a release of the project.\nallowed-tools: Bash(touch released)\n---\nThe version is !`cat VERSION`.\nRun `touch released`, then report $ARGUMENTS.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude/commands/deploy.md"),
+            "---\ndisable-model-invocation: true\n---\nDeploy.\n",
+        )
+        .unwrap();
+        let (mut agent, seen) = with_skills(
+            &root,
+            &home,
+            vec![
+                calls(
+                    &[("skill", json!({"name": "deploy"}))],
+                    FinishReason::ToolCalls,
+                ),
+                calls(
+                    &[(
+                        "skill",
+                        json!({"name": "release", "arguments": "the version"}),
+                    )],
+                    FinishReason::ToolCalls,
+                ),
+                calls(
+                    &[("shell", json!({"command": "touch released"}))],
+                    FinishReason::ToolCalls,
+                ),
+                answer("released 1.2.3"),
+            ],
+        );
+        let end = agent.turn("make a release", &mut |_| {}).await.unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "released 1.2.3"),
+            "{end:?}"
+        );
+        let first = seen.lock().unwrap()[0].clone();
+        let tool = first.tools.iter().find(|t| t.name == "skill").unwrap();
+        assert_eq!(
+            tool.parameters["properties"]["name"]["enum"],
+            json!(["release"])
+        );
+        let ChatMessage::User(project) = &first.messages[1] else {
+            panic!("{:?}", first.messages[1]);
+        };
+        assert!(
+            project.contains("- release: Prepares a release of the project."),
+            "{project}"
+        );
+        assert!(!project.contains("deploy"), "{project}");
+        let results = tool_results(&agent);
+        assert!(
+            results[0].starts_with("[error] the skill deploy is the user's to run, as /deploy"),
+            "{}",
+            results[0]
+        );
+        assert_eq!(
+            results[1],
+            format!(
+                "Base directory for this skill: {}\n\nThe version is 1.2.3.\nRun `touch released`, then report the version.\n",
+                root.join(".claude/skills/release").display()
+            )
+        );
+        // allowed by the skill's allowed-tools, in the turn that loaded it
+        assert!(results[2].starts_with("[shell: exit 0"), "{}", results[2]);
+        assert!(root.join("released").exists());
+    }
+
+    #[tokio::test]
+    async fn the_user_runs_a_command_and_one_that_cannot_render_runs_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let home = root.parent().unwrap().join("home");
+        std::fs::create_dir_all(root.join(".claude/commands")).unwrap();
+        std::fs::write(
+            root.join(".claude/commands/fix.md"),
+            "---\nargument-hint: <issue>\ndisable-model-invocation: true\n---\nFix issue $0 in !`echo lib.rs`.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(".claude/commands/push.md"),
+            "---\ndisable-model-invocation: true\n---\nPush: !`git push`\n",
+        )
+        .unwrap();
+        let (mut agent, seen) = with_skills(&root, &home, vec![answer("fixed")]);
+        let end = agent.turn("/fix 42", &mut |_| {}).await.unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "fixed"),
+            "{end:?}"
+        );
+        let req = seen.lock().unwrap()[0].clone();
+        // no skill the model may load: no skill tool
+        assert!(req.tools.iter().all(|t| t.name != "skill"));
+        let Some(ChatMessage::User(sent)) = req.messages.last() else {
+            panic!("{:?}", req.messages.last());
+        };
+        assert_eq!(
+            sent,
+            "/fix 42\n\n[ognivo] The user ran /fix, the project's command .claude/commands/fix.md, which says:\n\nFix issue 42 in lib.rs.\n"
+        );
+        let mut events = Vec::new();
+        let end = agent.turn("/push", &mut |e| events.push(e)).await.unwrap();
+        let TurnEnd::NotRun(why) = &end else {
+            panic!("{end:?}");
+        };
+        assert!(
+            why.starts_with(
+                "/push: Shell command permission check failed for pattern \"!`git push`\""
+            ),
+            "{why}"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(
+            matches!(events.last(), Some(AgentEvent::TurnEnded { end, .. }) if end == "not_run")
+        );
+    }
+
+    #[test]
+    fn each_family_calls_skills_by_its_own_names() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude/skills/pdf")).unwrap();
+        std::fs::write(
+            dir.path().join(".claude/skills/pdf/SKILL.md"),
+            "Fills PDF forms.\n",
+        )
+        .unwrap();
+        let skills = skills::load(&crate::rules::Places {
+            root: dir.path().to_owned(),
+            home: None,
+            claude_dir: None,
+        });
+        for (family, tool, keys) in [
+            (Family::QwenXml, "Skill", ["skill", "args"]),
+            (Family::Harmony, "skill", ["name", "arguments"]),
+            (Family::Gemma4, "skill", ["name", "task"]),
+        ] {
+            let decl = skill_tool(family, &skills).unwrap();
+            assert_eq!(decl.name, tool);
+            let props: Vec<&String> = decl.parameters["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect();
+            assert_eq!(props, keys);
+            let args = format!(r#"{{"{}": "/pdf", "{}": "form.pdf"}}"#, keys[0], keys[1]);
+            assert_eq!(
+                skill_call(family, &args),
+                Ok(Call::Skill {
+                    name: "pdf".into(),
+                    arguments: Some("form.pdf".into())
+                })
+            );
+        }
+        assert!(skill_tool(Family::Harmony, &Skills::default()).is_none());
+        assert!(matches!(
+            skill_call(Family::Harmony, r#"{"skill": "pdf"}"#),
+            Err(ArgError::Unknown { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hooks_block_a_call_add_to_results_and_send_an_answer_back_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let home = root.parent().unwrap().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.rs"), "fn a() {}\n").unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"hooks": {
+                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo 'The release is on Friday.'"}]}],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [
+                    {"type": "command", "command": "echo 'no pushing' >&2; exit 2", "if": "Bash(git push *)"}
+                ]}],
+                "PostToolUse": [{"matcher": "Read", "hooks": [
+                    {"type": "command", "command": "echo '{\"hookSpecificOutput\": {\"hookEventName\": \"PostToolUse\", \"additionalContext\": \"read the tests too\"}}'"}
+                ]}],
+                "Stop": [{"hooks": [
+                    {"type": "command", "command": "grep -q '\"stop_hook_active\":true' && exit 0; echo 'run the tests first' >&2; exit 2"}
+                ]}]
+            }}"#,
+        )
+        .unwrap();
+        let loaded = hooks::load(&crate::rules::Places {
+            root: root.clone(),
+            home: Some(home),
+            claude_dir: None,
+        });
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let mut opts = options(&root, WorkspaceState::CLEAN, None);
+        opts.hooks = Arc::new(loaded.hooks);
+        let (driver, seen) = played(
+            vec![
+                calls(
+                    &[("shell", json!({"command": "git push origin main"}))],
+                    FinishReason::ToolCalls,
+                ),
+                calls(
+                    &[("read", json!({"path": "lib.rs"}))],
+                    FinishReason::ToolCalls,
+                ),
+                answer("done"),
+                answer("done, tests too"),
+            ]
+            .into_iter()
+            .map(Step::from)
+            .collect(),
+        );
+        let mut agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        let end = agent.turn("ship it", &mut |_| {}).await.unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "done, tests too"),
+            "{end:?}"
+        );
+        let first = seen.lock().unwrap()[0].clone();
+        let Some(ChatMessage::User(sent)) = first.messages.last() else {
+            panic!("{:?}", first.messages.last());
+        };
+        assert_eq!(
+            sent,
+            "ship it\n\n[ognivo] From the UserPromptSubmit hooks of the settings:\nThe release is on Friday."
+        );
+        let results = tool_results(&agent);
+        assert_eq!(
+            results[0],
+            "[refused] a PreToolUse hook blocked Bash: no pushing"
+        );
+        assert!(
+            results[1].ends_with(
+                "\n\n[ognivo] From the PostToolUse hooks of the settings:\nread the tests too"
+            ),
+            "{}",
+            results[1]
+        );
+        assert!(agent.messages().iter().any(|m| matches!(
+            m,
+            ChatMessage::User(t) if t == "[ognivo] Not finished yet: a Stop hook does not let the turn end: run the tests first"
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_task_for_a_template_gets_its_role_and_only_its_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let review = |agent: &str| json!({"tasks": [{"title": "Review", "goal": "Review a.txt", "mode": "write", "files": ["a.txt"], "agent": agent}]});
+        let (driver, seen) = played(
+            vec![
+                calls(&[("delegate", review("nobody"))], FinishReason::ToolCalls),
+                calls(&[("delegate", review("reviewer"))], FinishReason::ToolCalls),
+                answer("Reviewed."),
+            ]
+            .into_iter()
+            .map(Step::from)
+            .collect(),
+        );
+        let subagents = Arc::new(Mutex::new(Vec::new()));
+        let mut opts = options(&root, WorkspaceState::DIRTY, None);
+        opts.toolset = Toolset::Delegating;
+        opts.subagents = Some(Arc::new(Scripts {
+            scripts: Mutex::new(vec![vec![
+                calls(
+                    &[("shell", json!({"command": "ls"}))],
+                    FinishReason::ToolCalls,
+                ),
+                answer("a.txt is fine."),
+            ]]),
+            seen: subagents.clone(),
+        }));
+        opts.agents = Templates {
+            all: vec![crate::agents::Template {
+                name: "reviewer".into(),
+                description: "Reviews code.".into(),
+                tools: vec![ToolId::Read, ToolId::Grep, ToolId::Glob],
+                max_turns: Some(3),
+                body: "You review code.".into(),
+                shown: ".claude/agents/reviewer.md".into(),
+            }],
+            problems: Vec::new(),
+        };
+        let mut agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        let end = agent.turn("review it", &mut |_| {}).await.unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "Reviewed."),
+            "{end:?}"
+        );
+        let main = seen.lock().unwrap()[0].clone();
+        let delegate = main.tools.iter().find(|t| t.name == "delegate").unwrap();
+        assert_eq!(
+            delegate.parameters["properties"]["tasks"]["items"]["properties"]["agent"]["enum"],
+            json!(["reviewer", "general-purpose"])
+        );
+        assert!(
+            delegate
+                .description
+                .ends_with("for `agent`:\n- reviewer: Reviews code.")
+        );
+        let results = tool_results(&agent);
+        assert_eq!(
+            results[0],
+            "[error] there is no subagent nobody; the subagents are: reviewer, general-purpose"
+        );
+        let subs = subagents.lock().unwrap();
+        let sub = subs[0].lock().unwrap();
+        let names: Vec<&str> = sub[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["read", "grep", "glob"]);
+        let ChatMessage::User(brief) = sub[0].messages.last().unwrap() else {
+            panic!("{:?}", sub[0].messages.last());
+        };
+        assert!(
+            brief.starts_with("[ognivo] You work as the subagent reviewer of .claude/agents/reviewer.md, which is:\n\nYou review code.\n\nTask from the main agent: Review"),
+            "{brief}"
+        );
+        // it changes no file, so its task is a read task
+        assert!(brief.contains("This is a read task"), "{brief}");
+        let Some(ChatMessage::Tool { content, .. }) = sub[1].messages.last() else {
+            panic!("{:?}", sub[1].messages.last());
+        };
+        assert!(
+            content.starts_with("[error] unknown tool \"shell\""),
+            "{content}"
+        );
     }
 }

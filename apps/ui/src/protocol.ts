@@ -222,9 +222,13 @@ export type Call = { "name": "Read", path: string, offset: number | null, limit:
 /**
  * The arguments as the model wrote them, a JSON object.
  */
-arguments: string, } | { "name": "ToolSearch", query: string, };
+arguments: string, } | { "name": "ToolSearch", query: string, } | { "name": "Skill", skill: string, arguments: string | null, };
 
-export type Task = { title: string, goal: string, context: string | null, write: boolean, files: Array<string>, };
+export type Task = { title: string, goal: string, context: string | null, write: boolean, files: Array<string>, 
+/**
+ * The subagent of `.claude/agents` it went to; `None`: the general-purpose one.
+ */
+agent: string | null, };
 
 export type ToolResult = { outcome: Outcome, 
 /**
@@ -552,6 +556,18 @@ export type McpSignInAsked = { project: string, server: McpServer, };
 
 export type SignInAnswer = { sign_in: boolean, };
 
+export type HooksTrustAsked = { project: string, hooks: Array<HookShown>, };
+
+export type HookShown = { 
+/**
+ * The event and the matcher, then the command: `PreToolUse Bash: ./check.sh`.
+ */
+hook: string, 
+/**
+ * The settings file it comes from.
+ */
+source: string, };
+
 export type Cancel = { id: number, };
 
 /** The core's methods. */
@@ -580,6 +596,7 @@ export type Asks = {
   "rules/trust": { params: TrustAsked; result: TrustAnswer };
   "mcp/trust": { params: McpTrustAsked; result: TrustAnswer };
   "mcp/sign_in": { params: McpSignInAsked; result: SignInAnswer };
+  "hooks/trust": { params: HooksTrustAsked; result: TrustAnswer };
 };
 
 export const NOTIFY_EVENT = "event";

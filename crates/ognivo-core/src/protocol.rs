@@ -638,6 +638,7 @@ fn call_of(c: &Call) -> p::Call {
                     context: t.context,
                     write: t.write,
                     files: t.files,
+                    agent: t.agent,
                 })
                 .collect(),
         },
@@ -651,6 +652,10 @@ fn call_of(c: &Call) -> p::Call {
             arguments,
         },
         Call::ToolSearch { query } => p::Call::ToolSearch { query },
+        Call::Skill { name, arguments } => p::Call::Skill {
+            skill: name,
+            arguments,
+        },
     }
 }
 
@@ -879,6 +884,7 @@ mod tests {
                         context: None,
                         write: false,
                         files: Vec::new(),
+                        agent: None,
                     }],
                 },
             ),

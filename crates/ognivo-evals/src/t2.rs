@@ -538,6 +538,10 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         writable: None,
         subagents,
         mcp,
+        skills: Default::default(),
+        hooks: Default::default(),
+        agents: Default::default(),
+        only: None,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);
@@ -636,6 +640,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         Ok(TurnEnd::StepLimit(a)) => ("step_limit", a.map(|a| a.text)),
         Ok(TurnEnd::Stuck(_)) => ("stuck", None),
         Ok(TurnEnd::TimeLimit) => ("time_limit", None),
+        Ok(TurnEnd::NotRun(_)) => ("not_run", None),
         Err(_) => ("error", None),
     };
     Ok(RunResult {
@@ -729,6 +734,10 @@ fn judge(
         }
         Ok(TurnEnd::TimeLimit) => {
             out.push("the turn reached its time limit".into());
+            None
+        }
+        Ok(TurnEnd::NotRun(why)) => {
+            out.push(format!("the turn did not run: {why}"));
             None
         }
         Err(err) => {
