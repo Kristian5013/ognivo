@@ -35,6 +35,10 @@ async fn a_server_of_the_initialize_era_starts_lists_and_answers() {
     let g = Gateway::start(&[echo(), missing], Duration::from_secs(20), None).await;
     let started = g.started();
     assert_eq!(started[0].outcome, Ok(3), "{started:?}");
+    assert_eq!(
+        started[0].instructions.as_deref(),
+        Some("Use echo to say a text back.")
+    );
     assert!(
         matches!(&started[1].outcome, Err(why) if why.starts_with("/nonexistent/mcp-server")),
         "{started:?}"

@@ -804,10 +804,20 @@ fn mcp_note(g: &ognivo_mcp::Gateway) -> Option<String> {
     } else {
         ""
     };
-    Some(format!(
+    let mut note = format!(
         "MCP servers give tools that reach beyond the project: {}. A question about what they cover (the user's services, live data, documents that are not among the project's files) needs them: call the tool{found} rather than answer from memory or search the project for it.",
         servers.join(", ")
-    ))
+    );
+    // what each server says about using it, as Claude Code gives it
+    for s in g.started() {
+        if let Some(text) = &s.instructions {
+            note.push_str(&format!(
+                "\n\nThe MCP server {} says how to use it:\n{text}",
+                s.name
+            ));
+        }
+    }
+    Some(note)
 }
 
 impl Agent {

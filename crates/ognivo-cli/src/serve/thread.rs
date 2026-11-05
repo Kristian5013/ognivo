@@ -382,7 +382,47 @@ async fn open(
             );
         }
     }
-    notes.extend(s.start_mcp().await.into_iter().map(|(line, _)| line));
+    let mut started: Vec<String> = s
+        .start_mcp()
+        .await
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect();
+    // a remote server that wants a sign-in: in the browser now, if the user says so
+    let mut signed = false;
+    for (server, challenge) in s.mcp_wanting_sign_in() {
+        let asked = rpc::McpSignInAsked {
+            project: root.display().to_string(),
+            server: rpc::McpServer {
+                name: server.name.clone(),
+                command: server.shown(),
+            },
+        };
+        let yes = hub
+            .ask(rpc::MCP_SIGN_IN, json!(asked))
+            .await
+            .and_then(|v| serde_json::from_value::<rpc::SignInAnswer>(v).ok())
+            .is_some_and(|a| a.sign_in);
+        if !yes {
+            continue;
+        }
+        match s
+            .sign_in_mcp(&server, &challenge, crate::session::open_in_browser)
+            .await
+        {
+            Ok(()) => signed = true,
+            Err(why) => notes.push(format!("mcp {}: {why}", server.name)),
+        }
+    }
+    if signed {
+        started = s
+            .start_mcp()
+            .await
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+    }
+    notes.extend(started);
     let (limit, planned) = (
         compact::limit(&s.opts.context, s.opts.n_ctx),
         compact::limit(&s.opts.context, None),

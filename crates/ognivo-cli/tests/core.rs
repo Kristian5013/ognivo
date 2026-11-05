@@ -17,12 +17,18 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 fn core(dir: &Path, idle: &str) -> Child {
+    core_with(dir, idle, &[])
+}
+
+/// The same with more of the environment.
+fn core_with(dir: &Path, idle: &str, env: &[(&str, &Path)]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_ognivo"))
         .args(["core", "--idle", idle, "--socket"])
         .arg(dir.join("run/core.sock"))
         .arg("--data-dir")
         .arg(dir.join("data"))
         .env("HOME", dir)
+        .envs(env.iter().copied())
         .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -623,4 +629,54 @@ async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
     assert_eq!(e["code"], -32001);
     child.kill().unwrap();
     child.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
+    let (mut mcp, mcp_url) = common::oauth_server();
+    let (url, _) = fake_server(Vec::new()).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ognivo")).unwrap();
+    let config = json!({"mcpServers": {"docs": {"type": "http", "url": mcp_url}}});
+    std::fs::write(dir.path().join(".ognivo/mcp.json"), config.to_string()).unwrap();
+    let browser = common::browser(dir.path());
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut child = core_with(dir.path(), "30", &[("BROWSER", &browser)]);
+    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    a.send(json!({"jsonrpc": "2.0", "id": 100, "method": "thread/start", "params": start(&root, &url)}))
+        .await;
+    let ask = a
+        .until(|m| m["method"] == "mcp/sign_in")
+        .await
+        .pop()
+        .unwrap();
+    assert_eq!(
+        ask["params"],
+        json!({"project": root, "server": {"name": "docs", "command": mcp_url}})
+    );
+    a.send(json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"sign_in": true}}))
+        .await;
+    let opened = loop {
+        let m = a.read().await;
+        if m["id"] == 100 {
+            break m["result"].clone();
+        }
+    };
+    let notes = opened["notes"].as_array().unwrap();
+    assert!(notes.contains(&json!("mcp docs: 1 tool")), "{opened}");
+    assert!(
+        !notes
+            .iter()
+            .any(|n| n.as_str().is_some_and(|n| n.contains("sign in"))),
+        "{opened}"
+    );
+    assert!(dir.path().join(".ognivo/mcp-auth/docs.json").exists());
+    child.kill().unwrap();
+    child.wait().unwrap();
+    mcp.kill().unwrap();
+    mcp.wait().unwrap();
 }

@@ -35,6 +35,7 @@ for line in sys.stdin:
             "protocolVersion": p.get("protocolVersion", "2025-06-18"),
             "capabilities": {"tools": {}},
             "serverInfo": {"name": "echo", "version": "1"},
+            "instructions": "Use echo to say a text back.",
         }
     elif method == "tools/list":
         result = {"tools": TOOLS}

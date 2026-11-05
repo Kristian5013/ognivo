@@ -38,6 +38,7 @@ pub const EVENT: &str = "event";
 pub const APPROVAL_ASK: &str = "approval/ask";
 pub const RULES_TRUST: &str = "rules/trust";
 pub const MCP_TRUST: &str = "mcp/trust";
+pub const MCP_SIGN_IN: &str = "mcp/sign_in";
 /// The core's notification that a request of its own no longer waits for an answer.
 pub const CANCEL: &str = "$/cancelRequest";
 
@@ -343,6 +344,20 @@ pub struct McpServer {
     pub name: String,
     /// What starts it: the command line, or the URL.
     pub command: String,
+}
+
+/// `mcp/sign_in`: a remote server of the thread wants the user to sign in (OAuth). The
+/// answer is `SignInAnswer`; with yes the core opens the user's browser on the server's
+/// page and waits for it to come back, five minutes at most, before the thread starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpSignInAsked {
+    pub project: String,
+    pub server: McpServer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SignInAnswer {
+    pub sign_in: bool,
 }
 
 /// `$/cancelRequest`: the core's request `id` no longer waits for an answer.

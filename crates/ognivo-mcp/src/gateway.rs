@@ -34,15 +34,18 @@ pub const RESULT_CHARS: usize = 24_000;
 const NAME_CHARS: usize = 64;
 /// With [`Listing::Auto`] the tools are declared up to this many, and while their
 /// declarations take no more than [`DECLARED_CHARS`] (about 6K tokens, a tenth of a 64K
-/// context); past either the model finds them with `tool_search`.
-pub const DECLARED_MAX: usize = 20;
+/// context); past either the model finds them with `tool_search`. T2, 2026-11-05: with 15
+/// and 40 tools declared, each model chose as well as with tool_search or better
+/// (tool_correct at 40: gpt-oss 14 of 15 both ways, Qwen 15 and 15, Gemma 15 and 13), and
+/// a step sooner; 40 is as many as were measured.
+pub const DECLARED_MAX: usize = 40;
 pub const DECLARED_CHARS: usize = 24_000;
 
 /// How the model gets the servers' tools.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Listing {
-    /// Declared while they are few and short ([`DECLARED_MAX`], [`DECLARED_CHARS`]),
-    /// searched past that.
+    /// Declared while there are no more than [`DECLARED_MAX`] and their declarations are
+    /// short ([`DECLARED_CHARS`]), searched past that.
     #[default]
     Auto,
     /// Each declared in the prompt, as ognivo's own are.
@@ -101,6 +104,21 @@ pub struct Started {
     /// It did not start for want of a sign-in: its `WWW-Authenticate`, for
     /// [`crate::oauth::sign_in`] (empty when it gave none).
     pub sign_in: Option<String>,
+    /// What the server says about using it (`instructions`), at most
+    /// [`INSTRUCTIONS_CHARS`].
+    pub instructions: Option<String>,
+}
+
+/// Characters of a server's instructions the model gets; the rest is cut with a note.
+pub const INSTRUCTIONS_CHARS: usize = 2_000;
+
+/// A server that started: its client, its tools, the process group of a local one, and
+/// its instructions.
+struct Up {
+    client: RunningService<RoleClient, Client>,
+    tools: Vec<rmcp::model::Tool>,
+    group: Option<u32>,
+    instructions: Option<String>,
 }
 
 /// Why a server did not start.
@@ -165,25 +183,28 @@ impl Gateway {
         let mut found: Vec<(String, rmcp::model::Tool)> = Vec::new();
         for (name, r) in futures::future::join_all(connecting).await {
             match r {
-                Ok((client, tools, group)) => {
-                    gateway.groups.extend(group);
+                Ok(up) => {
+                    gateway.groups.extend(up.group);
                     gateway.started.push(Started {
                         name: name.clone(),
-                        outcome: Ok(tools.len()),
+                        outcome: Ok(up.tools.len()),
                         sign_in: None,
+                        instructions: up.instructions,
                     });
-                    found.extend(tools.into_iter().map(|t| (name.clone(), t)));
-                    gateway.clients.insert(name, client);
+                    found.extend(up.tools.into_iter().map(|t| (name.clone(), t)));
+                    gateway.clients.insert(name, up.client);
                 }
                 Err(Failed::SignIn(challenge)) => gateway.started.push(Started {
                     outcome: Err(format!("it wants you to sign in: ognivo mcp login {name}")),
                     name,
                     sign_in: Some(challenge),
+                    instructions: None,
                 }),
                 Err(Failed::Other(why)) => gateway.started.push(Started {
                     name,
                     outcome: Err(why),
                     sign_in: None,
+                    instructions: None,
                 }),
             }
         }
@@ -278,18 +299,7 @@ impl Gateway {
 }
 
 /// A started server and its tools.
-#[allow(clippy::type_complexity)]
-async fn connect(
-    s: &ServerConfig,
-    signed: Option<&Path>,
-) -> Result<
-    (
-        RunningService<RoleClient, Client>,
-        Vec<rmcp::model::Tool>,
-        Option<u32>,
-    ),
-    Failed,
-> {
+async fn connect(s: &ServerConfig, signed: Option<&Path>) -> Result<Up, Failed> {
     let lifecycle = ClientLifecycleMode::Auto {
         preferred_versions: vec![ProtocolVersion::V_2026_07_28],
         legacy_version: Some(ProtocolVersion::V_2025_06_18),
@@ -351,7 +361,28 @@ async fn connect(
         .list_all_tools()
         .await
         .map_err(|e| Failed::Other(e.to_string()))?;
-    Ok((client, tools, group))
+    let instructions = client
+        .peer_info()
+        .and_then(|i| i.instructions.clone())
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .map(|mut t| {
+            if t.len() > INSTRUCTIONS_CHARS {
+                let mut at = INSTRUCTIONS_CHARS;
+                while !t.is_char_boundary(at) {
+                    at -= 1;
+                }
+                t.truncate(at);
+                t.push_str("\n[ognivo] cut here");
+            }
+            t
+        });
+    Ok(Up {
+        client,
+        tools,
+        group,
+        instructions,
+    })
 }
 
 /// The tools under the names the model calls them by, in order of those names.

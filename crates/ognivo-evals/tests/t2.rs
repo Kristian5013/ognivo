@@ -320,9 +320,19 @@ async fn an_mcp_scenario_runs_at_each_size_with_its_tools_declared_or_searched()
         "{project}"
     );
 
-    let many = t2::run(&scenario("mcp-current-weather@40"), &target, 1, out.path())
-        .await
-        .unwrap();
+    // forty, as many as a session declares: found with tool_search when it is asked for
+    let searching = Target {
+        mcp_listing: ognivo_mcp::Listing::Searched,
+        ..target.clone()
+    };
+    let many = t2::run(
+        &scenario("mcp-current-weather@40"),
+        &searching,
+        1,
+        out.path(),
+    )
+    .await
+    .unwrap();
     assert!(many.passed, "{:?}", many.failures);
     let m = many.mcp.as_ref().unwrap();
     assert_eq!((m.tools, m.searched, m.tool_correct), (40, true, true));
@@ -373,9 +383,14 @@ async fn an_mcp_scenario_runs_at_each_size_with_its_tools_declared_or_searched()
         "{found}"
     );
 
-    let wrong = t2::run(&scenario("mcp-current-weather@40"), &target, 2, out.path())
-        .await
-        .unwrap();
+    let wrong = t2::run(
+        &scenario("mcp-current-weather@40"),
+        &searching,
+        2,
+        out.path(),
+    )
+    .await
+    .unwrap();
     assert!(!wrong.passed);
     let m = wrong.mcp.as_ref().unwrap();
     assert!(!m.tool_correct);

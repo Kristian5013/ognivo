@@ -81,7 +81,7 @@ pub struct SessionArgs {
     pub subagents: bool,
     /// How the model gets the MCP servers' tools: `declare` each in the prompt, `search`
     /// with tool_search in their place, `auto` declares them while they are few and short
-    /// (20, about 6K tokens)
+    /// (40, about 6K tokens)
     #[arg(long, default_value = "auto", value_name = "auto|declare|search")]
     pub mcp_tools: ognivo_mcp::Listing,
 }

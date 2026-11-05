@@ -111,6 +111,12 @@ async fn a_tool_of_the_users_server_runs_when_a_rule_allows_it() {
         "Says the text back. (MCP server echo)"
     );
     assert_eq!(echo["function"]["parameters"]["required"], json!(["text"]));
+    // the server's instructions come with the project's message
+    let project = bodies[0]["messages"][1]["content"].as_str().unwrap();
+    assert!(
+        project.contains("The MCP server echo says how to use it:\nUse echo to say a text back."),
+        "{project}"
+    );
     let result = bodies[1]["messages"]
         .as_array()
         .unwrap()
@@ -218,57 +224,15 @@ async fn with_search_the_model_finds_a_tool_and_calls_it_through_mcp_call() {
     assert_eq!(last(&bodies[2]), "[mcp: echo · echo]\nhi there");
 }
 
-/// A browser for the tests: it opens the page it is given and, the user saying yes, follows
-/// the redirect back to ognivo.
-const FOLLOW: &str = r#"import sys
-import urllib.error
-import urllib.request
-
-
-class Stay(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None
-
-
-try:
-    urllib.request.build_opener(Stay).open(sys.argv[1])
-    sys.exit("no redirect")
-except urllib.error.HTTPError as e:
-    back = e.headers["Location"]
-urllib.request.urlopen(back).read()
-"#;
-
 #[test]
 fn a_remote_server_is_signed_in_to_from_the_command_line_and_out_again() {
-    use std::io::BufRead as _;
-    use std::os::unix::fs::PermissionsExt as _;
-    let script =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ognivo-mcp/tests/fixtures/oauth_server.py");
-    let mut server = Command::new("python3")
-        .arg("-I")
-        .arg(&script)
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut port = String::new();
-    std::io::BufReader::new(server.stdout.take().unwrap())
-        .read_line(&mut port)
-        .unwrap();
-    let url = format!("http://127.0.0.1:{}/mcp", port.trim());
+    let (mut server, url) = common::oauth_server();
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join(".ognivo")).unwrap();
     std::fs::create_dir_all(dir.path().join("proj")).unwrap();
     let config = json!({"mcpServers": {"docs": {"type": "http", "url": url}}});
     std::fs::write(dir.path().join(".ognivo/mcp.json"), config.to_string()).unwrap();
-    let follow = dir.path().join("follow.py");
-    std::fs::write(&follow, FOLLOW).unwrap();
-    let browser = dir.path().join("browser");
-    std::fs::write(
-        &browser,
-        format!("#!/bin/sh\nexec python3 -I '{}' \"$1\"\n", follow.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let browser = common::browser(dir.path());
     let mcp = |args: &[&str]| -> (bool, String) {
         let out = Command::new(env!("CARGO_BIN_EXE_ognivo"))
             .arg("mcp")

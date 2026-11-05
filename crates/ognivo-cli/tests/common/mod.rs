@@ -162,3 +162,54 @@ async fn read_request(sock: &mut TcpStream) -> (String, Vec<u8>) {
         }
     }
 }
+
+/// A browser for the tests, as `$BROWSER` names one: it opens the page it is given and,
+/// the user saying yes, follows the redirect back to ognivo. Written under `dir`.
+pub fn browser(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    const FOLLOW: &str = r#"import sys
+import urllib.error
+import urllib.request
+
+
+class Stay(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+try:
+    urllib.request.build_opener(Stay).open(sys.argv[1])
+    sys.exit("no redirect")
+except urllib.error.HTTPError as e:
+    back = e.headers["Location"]
+urllib.request.urlopen(back).read()
+"#;
+    let follow = dir.join("follow.py");
+    std::fs::write(&follow, FOLLOW).unwrap();
+    let browser = dir.join("browser");
+    std::fs::write(
+        &browser,
+        format!("#!/bin/sh\nexec python3 -I '{}' \"$1\"\n", follow.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+    browser
+}
+
+/// ognivo-mcp's MCP server behind OAuth, its own authorization server too, and its URL.
+pub fn oauth_server() -> (std::process::Child, String) {
+    use std::io::BufRead as _;
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../ognivo-mcp/tests/fixtures/oauth_server.py");
+    let mut child = std::process::Command::new("python3")
+        .arg("-I")
+        .arg(&script)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut port = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut port)
+        .unwrap();
+    (child, format!("http://127.0.0.1:{}/mcp", port.trim()))
+}

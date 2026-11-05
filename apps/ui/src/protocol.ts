@@ -548,6 +548,10 @@ export type McpServer = { name: string,
  */
 command: string, };
 
+export type McpSignInAsked = { project: string, server: McpServer, };
+
+export type SignInAnswer = { sign_in: boolean, };
+
 export type Cancel = { id: number, };
 
 /** The core's methods. */
@@ -575,6 +579,7 @@ export type Asks = {
   "approval/ask": { params: ApprovalAsked; result: ApprovalAnswer };
   "rules/trust": { params: TrustAsked; result: TrustAnswer };
   "mcp/trust": { params: McpTrustAsked; result: TrustAnswer };
+  "mcp/sign_in": { params: McpSignInAsked; result: SignInAnswer };
 };
 
 export const NOTIFY_EVENT = "event";

@@ -118,6 +118,16 @@ async fn list(
                     config.shown()
                 );
                 println!("  {n} tool{}", if *n == 1 { "" } else { "s" });
+                if let Some(text) = &started.instructions {
+                    let first: String = text
+                        .lines()
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(90)
+                        .collect();
+                    println!("  says: {first}");
+                }
                 for t in gateway.tools().iter().filter(|t| t.server == config.name) {
                     let about: String = t
                         .description
