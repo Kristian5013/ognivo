@@ -242,6 +242,7 @@ fn args(hub: &Hub, server: &rpc::Server, cwd: Option<PathBuf>) -> SessionArgs {
         native: false,
         priors: false,
         subagents: false,
+        mcp_tools: ognivo_mcp::Listing::Auto,
     }
 }
 

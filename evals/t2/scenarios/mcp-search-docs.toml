@@ -1,0 +1,9 @@
+category = "mcp"
+prompt = "Our internal docs explain how to rotate the API signing key. Which command does it take?"
+
+[mcp]
+tools = [5, 15, 40]
+
+[expect]
+mcp = { tool = "search_docs" }
+answer = ["keyctl"]

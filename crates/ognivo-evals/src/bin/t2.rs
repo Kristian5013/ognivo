@@ -1,13 +1,15 @@
 //! T2-mini against a running llama-server:
 //!
 //!   t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]]
-//!      [--subagents] [--scenarios DIR]
+//!      [--subagents] [--scenarios DIR] [--mcp-tools auto|declare|search]
 //!
 //! Runs every scenario of `evals/t2/scenarios` or DIR (or those whose id or category holds TEXT)
 //! with each seed, one line per run, then the summary; `--native` runs them on the Native
 //! path, and the summary names the profile `ID+native`. `--priors` gives gpt-oss the tools
 //! of its training (`ID+native+priors`), `--subagents` lets the agent delegate
-//! (`…+subagents`). DIR keeps the results
+//! (`…+subagents`). `--mcp-tools` says how the `mcp` scenarios get their server's tools
+//! (`auto` by default, as a session does; another names the suite `…+mcp-declare` or
+//! `…+mcp-search`). DIR keeps the results
 //! (`results.jsonl`, one run per line), the summary (`summary.json`), the sessions
 //! (`sessions.db`), their trajectories (`traces/`) and the projects of failed runs
 //! (`work/`). Runs already in `results.jsonl` are not run again, so an interrupted suite
@@ -34,6 +36,7 @@ struct Args {
     priors: bool,
     subagents: bool,
     scenarios: PathBuf,
+    mcp_tools: ognivo_mcp::Listing,
 }
 
 fn args() -> Result<Args, String> {
@@ -41,6 +44,7 @@ fn args() -> Result<Args, String> {
     let (mut url, mut profile, mut out, mut seeds, mut only) = (None, None, None, vec![1], None);
     let (mut native, mut priors, mut subagents) = (false, false, false);
     let mut scenarios = t2::scenarios_dir();
+    let mut mcp_tools = ognivo_mcp::Listing::Auto;
     while let Some(flag) = it.next() {
         let mut value = || it.next().ok_or(format!("{flag} needs a value"));
         match flag.as_str() {
@@ -52,6 +56,9 @@ fn args() -> Result<Args, String> {
             "--priors" => priors = true,
             "--subagents" => subagents = true,
             "--scenarios" => scenarios = PathBuf::from(value()?),
+            "--mcp-tools" => {
+                mcp_tools = value()?.parse().map_err(|e| format!("--mcp-tools: {e}"))?
+            }
             "--seeds" => {
                 seeds = value()?
                     .split(',')
@@ -79,6 +86,7 @@ fn args() -> Result<Args, String> {
         priors,
         subagents,
         scenarios,
+        mcp_tools,
     })
 }
 
@@ -88,7 +96,7 @@ async fn main() -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!(
-                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]] [--subagents] [--scenarios DIR]"
+                "t2: {e}\nusage: t2 --url URL --profile ID --out DIR [--seeds 1,2,3] [--only TEXT] [--native [--priors]] [--subagents] [--scenarios DIR] [--mcp-tools auto|declare|search]"
             );
             return ExitCode::from(2);
         }
@@ -168,6 +176,9 @@ async fn suite(a: &Args) -> Result<Summary, String> {
         },
         subagents: a.subagents,
         slots: props.total_slots.unwrap_or(1),
+        // the scenarios' server sits beside them
+        mcp_server: a.scenarios.join("../mcp/workspace.py"),
+        mcp_listing: a.mcp_tools,
     };
     // the night report tells the paths apart by this name
     let mut name = match (a.native, a.priors) {
@@ -177,6 +188,11 @@ async fn suite(a: &Args) -> Result<Summary, String> {
     };
     if a.subagents {
         name.push_str("+subagents");
+    }
+    match a.mcp_tools {
+        ognivo_mcp::Listing::Auto => {}
+        ognivo_mcp::Listing::Declared => name.push_str("+mcp-declare"),
+        ognivo_mcp::Listing::Searched => name.push_str("+mcp-search"),
     }
     let wanted: HashSet<String> = scenarios.iter().map(|s| s.id.clone()).collect();
     let ambiguous = t2::ambiguous(&scenarios);
@@ -263,6 +279,14 @@ fn print_summary(s: &Summary) {
     println!("  edit first try  {}", pct(&s.edit_first_try));
     println!("    ambiguous     {}", pct(&s.edit_first_try_ambiguous));
     println!("  cache hit       {}", pct(&s.cache_hit));
+    for t in &s.tool_correct {
+        let how = if t.searched { "searched" } else { "declared" };
+        println!(
+            "  tool_correct    {:>2} tools, {how}: {}",
+            t.tools,
+            pct(&t.rate)
+        );
+    }
     let c = &s.counts;
     println!(
         "  truncated calls executed: {} · truncated {} · malformed {} · loops stopped {} · empty answers {} · format errors {} · repeated calls {}",

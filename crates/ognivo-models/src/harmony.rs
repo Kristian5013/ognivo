@@ -459,37 +459,57 @@ fn tools_section(namespaces: &[Namespace]) -> String {
     let mut sorted: Vec<&Namespace> = namespaces.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let mut sections = vec!["# Tools".to_owned()];
-    for ns in sorted {
-        let mut lines = vec![format!("## {}\n", ns.name)];
-        if let Some(desc) = &ns.description {
-            for line in desc.lines() {
-                lines.push(if ns.tools.is_empty() {
-                    line.to_owned()
-                } else {
-                    format!("// {line}")
-                });
-            }
-        }
-        if !ns.tools.is_empty() {
-            lines.push(format!("namespace {} {{\n", ns.name));
-            for tool in &ns.tools {
-                for line in tool.description.lines() {
-                    lines.push(format!("// {line}"));
-                }
-                match &tool.parameters {
-                    Some(params) => lines.push(format!(
-                        "type {} = (_: {}) => any;\n",
-                        tool.name,
-                        typescript(params, "")
-                    )),
-                    None => lines.push(format!("type {} = () => any;\n", tool.name)),
-                }
-            }
-            lines.push(format!("}} // namespace {}", ns.name));
-        }
-        sections.push(lines.join("\n"));
-    }
+    sections.extend(sorted.into_iter().map(namespace_text));
     sections.join("\n\n")
+}
+
+/// `tools` as the developer message declares them, in the `functions` namespace: for a
+/// tool result that declares tools the prompt does not (`tool_search`).
+pub fn functions_text(tools: &[crate::generic::ToolDecl]) -> String {
+    namespace_text(&Namespace {
+        name: "functions".into(),
+        description: None,
+        tools: tools
+            .iter()
+            .map(|t| Tool {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                parameters: Some(t.parameters.clone()),
+            })
+            .collect(),
+    })
+}
+
+/// One namespace of `# Tools`: its heading, its description, its tools.
+fn namespace_text(ns: &Namespace) -> String {
+    let mut lines = vec![format!("## {}\n", ns.name)];
+    if let Some(desc) = &ns.description {
+        for line in desc.lines() {
+            lines.push(if ns.tools.is_empty() {
+                line.to_owned()
+            } else {
+                format!("// {line}")
+            });
+        }
+    }
+    if !ns.tools.is_empty() {
+        lines.push(format!("namespace {} {{\n", ns.name));
+        for tool in &ns.tools {
+            for line in tool.description.lines() {
+                lines.push(format!("// {line}"));
+            }
+            match &tool.parameters {
+                Some(params) => lines.push(format!(
+                    "type {} = (_: {}) => any;\n",
+                    tool.name,
+                    typescript(params, "")
+                )),
+                None => lines.push(format!("type {} = () => any;\n", tool.name)),
+            }
+        }
+        lines.push(format!("}} // namespace {}", ns.name));
+    }
+    lines.join("\n")
 }
 
 fn is_enum(schema: &Value) -> bool {

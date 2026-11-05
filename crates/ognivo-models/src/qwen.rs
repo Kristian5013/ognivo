@@ -359,6 +359,13 @@ pub(crate) fn sealed(ids: &[TokenId]) -> Vec<TokenId> {
 }
 
 /// A tool as the template's `tools` holds it, in the OpenAI form.
+/// `tools` as the system message declares them, the `<tools>` block: for a tool result that
+/// declares tools the prompt does not (`tool_search`).
+pub fn tools_text(tools: &[ToolDecl]) -> String {
+    let lines: Vec<String> = tools.iter().map(|t| python_json(&tool_json(t))).collect();
+    format!("<tools>\n{}\n</tools>", lines.join("\n"))
+}
+
 fn tool_json(t: &ToolDecl) -> Value {
     let mut function = Map::new();
     function.insert("name".into(), Value::String(t.name.clone()));

@@ -19,7 +19,13 @@ fn echo_server() -> Value {
 
 /// `ognivo run` in `dir/proj` with `dir` as the home, the task on stdin.
 async fn run(dir: &Path, url: &str) -> Output {
+    run_with(dir, url, &[]).await
+}
+
+/// The same with more flags.
+async fn run_with(dir: &Path, url: &str, flags: &[&str]) -> Output {
     let (dir, url) = (dir.to_owned(), url.to_owned());
+    let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
     tokio::task::spawn_blocking(move || {
         let mut child = Command::new(env!("CARGO_BIN_EXE_ognivo"))
             .args([
@@ -35,6 +41,7 @@ async fn run(dir: &Path, url: &str) -> Output {
             .arg(dir.join("data"))
             .arg("--cwd")
             .arg(dir.join("proj"))
+            .args(&flags)
             .env("HOME", &dir)
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
@@ -144,4 +151,52 @@ async fn without_a_rule_nobody_can_say_yes_and_the_projects_servers_wait() {
         text.starts_with("[refused] echo · echo needs the user's approval"),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn with_search_the_model_finds_a_tool_and_calls_it_through_mcp_call() {
+    let (url, bodies) = fake_server(vec![
+        call_stream("m1", "tool_search", r#"{"query":"say text back"}"#),
+        call_stream(
+            "m2",
+            "mcp_call",
+            r#"{"tool":"mcp__echo__echo","arguments":{"text":"hi there"}}"#,
+        ),
+        answer_stream("It said hi there."),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    home(dir.path(), true);
+    let out = run_with(dir.path(), &url, &["--mcp-tools", "search"]).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("mcp: 3 tools, which the model finds with tool_search"),
+        "{stderr}"
+    );
+    let bodies = bodies.lock().unwrap();
+    let names = |b: &Value| -> Vec<String> {
+        b["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    // the same tools in every request: tool_search and mcp_call stand for the server's
+    assert_eq!(names(&bodies[0]), names(&bodies[2]));
+    assert_eq!(
+        &names(&bodies[0])[names(&bodies[0]).len() - 2..],
+        ["tool_search", "mcp_call"]
+    );
+    let last = |b: &Value| b["messages"].as_array().unwrap().last().unwrap()["content"].clone();
+    let found = last(&bodies[1]);
+    let found = found.as_str().unwrap();
+    assert!(
+        found.starts_with("[tool_search: 1 tool for \"say text back\"]"),
+        "{found}"
+    );
+    assert!(found.contains("type mcp__echo__echo = (_: {"), "{found}");
+    // the rule on the tool holds through mcp_call
+    assert_eq!(last(&bodies[2]), "[mcp: echo · echo]\nhi there");
 }

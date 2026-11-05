@@ -345,6 +345,7 @@ impl View {
                 .map(|p| self.path(p))
                 .collect::<Vec<_>>()
                 .join(", "),
+            Some(Call::ToolSearch { query }) => format!("«{query}»"),
             None => arguments.to_owned(),
         };
         format!("→ {name} {}", short(&what, LINE_CHARS))
@@ -434,6 +435,7 @@ fn name_of(call: &Call) -> &'static str {
         Call::Glob { .. } => "glob",
         Call::Delegate { .. } => "delegate",
         Call::Mcp { .. } => "mcp",
+        Call::ToolSearch { .. } => "tool_search",
     }
 }
 

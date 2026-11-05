@@ -114,6 +114,8 @@ function toCall(c: P.Call): Call | undefined {
       return { name: "Task", tasks: c.tasks.map((t) => ({ title: t.title, write: t.write, files: t.files })) };
     case "Mcp":
       return { name: "Mcp", server: c.server, tool: c.tool, arguments: c.arguments };
+    case "ToolSearch":
+      return { name: "ToolSearch", query: c.query };
   }
 }
 

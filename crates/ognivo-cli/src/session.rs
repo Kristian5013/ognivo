@@ -79,6 +79,11 @@ pub struct SessionArgs {
     /// medium reasoning, each step taking its turn at the server's slots
     #[arg(long)]
     pub subagents: bool,
+    /// How the model gets the MCP servers' tools: `declare` each in the prompt, `search`
+    /// with tool_search in their place, `auto` declares them while they are few and short
+    /// (20, about 6K tokens)
+    #[arg(long, default_value = "auto", value_name = "auto|declare|search")]
+    pub mcp_tools: ognivo_mcp::Listing,
 }
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
@@ -125,6 +130,7 @@ pub struct Connected {
     pub rule_problems: Vec<String>,
     /// The MCP servers configured for the project; [`Connected::start_mcp`] starts them.
     pub mcp: ognivo_mcp::Loaded,
+    mcp_tools: ognivo_mcp::Listing,
     pub opts: AgentOptions,
 }
 
@@ -147,7 +153,9 @@ impl Connected {
         if self.mcp.servers.is_empty() {
             return lines;
         }
-        let gateway = ognivo_mcp::Gateway::start(&self.mcp.servers, MCP_START).await;
+        let gateway = ognivo_mcp::Gateway::start(&self.mcp.servers, MCP_START)
+            .await
+            .with_listing(self.mcp_tools);
         for s in gateway.started() {
             lines.push(match &s.outcome {
                 Ok(n) => (
@@ -156,6 +164,15 @@ impl Connected {
                 ),
                 Err(why) => (format!("mcp {} did not start: {why}", s.name), true),
             });
+        }
+        if gateway.searched() {
+            lines.push((
+                format!(
+                    "mcp: {} tools, which the model finds with tool_search",
+                    gateway.tools().len()
+                ),
+                false,
+            ));
         }
         self.opts.mcp = Some(Arc::new(gateway));
         lines
@@ -411,6 +428,7 @@ impl SessionArgs {
                 mcp: None,
             },
             mcp,
+            mcp_tools: self.mcp_tools,
             changed,
             pending: loaded.pending,
             rule_files: loaded.files,

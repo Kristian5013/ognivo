@@ -43,6 +43,8 @@ export function summary(call: Call): string {
       return `${call.tasks.length} ${call.tasks.length === 1 ? "task" : "tasks"}: ${call.tasks.map((t) => t.title).join(", ")}`;
     case "Mcp":
       return `${call.server} · ${call.tool}`;
+    case "ToolSearch":
+      return `«${call.query}»`;
   }
 }
 

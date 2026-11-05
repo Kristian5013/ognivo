@@ -242,12 +242,18 @@ pub enum Call {
     Task {
         tasks: Vec<Task>,
     },
-    /// A tool of an MCP server, `mcp__<server>__<tool>` to the model.
+    /// A tool of an MCP server, `mcp__<server>__<tool>` to the model, or one it called
+    /// through `mcp_call`.
     Mcp {
         server: String,
         tool: String,
         /// The arguments as the model wrote them, a JSON object.
         arguments: String,
+    },
+    /// `tool_search`: the MCP servers' tools that fit `query`, when there are too many to
+    /// declare.
+    ToolSearch {
+        query: String,
     },
 }
 

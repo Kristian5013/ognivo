@@ -39,11 +39,11 @@ use ognivo_models::{
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
 use ognivo_tools::files::{self, EditPlan, FileError, LineStyle, Target};
-use ognivo_tools::projection::{self, Call};
+use ognivo_tools::projection::{self, ArgError, Call};
 pub use ognivo_tools::projection::{Layout, Toolset};
 use ognivo_tools::{Effect, ExecContext, classify_command, search};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::approval::{self, Decision, FileEdit, WorkspaceState};
@@ -421,6 +421,8 @@ pub struct Agent {
     /// subagents.
     toolset: Toolset,
     tools: Vec<ToolDecl>,
+    /// The MCP tools the prompt does not declare ([`StepRequest::callable`]).
+    callable: Vec<ToolDecl>,
     opts: AgentOptions,
     approver: Box<dyn Approver>,
     messages: Vec<ChatMessage>,
@@ -482,22 +484,144 @@ const STEPS_LEFT_NOTE: u32 = 2;
 /// How long an MCP tool may take; a turn's time limit cuts it shorter.
 const MCP_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// The tools that stand for the MCP servers' when there are too many to declare
+/// ([`ognivo_mcp::Listing`]).
+const TOOL_SEARCH: &str = "tool_search";
+const MCP_CALL: &str = "mcp_call";
+/// Tools one search gives at most.
+const SEARCH_LIMIT: usize = 5;
+
 /// The tools an agent declares: ognivo's for its family and layout, then those of its MCP
-/// servers, by name.
+/// servers, by name, or `tool_search` and `mcp_call` in their place.
 fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset) -> Vec<ToolDecl> {
     let mut tools = projection::declarations_for(family, opts.layout, toolset);
     if let Some(g) = &opts.mcp {
-        tools.extend(g.tools().iter().map(|t| ToolDecl {
-            name: t.name.clone(),
-            description: if t.description.is_empty() {
-                format!("A tool of the MCP server {}.", t.server)
-            } else {
-                format!("{} (MCP server {})", t.description, t.server)
-            },
-            parameters: t.schema.clone(),
-        }));
+        if g.searched() {
+            tools.extend(search_tools(g));
+        } else {
+            tools.extend(g.tools().iter().map(declaration_of));
+        }
     }
     tools
+}
+
+/// The MCP tools the prompt does not declare, which the model may still call by name
+/// where its driver can ([`ModelDriver::calls_undeclared`]).
+fn callable_of(opts: &AgentOptions) -> Vec<ToolDecl> {
+    match &opts.mcp {
+        Some(g) if g.searched() => g.tools().iter().map(declaration_of).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// An MCP tool as the model sees it declared.
+fn declaration_of(t: &ognivo_mcp::Tool) -> ToolDecl {
+    ToolDecl {
+        name: t.name.clone(),
+        description: if t.description.is_empty() {
+            format!("A tool of the MCP server {}.", t.server)
+        } else {
+            format!("{} (MCP server {})", t.description, t.server)
+        },
+        parameters: t.schema.clone(),
+    }
+}
+
+/// `tool_search` and `mcp_call`. The names of all the tools are `mcp_call`'s choices, so
+/// the model knows what there is and cannot call what there is not; the prompt holds them
+/// whatever a search finds.
+fn search_tools(g: &ognivo_mcp::Gateway) -> [ToolDecl; 2] {
+    let servers: Vec<&str> = g
+        .started()
+        .iter()
+        .filter(|s| s.outcome.as_ref().is_ok_and(|n| *n > 0))
+        .map(|s| s.name.as_str())
+        .collect();
+    let names: Vec<Value> = g.tools().iter().map(|t| json!(t.name)).collect();
+    [
+        ToolDecl {
+            name: TOOL_SEARCH.into(),
+            description: format!(
+                "Finds tools of the MCP servers {} ({} tools) by what they do and gives their declarations. `query`: a few words of what the tool should do, or `select:` and tool names, separated by commas.",
+                servers.join(", "),
+                g.tools().len()
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            }),
+        },
+        ToolDecl {
+            name: MCP_CALL.into(),
+            description: "Calls a tool of the MCP servers: `tool` is its name, `arguments` its parameters, as tool_search declares them.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "enum": names},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["tool", "arguments"],
+            }),
+        },
+    ]
+}
+
+/// A `tool_search` call's query.
+fn search_call(arguments: &str) -> Result<Call, ArgError> {
+    let tool = || TOOL_SEARCH.to_owned();
+    let v: Value =
+        serde_json::from_str(arguments).map_err(|_| ArgError::NotObject { tool: tool() })?;
+    let Some(m) = v.as_object() else {
+        return Err(ArgError::NotObject { tool: tool() });
+    };
+    match m.get("query") {
+        Some(Value::String(q)) if !q.trim().is_empty() => Ok(Call::ToolSearch {
+            query: q.trim().to_owned(),
+        }),
+        _ => Err(ArgError::Missing {
+            tool: tool(),
+            arg: "query".into(),
+        }),
+    }
+}
+
+/// An `mcp_call` call: the tool it names, with its arguments. Arguments written as a JSON
+/// text are read as the object they hold.
+fn mcp_call(g: &ognivo_mcp::Gateway, arguments: &str) -> Result<Call, ArgError> {
+    let tool = || MCP_CALL.to_owned();
+    let v: Value =
+        serde_json::from_str(arguments).map_err(|_| ArgError::NotObject { tool: tool() })?;
+    let Some(m) = v.as_object() else {
+        return Err(ArgError::NotObject { tool: tool() });
+    };
+    let Some(name) = m.get("tool").and_then(Value::as_str) else {
+        return Err(ArgError::Missing {
+            tool: tool(),
+            arg: "tool".into(),
+        });
+    };
+    let Some(t) = g.tool(name.trim()) else {
+        let names: Vec<&str> = g.tools().iter().map(|t| t.name.as_str()).collect();
+        return Err(ArgError::UnknownTool(name.to_owned(), names.join(", ")));
+    };
+    let arguments = match m.get("arguments") {
+        None | Some(Value::Null) => "{}".to_owned(),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(Value::Object(o)) => Value::Object(o).to_string(),
+            _ => {
+                return Err(ArgError::NotObject {
+                    tool: t.name.clone(),
+                });
+            }
+        },
+        Some(v) => v.to_string(),
+    };
+    Ok(Call::Mcp {
+        server: t.server.clone(),
+        tool: t.tool.clone(),
+        arguments,
+    })
 }
 
 /// The fixed instructions of every session. Short on purpose: the reference agents that
@@ -576,6 +700,7 @@ impl Agent {
                 ChatMessage::User(project_context(&opts.root, &prompt_instructions.text)),
             ],
             tools: tools_of(family, &opts, toolset),
+            callable: callable_of(&opts),
             toolset,
             driver,
             family,
@@ -994,6 +1119,7 @@ impl Agent {
         StepRequest {
             messages,
             tools: self.tools.clone(),
+            callable: self.callable.clone(),
             tool_choice,
             max_tokens: self.opts.context.max_tokens,
             seed: self.opts.seed.wrapping_add(self.stats.steps),
@@ -1508,14 +1634,18 @@ impl Agent {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
         // a tool of an MCP server is the server's to check
-        let mcp = self.opts.mcp.as_ref().and_then(|g| g.tool(&call.name));
-        let parsed = match mcp {
-            Some(t) => Ok(Call::Mcp {
+        let gateway = self.opts.mcp.clone();
+        let searched = gateway.as_ref().is_some_and(|g| g.searched());
+        let mcp = gateway.as_ref().and_then(|g| g.tool(&call.name));
+        let parsed = match (mcp, gateway.as_deref()) {
+            (Some(t), _) => Ok(Call::Mcp {
                 server: t.server.clone(),
                 tool: t.tool.clone(),
                 arguments: call.arguments.clone(),
             }),
-            None => projection::parse_for(
+            (None, Some(_)) if searched && call.name == TOOL_SEARCH => search_call(&call.arguments),
+            (None, Some(g)) if searched && call.name == MCP_CALL => mcp_call(g, &call.arguments),
+            (None, _) => projection::parse_for(
                 self.family,
                 self.opts.layout,
                 self.toolset,
@@ -1793,6 +1923,10 @@ impl Agent {
                 }
             }
             Call::Delegate { tasks } => self.delegate(tasks, on).await,
+            Call::ToolSearch { query } => match self.opts.mcp.clone() {
+                Some(g) => self.search_result(&g, &query),
+                None => "[error] this session has no MCP servers".into(),
+            },
             Call::Mcp {
                 server,
                 tool: name,
@@ -1801,6 +1935,16 @@ impl Agent {
                 let Some(gateway) = self.opts.mcp.clone() else {
                     return "[error] this session has no MCP servers".into();
                 };
+                // the model's name for it, whether it called it by that or through mcp_call
+                let Some(tool) = gateway
+                    .tools()
+                    .iter()
+                    .find(|t| t.server == server && t.tool == name)
+                    .map(|t| t.name.clone())
+                else {
+                    return format!("[error] the server {server} has no tool {name}");
+                };
+                let tool = tool.as_str();
                 let ruling = self.opts.rules.mcp(&server, &name);
                 // the question is the tool's: allowed for the session, it runs with any
                 // arguments
@@ -2080,6 +2224,41 @@ impl Agent {
     fn can_run_project_code(&self) -> bool {
         approval::decide(Effect::ExecutesProjectCode, self.workspace()) == Decision::Allow
             || self.approver.can_ask()
+    }
+
+    /// What `tool_search` gives the model: the tools that fit `query`, declared as its
+    /// prompt declares tools, and how to call them; all their names when none fits.
+    fn search_result(&self, g: &ognivo_mcp::Gateway, query: &str) -> String {
+        let found = g.search(query, SEARCH_LIMIT);
+        let mut text = String::new();
+        for n in &found.unknown {
+            text.push_str(&format!("No tool is named {n}.\n"));
+        }
+        if found.tools.is_empty() {
+            let names: Vec<&str> = g.tools().iter().map(|t| t.name.as_str()).collect();
+            return format!(
+                "[tool_search: no tool fits \"{query}\"]\n{text}The tools of the MCP servers: {}. Search with other words, or with select: and their names.",
+                names.join(", ")
+            );
+        }
+        let n = found.tools.len();
+        let decls: Vec<ToolDecl> = found.tools.iter().map(|t| declaration_of(t)).collect();
+        let how = if self.driver.calls_undeclared() {
+            if n == 1 {
+                "Call it by its name, as the other tools."
+            } else {
+                "Call them by their names, as the other tools."
+            }
+        } else if n == 1 {
+            "Call it with mcp_call: `tool` is its name, `arguments` its parameters."
+        } else {
+            "Call one with mcp_call: `tool` is its name, `arguments` its parameters."
+        };
+        format!(
+            "[tool_search: {n} tool{} for \"{query}\"]\n{text}{}\n\n{how}",
+            if n == 1 { "" } else { "s" },
+            ognivo_models::declarations(self.family, &decls)
+        )
     }
 
     /// `None` when the action may go ahead; otherwise the refusal the model reads.

@@ -222,7 +222,7 @@ export type Call = { "name": "Read", path: string, offset: number | null, limit:
 /**
  * The arguments as the model wrote them, a JSON object.
  */
-arguments: string, };
+arguments: string, } | { "name": "ToolSearch", query: string, };
 
 export type Task = { title: string, goal: string, context: string | null, write: boolean, files: Array<string>, };
 

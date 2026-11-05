@@ -9,8 +9,11 @@
 //! - A result is text for the model: the content's text, what is not text named; the
 //!   structured content when there is nothing else; an error marked as one; and no more than
 //!   [`RESULT_CHARS`] of it.
+//! - When there are too many tools to declare ([`Listing`]), the model gets `tool_search`
+//!   in their place, which [`search`] answers, and calls them through `mcp_call`: the prompt
+//!   stays the same whatever it finds.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -28,6 +31,37 @@ use crate::config::{ServerConfig, Transport};
 pub const RESULT_CHARS: usize = 24_000;
 /// Characters of a tool's name, as OpenAI's API allows them.
 const NAME_CHARS: usize = 64;
+/// With [`Listing::Auto`] the tools are declared up to this many, and while their
+/// declarations take no more than [`DECLARED_CHARS`] (about 6K tokens, a tenth of a 64K
+/// context); past either the model finds them with `tool_search`.
+pub const DECLARED_MAX: usize = 20;
+pub const DECLARED_CHARS: usize = 24_000;
+
+/// How the model gets the servers' tools.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Listing {
+    /// Declared while they are few and short ([`DECLARED_MAX`], [`DECLARED_CHARS`]),
+    /// searched past that.
+    #[default]
+    Auto,
+    /// Each declared in the prompt, as ognivo's own are.
+    Declared,
+    /// Found with `tool_search` and called through `mcp_call`.
+    Searched,
+}
+
+impl std::str::FromStr for Listing {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Listing::Auto),
+            "declare" | "declared" => Ok(Listing::Declared),
+            "search" | "searched" => Ok(Listing::Searched),
+            other => Err(format!("{other:?}: auto, declare or search")),
+        }
+    }
+}
 
 /// The client ognivo is to a server.
 #[derive(Debug, Clone, Copy)]
@@ -73,6 +107,7 @@ pub struct Gateway {
     started: Vec<Started>,
     /// The process groups of the stdio servers, which end with the gateway.
     groups: Vec<u32>,
+    listing: Listing,
 }
 
 impl Drop for Gateway {
@@ -129,8 +164,36 @@ impl Gateway {
         &self.tools
     }
 
+    /// The gateway, with its tools given to the model as `listing` says.
+    pub fn with_listing(mut self, listing: Listing) -> Self {
+        self.listing = listing;
+        self
+    }
+
+    /// Whether the model finds the tools with `tool_search` rather than having them
+    /// declared.
+    pub fn searched(&self) -> bool {
+        match self.listing {
+            Listing::Declared => false,
+            Listing::Searched => !self.tools.is_empty(),
+            Listing::Auto => {
+                let chars: usize = self
+                    .tools
+                    .iter()
+                    .map(|t| t.name.len() + t.description.len() + t.schema.to_string().len())
+                    .sum();
+                self.tools.len() > DECLARED_MAX || chars > DECLARED_CHARS
+            }
+        }
+    }
+
     pub fn tool(&self, name: &str) -> Option<&Tool> {
         self.tools.iter().find(|t| t.name == name)
+    }
+
+    /// The tools that fit `query`, best first: [`search`].
+    pub fn search(&self, query: &str, limit: usize) -> Found<'_> {
+        search(&self.tools, query, limit)
     }
 
     /// The servers in the order they were configured, each started or not.
@@ -276,6 +339,154 @@ fn named(found: Vec<(String, rmcp::model::Tool)>) -> Vec<Tool> {
     tools
 }
 
+/// What [`search`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Found<'a> {
+    pub tools: Vec<&'a Tool>,
+    /// Names a `select:` gave that no tool has.
+    pub unknown: Vec<String>,
+}
+
+/// Words a search looks past.
+const STOP: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for", "from", "how", "i", "in",
+    "into", "is", "it", "me", "my", "of", "on", "or", "our", "please", "some", "that", "the",
+    "this", "to", "tool", "tools", "use", "using", "what", "which", "with", "you",
+];
+
+/// The tools of `tools` that fit `query`, at most `limit`, best first.
+///
+/// `select:A,B` names them, by the model's name or the server's. Otherwise each word of the
+/// query (in any case, `snake_case` and `camelCase` split, a plural or an `-ing` the same
+/// word) counts where a tool has it: 4 in the tool's name, 2 in its server's, 1 in its
+/// description and 1 in its parameters' names. A tool's score is the sum; those under a
+/// third of the best score are not found, so that a word of a description alone does not
+/// bring tools in beside one whose name has the words. A query that is a tool's whole name
+/// finds it first.
+pub fn search<'a>(tools: &'a [Tool], query: &str, limit: usize) -> Found<'a> {
+    let query = query.trim();
+    let by_name = |n: &str| {
+        let n = n.trim();
+        tools.iter().find(|t| t.name == n || t.tool == n)
+    };
+    if let Some(names) = query.strip_prefix("select:") {
+        let mut found = Found {
+            tools: Vec::new(),
+            unknown: Vec::new(),
+        };
+        for n in names.split(',').filter(|n| !n.trim().is_empty()) {
+            match by_name(n) {
+                Some(t) if !found.tools.contains(&t) => found.tools.push(t),
+                Some(_) => {}
+                None => found.unknown.push(n.trim().to_owned()),
+            }
+        }
+        return found;
+    }
+    let mut wanted: Vec<String> = Vec::new();
+    for word in words(query) {
+        let w = stem(&word);
+        if !STOP.contains(&word.as_str()) && !STOP.contains(&w.as_str()) && !wanted.contains(&w) {
+            wanted.push(w);
+        }
+    }
+    let stems = |text: &str| -> HashSet<String> { words(text).iter().map(|w| stem(w)).collect() };
+    let exact = by_name(query);
+    let mut scored: Vec<(u32, &Tool)> = tools
+        .iter()
+        .filter_map(|t| {
+            let name = stems(&t.tool);
+            let server = stems(&t.server);
+            let description = stems(&t.description);
+            let params: HashSet<String> = t.schema["properties"]
+                .as_object()
+                .into_iter()
+                .flat_map(|p| p.keys())
+                .flat_map(|k| words(k))
+                .map(|w| stem(&w))
+                .collect();
+            let mut score: u32 = wanted
+                .iter()
+                .map(|w| {
+                    4 * u32::from(name.contains(w))
+                        + 2 * u32::from(server.contains(w))
+                        + u32::from(description.contains(w))
+                        + u32::from(params.contains(w))
+                })
+                .sum();
+            if exact == Some(t) {
+                score += 1000;
+            }
+            (score > 0).then_some((score, t))
+        })
+        .collect();
+    // the tools are in order of their names, and a stable sort keeps it among equals
+    scored.sort_by_key(|&(score, _)| std::cmp::Reverse(score));
+    // a whole name's tool alone, else what has a third of the best score
+    let floor = scored
+        .first()
+        .map_or(0, |&(best, _)| best.min(999).div_ceil(3));
+    Found {
+        tools: scored
+            .into_iter()
+            .filter(|(score, _)| *score >= floor)
+            .take(limit)
+            .map(|(_, t)| t)
+            .collect(),
+        unknown: Vec::new(),
+    }
+}
+
+/// The words of `text`, in lower case: split at everything that is not a letter or a
+/// digit, and where a lower-case letter meets an upper-case one.
+fn words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut lower = false;
+    for c in text.chars() {
+        if !c.is_alphanumeric() {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            lower = false;
+            continue;
+        }
+        if c.is_uppercase() && lower && !word.is_empty() {
+            out.push(std::mem::take(&mut word));
+        }
+        lower = !c.is_uppercase();
+        word.extend(c.to_lowercase());
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+/// A word without its ending, so that `issues` and `issue`, `creating` and `create`,
+/// `currencies` and `currency` are one.
+fn stem(word: &str) -> String {
+    if word.chars().count() <= 3 {
+        return word.to_owned();
+    }
+    for (ending, with) in [
+        ("ies", "y"),
+        ("ing", ""),
+        ("es", ""),
+        ("ed", ""),
+        ("s", ""),
+        ("e", ""),
+    ] {
+        if let Some(base) = word.strip_suffix(ending)
+            && base.chars().count() >= 3
+            && !(ending == "s" && base.ends_with('s'))
+        {
+            return format!("{base}{with}");
+        }
+    }
+    word.to_owned()
+}
+
 /// `mcp__<server>__<tool>` with what a name cannot hold made `_`, cut to 64.
 pub fn name_of(server: &str, tool: &str) -> String {
     let clean = |s: &str| -> String {
@@ -364,7 +575,7 @@ pub fn text_of(server: &str, tool: &str, result: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{Map, json};
 
     #[test]
     fn names_are_claude_codes_and_names_a_model_can_write() {
@@ -388,6 +599,88 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["mcp__s__a_x", "mcp__s__a_x_2", "mcp__s__b"]);
         assert_eq!(tools[0].tool, "a-x");
+    }
+
+    fn tool(name: &str, description: &str, params: &[&str]) -> Tool {
+        let props: Map<String, Value> = params
+            .iter()
+            .map(|p| ((*p).to_owned(), json!({"type": "string"})))
+            .collect();
+        Tool {
+            name: name_of("work", name),
+            server: "work".into(),
+            tool: name.into(),
+            description: description.into(),
+            schema: json!({"type": "object", "properties": props}),
+            read_only: false,
+        }
+    }
+
+    #[test]
+    fn a_search_finds_tools_by_the_words_of_what_they_do() {
+        let mut tools = vec![
+            tool(
+                "create_issue",
+                "Opens a new issue in a repository.",
+                &["repo", "title"],
+            ),
+            tool(
+                "list_issues",
+                "Lists the open issues of a repository.",
+                &["repo"],
+            ),
+            tool("get_weather", "The current weather in a city.", &["city"]),
+            tool(
+                "get_forecast",
+                "The weather forecast for the next days.",
+                &["city", "days"],
+            ),
+            tool(
+                "convert_currency",
+                "Converts an amount from one currency to another.",
+                &["amount", "from", "to"],
+            ),
+            tool("sendMessage", "Posts a message to a channel.", &["channel"]),
+        ];
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        let names = |f: Found| f.tools.iter().map(|t| t.tool.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(search(&tools, "create an issue", 5))[0],
+            "create_issue"
+        );
+        // a plural is the word, and equals stay in order of their names
+        assert_eq!(
+            names(search(&tools, "Issues", 5)),
+            ["create_issue", "list_issues"]
+        );
+        // the forecast has "weather" in its description only
+        assert_eq!(
+            names(search(&tools, "weather now in Oslo", 5)),
+            ["get_weather"]
+        );
+        assert_eq!(
+            names(search(&tools, "weather forecast", 5)),
+            ["get_forecast", "get_weather"]
+        );
+        assert_eq!(
+            names(search(&tools, "converting 250 dollars to euros", 5)),
+            ["convert_currency"]
+        );
+        // camelCase is two words
+        assert_eq!(names(search(&tools, "send a message", 1)), ["sendMessage"]);
+        // a whole name comes first
+        assert_eq!(names(search(&tools, "get_forecast", 5))[0], "get_forecast");
+        assert!(search(&tools, "zzz", 5).tools.is_empty());
+        assert!(search(&tools, "the tools", 5).tools.is_empty());
+        let picked = search(&tools, "select:mcp__work__get_weather, list_issues,nope", 5);
+        assert_eq!(names(picked.clone()), ["get_weather", "list_issues"]);
+        assert_eq!(picked.unknown, ["nope"]);
+        assert_eq!(stem("currencies"), "currency");
+        assert_eq!(stem("class"), "class");
+        assert_eq!(
+            words("sendMessage x_y-z"),
+            ["send", "message", "x", "y", "z"]
+        );
     }
 
     #[test]

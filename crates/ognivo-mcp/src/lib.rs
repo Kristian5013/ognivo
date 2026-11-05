@@ -6,4 +6,7 @@ pub mod config;
 mod gateway;
 
 pub use config::{Loaded, ServerConfig, Transport};
-pub use gateway::{Gateway, RESULT_CHARS, Started, Tool, name_of, text_of};
+pub use gateway::{
+    DECLARED_CHARS, DECLARED_MAX, Found, Gateway, Listing, RESULT_CHARS, Started, Tool, name_of,
+    search, text_of,
+};

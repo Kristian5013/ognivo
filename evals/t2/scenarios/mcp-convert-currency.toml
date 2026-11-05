@@ -1,0 +1,9 @@
+category = "mcp"
+prompt = "How many euros are 250 US dollars at today's rate?"
+
+[mcp]
+tools = [5, 15, 40]
+
+[expect]
+mcp = { tool = "convert_currency", arguments = { amount = 250, from = "USD", to = "EUR" } }
+answer_any = ["231.40", "231.4", "231,40", "231,4"]

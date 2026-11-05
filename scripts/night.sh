@@ -28,8 +28,11 @@
 #   --models "A B C"      profiles, run in this order (default: gpt-oss-20b gemma-4-26b-a4b
 #                         qwen3.8-27b); ID+native runs that profile on the Native path,
 #                         on a server of its own, in a directory of that name, and
-#                         ID+native+priors with gpt-oss's own tools there
+#                         ID+native+priors with gpt-oss's own tools there; +mcp-search
+#                         and +mcp-declare give the mcp scenarios' sessions their
+#                         server's tools that way instead of as a session decides
 #   --seeds LIST          (default 1,2,3)
+#   --only TEXT           only the scenarios whose id holds TEXT or whose category it is
 #   --lock-lead HOURS     take the sleep lock this long before the window (default 8)
 #   --max-wait SECONDS    exit (0) when the window opens later than that
 #   --no-inhibit          hold no sleep lock
@@ -53,7 +56,7 @@ WAIT_FOR_GPU=$((30 * 60))
 SERVER_LOAD_TIMEOUT=600
 
 WINDOW=03:00-06:00 MODELS="gpt-oss-20b gemma-4-26b-a4b qwen3.8-27b" SEEDS=1,2,3
-LOCK_LEAD_H=8 MAX_WAIT=-1 INHIBIT=1 NOW_MIN= DRY_RUN=0
+LOCK_LEAD_H=8 MAX_WAIT=-1 INHIBIT=1 NOW_MIN= DRY_RUN=0 ONLY=
 usage() {
     sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p;}' "$0" >&2
     exit 2
@@ -63,6 +66,7 @@ while (($#)); do
         --window) WINDOW=${2:?}; shift ;;
         --models) MODELS=${2:?}; shift ;;
         --seeds) SEEDS=${2:?}; shift ;;
+        --only) ONLY=${2:?}; shift ;;
         --lock-lead) LOCK_LEAD_H=${2:?}; shift ;;
         --max-wait) MAX_WAIT=${2:?}; shift ;;
         --no-inhibit) INHIBIT=0 ;;
@@ -105,7 +109,7 @@ SHOWN="$(date -d "@$START" '+%H:%M')-$(date -d "@$END" '+%H:%M')"
 
 if ((DRY_RUN)); then
     echo "night $DATE: window $(date -d "@$START" '+%F %H:%M')-$(date -d "@$END" '+%H:%M')"
-    echo "commit $SHA; models: $MODELS; seeds: $SEEDS"
+    echo "commit $SHA; models: $MODELS; seeds: $SEEDS${ONLY:+; only: $ONLY}"
     echo "results: $NIGHT"
     exit 0
 fi
@@ -316,6 +320,9 @@ for m in $MODELS; do
     path=()
     [[ $m == *+native* ]] && path+=(--native)
     [[ $m == *+priors* ]] && path+=(--priors)
+    [[ $m == *+mcp-search* ]] && path+=(--mcp-tools search)
+    [[ $m == *+mcp-declare* ]] && path+=(--mcp-tools declare)
+    [[ -n $ONLY ]] && path+=(--only "$ONLY")
     if ! server_start "${m%%+*}" "$dir"; then
         note "$m: llama-server did not start or does not match the profile"
         continue

@@ -375,6 +375,20 @@ fn shown(path: &Path, places: &Places) -> String {
 }
 
 impl Rules {
+    /// Rules that allow what `texts` name, as the `allow` list of a settings file would,
+    /// said to come from `source`: for a caller with its rules in hand, such as an eval.
+    pub fn allowing(texts: &[&str], source: &str) -> Result<Rules, String> {
+        let places = Places::default();
+        let mut rules = Rules::default();
+        for text in texts {
+            rules
+                .rules
+                .extend(parse(text, Action::Allow, source, &places)?);
+        }
+        rules.order();
+        Ok(rules)
+    }
+
     /// Adds the project's allow rules the user trusted.
     pub fn trust(&mut self, pending: Pending) {
         self.rules.extend(pending.rules);

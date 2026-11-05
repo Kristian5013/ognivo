@@ -17,7 +17,9 @@ export type Call =
   /** `delegate`: tasks for subagents. */
   | { name: "Task"; tasks: { title: string; write: boolean; files: string[] }[] }
   /** A tool of an MCP server; the arguments as the model wrote them. */
-  | { name: "Mcp"; server: string; tool: string; arguments: string };
+  | { name: "Mcp"; server: string; tool: string; arguments: string }
+  /** `tool_search`: the MCP tools that fit a query, when there are too many to declare. */
+  | { name: "ToolSearch"; query: string };
 
 export interface ToolResult {
   /** `refused` when it needed an approval it did not get, `error` when it failed. */

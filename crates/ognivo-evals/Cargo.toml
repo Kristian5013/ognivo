@@ -10,8 +10,10 @@ publish.workspace = true
 
 [dependencies]
 ognivo-core.workspace = true
+ognivo-mcp.workspace = true
 ognivo-models.workspace = true
 ognivo-store.workspace = true
+ognivo-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

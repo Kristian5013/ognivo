@@ -183,6 +183,30 @@ pub fn report(
     out.push_str(
         "\n`edit first try` leaves out the scenarios whose text to change is there twice on purpose; their first tries are `ambiguous edits`.\n",
     );
+    // MCP: the first call is the tool the task needs, among few tools or many
+    let mcp: Vec<(&String, &Summary)> = models
+        .iter()
+        .map(|(id, m)| (id, &m.summary))
+        .filter(|(_, s)| !s.tool_correct.is_empty())
+        .collect();
+    if !mcp.is_empty() {
+        out.push_str("\n| model | MCP tool_correct |\n|---|---|\n");
+        for (id, s) in mcp {
+            let cells: Vec<String> = s
+                .tool_correct
+                .iter()
+                .map(|t| {
+                    format!(
+                        "{} tools{}: {}",
+                        t.tools,
+                        if t.searched { " (tool_search)" } else { "" },
+                        pct(&t.rate)
+                    )
+                })
+                .collect();
+            let _ = writeln!(out, "| {id} | {} |", cells.join(" · "));
+        }
+    }
 
     if let Some(prev) = previous
         && let Ok((before_night, before)) = load(prev, ambiguous)
@@ -263,6 +287,7 @@ mod tests {
             answer: None,
             tools: vec![],
             refused: vec![],
+            mcp: None,
             counts: Counts {
                 attempts: 4,
                 usable: 4,

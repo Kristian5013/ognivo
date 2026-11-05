@@ -7,6 +7,11 @@
 //! Runs are headless (`NoUser`): reads, edits inside the project, and the project's own
 //! commands while nothing is unreviewed go ahead without asking, and anything else is
 //! refused, so the model never runs code it wrote.
+//!
+//! An `mcp` scenario runs once for each size of its `[mcp]`: the session gets the first
+//! that many tools of `evals/t2/mcp/workspace.py`, allowed, declared or found with
+//! `tool_search` as the gateway's listing says. Its first MCP call is `tool_correct` when it
+//! is the tool the scenario expects.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -26,11 +31,16 @@ use ognivo_models::{
     Scheduled, native,
 };
 use ognivo_store::{NewSession, Store};
+use ognivo_tools::projection::Call;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A turn's wall-clock limit unless the scenario sets one.
 const TIME_LIMIT: Duration = Duration::from_secs(300);
+/// The MCP server of the `mcp` scenarios, as a session's config names it.
+const MCP_SERVER: &str = "workspace";
+/// How long it may take to start.
+const MCP_START: Duration = Duration::from_secs(20);
 /// Steps of a turn unless the scenario sets a number.
 const MAX_STEPS: u32 = 15;
 /// The tool names scenarios may expect: Claude Code's, as ognivo's tool ids name them.
@@ -61,6 +71,8 @@ pub enum Category {
     Shell,
     /// A task of independent parts, which subagents can do at the same time.
     Parallel,
+    /// The right tool of an MCP server among few or many.
+    Mcp,
 }
 
 impl Category {
@@ -75,6 +87,7 @@ impl Category {
             Category::Context => "context",
             Category::Shell => "shell",
             Category::Parallel => "parallel",
+            Category::Mcp => "mcp",
         }
     }
 }
@@ -102,7 +115,34 @@ pub struct Scenario {
     /// first-try rate of the M1 exit gate.
     #[serde(default)]
     pub ambiguous: bool,
+    /// The session's MCP server, for an `mcp` scenario.
+    #[serde(default)]
+    pub mcp: Option<McpServer>,
+    /// The size of this run of an `mcp` scenario: one of `mcp.tools`, by which [`load`]
+    /// made it.
+    #[serde(skip)]
+    pub mcp_tools: Option<usize>,
     pub expect: Expect,
+}
+
+/// The tools of `evals/t2/mcp/workspace.py` a scenario gets.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpServer {
+    /// The sizes it runs at: the server's first that many tools, for each.
+    pub tools: Vec<usize>,
+}
+
+/// The MCP call a scenario expects.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpectMcp {
+    /// As the server names it.
+    pub tool: String,
+    /// What some call of it must have: each value as given, a text in any case and
+    /// without a leading `#`, a list holding at least these items.
+    #[serde(default)]
+    pub arguments: serde_json::Map<String, Value>,
 }
 
 /// A long file made of numbered lines.
@@ -147,6 +187,9 @@ pub struct Expect {
     /// The answer comes without any call.
     #[serde(default)]
     pub no_calls: bool,
+    /// An MCP tool that must be called, with these arguments.
+    #[serde(default)]
+    pub mcp: Option<ExpectMcp>,
 }
 
 impl Expect {
@@ -181,7 +224,14 @@ pub fn load(dir: &Path) -> Result<Vec<Scenario>, String> {
             .unwrap_or_default();
         s.validate()
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        out.push(s);
+        match s.mcp.clone() {
+            Some(m) => out.extend(m.tools.iter().map(|&n| Scenario {
+                id: format!("{}@{n}", s.id),
+                mcp_tools: Some(n),
+                ..s.clone()
+            })),
+            None => out.push(s),
+        }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -190,9 +240,20 @@ pub fn load(dir: &Path) -> Result<Vec<Scenario>, String> {
 impl Scenario {
     fn validate(&self) -> Result<(), String> {
         let e = &self.expect;
-        let judged = !e.named().is_empty() || !e.answer.is_empty() || !e.answer_any.is_empty();
+        let judged = !e.named().is_empty()
+            || !e.answer.is_empty()
+            || !e.answer_any.is_empty()
+            || e.mcp.is_some();
         if !judged && !e.no_calls {
             return Err("it expects nothing".into());
+        }
+        if (self.category == Category::Mcp)
+            != self.mcp.as_ref().is_some_and(|m| !m.tools.is_empty())
+        {
+            return Err("an mcp scenario, and only one, has [mcp] tools".into());
+        }
+        if e.mcp.is_some() && self.mcp.is_none() {
+            return Err("it expects an MCP call without an MCP server".into());
         }
         let fixtures = self.files.keys().map(String::as_str);
         let generated = self.generated.iter().map(|g| g.path.as_str());
@@ -273,6 +334,8 @@ impl Scenario {
 /// The server a suite runs against.
 #[derive(Debug, Clone)]
 pub struct Target {
+    /// `evals/t2/mcp/workspace.py`, the `mcp` scenarios' server.
+    pub mcp_server: PathBuf,
     pub url: String,
     pub profile: ModelProfile,
     pub n_ctx: Option<u32>,
@@ -283,6 +346,8 @@ pub struct Target {
     /// The agent may hand tasks to subagents, which share the server's `slots`.
     pub subagents: bool,
     pub slots: u32,
+    /// How the `mcp` scenarios' sessions get the server's tools.
+    pub mcp_listing: ognivo_mcp::Listing,
 }
 
 /// One scenario run with one seed.
@@ -303,10 +368,26 @@ pub struct RunResult {
     /// The calls refused for want of a user's approval.
     #[serde(default)]
     pub refused: Vec<String>,
+    /// An `mcp` scenario's server and calls.
+    #[serde(default)]
+    pub mcp: Option<McpRun>,
     pub counts: Counts,
     pub stats: Stats,
     pub ms: u64,
     pub session: Option<i64>,
+}
+
+/// What an `mcp` scenario's run did with the server's tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpRun {
+    /// The tools the server gave.
+    pub tools: usize,
+    /// The model found them with `tool_search` rather than having them declared.
+    pub searched: bool,
+    /// The MCP tools called, in order, as the server names them; `tool_search` is not one.
+    pub calls: Vec<String>,
+    /// The first of them is the tool the scenario expects.
+    pub tool_correct: bool,
 }
 
 /// What a run adds to the exit metrics.
@@ -408,6 +489,35 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     } else {
         driver
     };
+    // an mcp scenario's server, its tools allowed: there is no user to ask
+    let (mcp, rules) = match s.mcp_tools {
+        Some(n) => {
+            let server = ognivo_mcp::ServerConfig {
+                name: MCP_SERVER.into(),
+                transport: ognivo_mcp::Transport::Stdio {
+                    command: "python3".into(),
+                    args: vec![
+                        "-I".into(),
+                        t.mcp_server.display().to_string(),
+                        "--tools".into(),
+                        n.to_string(),
+                    ],
+                    env: BTreeMap::new(),
+                },
+                source: "T2".into(),
+            };
+            let g = ognivo_mcp::Gateway::start(&[server], MCP_START)
+                .await
+                .with_listing(t.mcp_listing);
+            if let Some(Err(why)) = g.started().first().map(|s| &s.outcome) {
+                return Err(format!("{name}: the MCP server did not start: {why}"));
+            }
+            let rules = Rules::allowing(&[&format!("mcp__{MCP_SERVER}")], "T2")?;
+            (Some(Arc::new(g)), rules)
+        }
+        None => (None, Rules::default()),
+    };
+    let listed = mcp.as_ref().map(|g| (g.tools().len(), g.searched()));
     let opts = AgentOptions {
         root: root.clone(),
         data_dir: work.join("data"),
@@ -418,7 +528,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         workspace: WorkspaceState::CLEAN,
         time_limit: Some(s.time_limit.map_or(TIME_LIMIT, Duration::from_secs)),
         user_instructions: UserInstructions::default(),
-        rules: Rules::default(),
+        rules,
         layout: t.layout,
         toolset: if subagents.is_some() {
             Toolset::Delegating
@@ -427,12 +537,14 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         },
         writable: None,
         subagents,
-        mcp: None,
+        mcp,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);
 
     let mut calls: Vec<(String, String)> = Vec::new();
+    // the MCP calls: their ids, tools and arguments
+    let mut mcp_calls: Vec<(String, String, String)> = Vec::new();
     let mut refused_ids: HashSet<String> = HashSet::new();
     // the subagents' calls count too: a suite a subagent ran was run
     let mut on = |e: AgentEvent| {
@@ -442,6 +554,12 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         };
         match e {
             AgentEvent::ToolStarted { id, tool, call, .. } => {
+                if let Some(Call::Mcp {
+                    tool, arguments, ..
+                }) = &call
+                {
+                    mcp_calls.push((of.clone() + &id, tool.clone(), arguments.clone()));
+                }
                 calls.push((of + &id, call.map_or(tool, |c| c.id().canonical_name())));
             }
             AgentEvent::ToolFinished { id, result, .. } if result.starts_with("[refused]") => {
@@ -461,7 +579,23 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         .partition(|(id, _)| !refused_ids.contains(id));
     let tools: Vec<String> = ran.into_iter().map(|(_, name)| name).collect();
     let refused: Vec<String> = refused.into_iter().map(|(_, name)| name).collect();
-    let failures = judge(&s, &root, &fixtures, &end, &tools, &refused);
+    let mcp_calls: Vec<(String, String)> = mcp_calls
+        .into_iter()
+        .filter(|(id, ..)| !refused_ids.contains(id))
+        .map(|(_, tool, arguments)| (tool, arguments))
+        .collect();
+    let mut failures = judge(&s, &root, &fixtures, &end, &tools, &refused);
+    failures.extend(judge_mcp(&s.expect, &mcp_calls));
+    let mcp = listed.map(|(n, searched)| McpRun {
+        tools: n,
+        searched,
+        tool_correct: s
+            .expect
+            .mcp
+            .as_ref()
+            .is_some_and(|e| mcp_calls.first().is_some_and(|(t, _)| *t == e.tool)),
+        calls: mcp_calls.into_iter().map(|(t, _)| t).collect(),
+    });
     let mut counts = Counts::default();
     if matches!(end, Err(DriverError::Format { .. })) {
         counts.attempts += 1;
@@ -514,11 +648,61 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         answer,
         tools,
         refused,
+        mcp,
         counts,
         stats,
         ms,
         session: id,
     })
+}
+
+/// Why the MCP calls of a run are not what the scenario expects; empty when they are.
+fn judge_mcp(e: &Expect, calls: &[(String, String)]) -> Vec<String> {
+    let Some(want) = &e.mcp else {
+        return Vec::new();
+    };
+    let of_tool: Vec<&str> = calls
+        .iter()
+        .filter(|(t, _)| *t == want.tool)
+        .map(|(_, a)| a.as_str())
+        .collect();
+    if of_tool.is_empty() {
+        let called: Vec<&str> = calls.iter().map(|(t, _)| t.as_str()).collect();
+        return vec![format!(
+            "did not call the MCP tool {} (called {called:?})",
+            want.tool
+        )];
+    }
+    let fits = |arguments: &str| {
+        let got: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+        want.arguments
+            .iter()
+            .all(|(k, v)| got.get(k).is_some_and(|g| same_value(g, v)))
+    };
+    if of_tool.iter().any(|a| fits(a)) {
+        Vec::new()
+    } else {
+        vec![format!(
+            "called {} with {}, not with {}",
+            want.tool,
+            of_tool.last().copied().unwrap_or_default(),
+            Value::Object(want.arguments.clone())
+        )]
+    }
+}
+
+/// Whether an argument has the value a scenario expects: a text in any case, trimmed and
+/// without a leading `#`; a number by its value; a list holding each expected item.
+fn same_value(got: &Value, want: &Value) -> bool {
+    let text = |s: &str| s.trim().trim_start_matches('#').trim().to_lowercase();
+    match (got, want) {
+        (Value::String(g), Value::String(w)) => text(g) == text(w),
+        (Value::Number(g), Value::Number(w)) => g.as_f64() == w.as_f64(),
+        // a number written as text is still the number
+        (Value::String(g), Value::Number(w)) => g.trim().parse::<f64>().ok() == w.as_f64(),
+        (Value::Array(g), Value::Array(w)) => w.iter().all(|w| g.iter().any(|g| same_value(g, w))),
+        (g, w) => g == w,
+    }
 }
 
 /// Why the run does not pass; empty when it does.
@@ -736,6 +920,19 @@ pub struct Summary {
     pub minutes: f64,
     /// Runs that did not pass, as `scenario.seed`.
     pub failed: Vec<String>,
+    /// The `mcp` scenarios' first MCP calls that were the tool expected, by how many tools
+    /// the server gave.
+    #[serde(default)]
+    pub tool_correct: Vec<ToolCorrect>,
+}
+
+/// `tool_correct` at one number of tools.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ToolCorrect {
+    pub tools: usize,
+    /// The model found them with `tool_search` rather than having them declared.
+    pub searched: bool,
+    pub rate: Rate,
 }
 
 /// The ids of the scenarios whose edits count apart ([`Scenario::ambiguous`]).
@@ -779,6 +976,13 @@ pub fn summarize(
         skipped += u64::from(r.stats.repeats_skipped);
         ms += r.ms;
     }
+    // (tools, searched) → [correct, runs]
+    let mut correct: BTreeMap<(usize, bool), [u64; 2]> = BTreeMap::new();
+    for m in results.iter().filter_map(|r| r.mcp.as_ref()) {
+        let c = correct.entry((m.tools, m.searched)).or_default();
+        c[0] += u64::from(m.tool_correct);
+        c[1] += 1;
+    }
     Summary {
         profile: profile.into(),
         server,
@@ -801,12 +1005,25 @@ pub fn summarize(
             .filter(|r| !r.passed)
             .map(|r| format!("{}.{}", r.scenario, r.seed))
             .collect(),
+        tool_correct: correct
+            .into_iter()
+            .map(|((tools, searched), [ok, of])| ToolCorrect {
+                tools,
+                searched,
+                rate: Rate::new(ok, of),
+            })
+            .collect(),
     }
 }
 
 /// The directory the scenarios of this checkout are in.
 pub fn scenarios_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/t2/scenarios")
+}
+
+/// The `mcp` scenarios' server of this checkout.
+pub fn mcp_server() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../evals/t2/mcp/workspace.py")
 }
 
 #[cfg(test)]

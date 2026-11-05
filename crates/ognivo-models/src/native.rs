@@ -242,6 +242,7 @@ impl NativeDriver {
             |m| matches!(m, ChatMessage::Assistant { tool_calls, .. } if tool_calls.is_empty()),
         );
         let mut names = HashMap::new();
+        let all = callable(req);
         for (i, m) in req.messages.iter().enumerate() {
             match m {
                 ChatMessage::System(_) => {}
@@ -263,7 +264,7 @@ impl NativeDriver {
                     let thought = last_final.is_none_or(|f| i > f);
                     if thought
                         && let Some(ids) = tokens
-                        && self.replays(ids, m, &req.tools).await?
+                        && self.replays(ids, m, &all).await?
                     {
                         p.assistant();
                         p.tokens(sealed(ids));
@@ -316,12 +317,13 @@ impl NativeDriver {
                 _ => None,
             })
             .collect();
+        let all = callable(req);
         let mut replayed = Vec::with_capacity(req.messages.len());
         for m in &req.messages {
             replayed.push(match m {
                 ChatMessage::Assistant {
                     tokens: Some(ids), ..
-                } => self.replays(ids, m, &req.tools).await?,
+                } => self.replays(ids, m, &all).await?,
                 _ => false,
             });
         }
@@ -485,8 +487,10 @@ impl NativeDriver {
             seed: Some(req.seed),
             ..SamplerSpec::from(self.profile.sampling.main)
         };
-        // with tools, a call is one of them, with arguments as its schema has them (§5.7)
-        let constraint = self.format.constraint(&req.tools);
+        // with tools, a call is one of them, with arguments as its schema has them (§5.7):
+        // the declared ones and those the prompt does not declare
+        let tools = callable(&req);
+        let constraint = self.format.constraint(&tools);
         let completion = CompletionRequest {
             prompt: ids.clone(),
             sampler,
@@ -520,7 +524,7 @@ impl NativeDriver {
             request_start: 0,
             counts: Counts::default(),
             constraint,
-            tools: req.tools.clone(),
+            tools,
         };
         let events = stream::unfold(Some((self, g)), |state| async move {
             let (this, g) = state?;
@@ -606,6 +610,12 @@ impl NativeDriver {
 }
 
 impl ModelDriver for NativeDriver {
+    /// Its grammar and reader are its own: a tool the prompt does not declare is one more
+    /// alternative there.
+    fn calls_undeclared(&self) -> bool {
+        true
+    }
+
     fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
         let this = self.clone();
         stream::once(this.start(req))
@@ -712,6 +722,17 @@ async fn advance(
         }
         Err(e) => Some((vec![Err(failure(e))], None)),
     }
+}
+
+/// The tools a call may name: those the prompt declares, then those it does not.
+fn callable(req: &StepRequest) -> Vec<ToolDecl> {
+    let mut tools = req.tools.clone();
+    for t in &req.callable {
+        if !tools.iter().any(|d| d.name == t.name) {
+            tools.push(t.clone());
+        }
+    }
+    tools
 }
 
 fn failure(e: EngineError) -> DriverError {
@@ -1731,6 +1752,7 @@ mod tests {
         StepRequest {
             messages,
             tools: vec![read_tool()],
+            callable: Vec::new(),
             tool_choice: crate::generic::ToolChoice::Auto,
             max_tokens: 4096,
             seed,
@@ -2431,6 +2453,7 @@ mod tests {
         let req = StepRequest {
             messages,
             tools,
+            callable: Vec::new(),
             tool_choice: crate::generic::ToolChoice::Auto,
             max_tokens: 1,
             seed: 0,
@@ -2490,6 +2513,45 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("\"<function=read>\\n\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_the_prompt_does_not_declare_is_in_the_grammar_and_read_by_its_schema() {
+        let weather = ToolDecl {
+            name: "mcp__w__get_weather".into(),
+            description: "The weather now".into(),
+            parameters: json!({"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"}}, "required": ["city"]}),
+        };
+        let out = "«/think»\n\n«tool_call»\n<function=mcp__w__get_weather>\n<parameter=city>\nOslo\n</parameter>\n<parameter=days>\n2\n</parameter>\n</function>\n«/tool_call»«im_end»";
+        let (url, prompts, bodies) = fake_server_bodies(vec![answer(out)]).await;
+        let d = qwen_driver(&url, None);
+        assert!(d.calls_undeclared());
+        let req = StepRequest {
+            callable: vec![weather.clone()],
+            ..request(vec![ChatMessage::User("Weather in Oslo?".into())], 3)
+        };
+        let f = finished(&run(&d, req).await);
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].name, "mcp__w__get_weather");
+        // typed by the schema the prompt never showed: a number stays a number
+        assert_eq!(calls.calls()[0].arguments, r#"{"city":"Oslo","days":2}"#);
+        // the prompt declares the read tool only
+        let sent = text(&prompts.lock().unwrap()[0]);
+        assert!(
+            sent.contains("\"name\": \"read\"") && !sent.contains("get_weather"),
+            "{sent}"
+        );
+        let grammar = bodies.lock().unwrap()[0]["grammar"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(grammar.contains("\"<function=read>\\n\""), "{grammar}");
+        assert!(
+            grammar.contains("\"<function=mcp__w__get_weather>\\n\""),
+            "{grammar}"
         );
     }
 

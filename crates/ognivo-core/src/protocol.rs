@@ -650,6 +650,7 @@ fn call_of(c: &Call) -> p::Call {
             tool,
             arguments,
         },
+        Call::ToolSearch { query } => p::Call::ToolSearch { query },
     }
 }
 

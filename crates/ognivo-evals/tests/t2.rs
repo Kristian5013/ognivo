@@ -87,6 +87,8 @@ async fn a_scripted_model_passes_and_fails_and_is_counted() {
         layout: Default::default(),
         subagents: false,
         slots: 1,
+        mcp_server: t2::mcp_server(),
+        mcp_listing: Default::default(),
     };
     let good = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(good.passed, "{:?}", good.failures);
@@ -173,6 +175,8 @@ async fn a_cut_generation_counts_against_parse_ok_and_runs_nothing() {
         layout: Default::default(),
         subagents: false,
         slots: 1,
+        mcp_server: t2::mcp_server(),
+        mcp_listing: Default::default(),
     };
     let r = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(r.passed, "{:?}", r.failures);
@@ -211,6 +215,8 @@ async fn a_refused_call_is_not_a_tool_that_ran() {
         layout: Default::default(),
         subagents: false,
         slots: 1,
+        mcp_server: t2::mcp_server(),
+        mcp_listing: Default::default(),
     };
     let ran = t2::run(&s, &target, 1, out.path()).await.unwrap();
     assert!(ran.passed, "{:?}", ran.failures);
@@ -221,4 +227,142 @@ async fn a_refused_call_is_not_a_tool_that_ran() {
     assert!(!refused.passed);
     assert_eq!(refused.refused, ["Bash"]);
     assert_eq!(refused.failures, [r#"used none of ["Bash"] (used [])"#]);
+}
+
+#[tokio::test]
+async fn an_mcp_scenario_runs_at_each_size_with_its_tools_declared_or_searched() {
+    let p = profile("gpt-oss-20b");
+    let ids: BTreeSet<String> = t2::load(&t2::scenarios_dir())
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.id.starts_with("mcp-current-weather"))
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        ids.into_iter().collect::<Vec<_>>(),
+        [
+            "mcp-current-weather@15",
+            "mcp-current-weather@40",
+            "mcp-current-weather@5"
+        ]
+    );
+    let out = tempfile::tempdir().unwrap();
+    let weather = json!({"city": "Oslo"});
+    let replies = [
+        // five tools, declared: the model calls the one it needs by name
+        Gen::calls(
+            "",
+            &[("c1", "mcp__workspace__get_weather", weather.clone())],
+        ),
+        Gen::answer("", "It is -3 °C in Oslo, with light snow."),
+        // forty, found: it searches, then calls through mcp_call
+        Gen::calls(
+            "",
+            &[("c1", "tool_search", json!({"query": "weather now"}))],
+        ),
+        Gen::calls(
+            "",
+            &[(
+                "c2",
+                "mcp_call",
+                json!({"tool": "mcp__workspace__get_weather", "arguments": weather}),
+            )],
+        ),
+        Gen::answer("", "Oslo has -3 °C now."),
+        // forty again: a forecast is not the weather now
+        Gen::calls("", &[("c1", "tool_search", json!({"query": "weather"}))]),
+        Gen::calls(
+            "",
+            &[(
+                "c2",
+                "mcp_call",
+                json!({"tool": "mcp__workspace__get_forecast", "arguments": {"city": "Oslo", "days": 1}}),
+            )],
+        ),
+        Gen::answer("", "Probably about -3 °C."),
+    ];
+    let server = Server::start(replies.into_iter().map(Reply::Stream).collect()).await;
+    let target = Target {
+        url: server.url.clone(),
+        profile: p,
+        n_ctx: None,
+        native: false,
+        layout: Default::default(),
+        subagents: false,
+        slots: 1,
+        mcp_server: t2::mcp_server(),
+        mcp_listing: Default::default(),
+    };
+    let few = t2::run(&scenario("mcp-current-weather@5"), &target, 1, out.path())
+        .await
+        .unwrap();
+    assert!(few.passed, "{:?}", few.failures);
+    let m = few.mcp.as_ref().unwrap();
+    assert_eq!((m.tools, m.searched, m.tool_correct), (5, false, true));
+    assert_eq!(m.calls, ["get_weather"]);
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let bodies = server.bodies();
+    assert!(names(&bodies[0]).contains(&"mcp__workspace__get_weather".to_owned()));
+
+    let many = t2::run(&scenario("mcp-current-weather@40"), &target, 1, out.path())
+        .await
+        .unwrap();
+    assert!(many.passed, "{:?}", many.failures);
+    let m = many.mcp.as_ref().unwrap();
+    assert_eq!((m.tools, m.searched, m.tool_correct), (40, true, true));
+    assert_eq!(m.calls, ["get_weather"]);
+    assert_eq!(many.tools, ["ToolSearch", "mcp__workspace__get_weather"]);
+    // the tools stay the same whatever the search finds: the prompt's prefix holds
+    let bodies = server.bodies();
+    let (searched, called) = (&bodies[2], &bodies[3]);
+    assert_eq!(names(searched), names(called));
+    let declared = names(searched);
+    assert!(
+        declared.contains(&"tool_search".to_owned()) && declared.contains(&"mcp_call".to_owned())
+    );
+    assert!(
+        !declared.iter().any(|n| n.starts_with("mcp__")),
+        "{declared:?}"
+    );
+    // the search's result declares the tool as gpt-oss reads declarations
+    let found = called["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| m["role"] == "tool")
+        .unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        found.starts_with("[tool_search: 1 tool for \"weather now\"]"),
+        "{found}"
+    );
+    assert!(
+        found.contains("type mcp__workspace__get_weather = (_: {"),
+        "{found}"
+    );
+    assert!(
+        found.ends_with("Call it with mcp_call: `tool` is its name, `arguments` its parameters."),
+        "{found}"
+    );
+
+    let wrong = t2::run(&scenario("mcp-current-weather@40"), &target, 2, out.path())
+        .await
+        .unwrap();
+    assert!(!wrong.passed);
+    let m = wrong.mcp.as_ref().unwrap();
+    assert!(!m.tool_correct);
+    assert_eq!(
+        wrong.failures,
+        [r#"did not call the MCP tool get_weather (called ["get_forecast"])"#]
+    );
 }

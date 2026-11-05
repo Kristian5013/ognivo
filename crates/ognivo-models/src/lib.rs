@@ -53,4 +53,25 @@ pub use generic::{
 pub use guard::Guard;
 pub use native::{AnswerNow, NativeDriver};
 pub use profile::ModelProfile;
+
+/// `tools` declared as `family` reads declarations in its prompt: Harmony's `functions`
+/// namespace in TypeScript, Qwen's `<tools>` block of JSON; Gemma 4's declarations are
+/// written with control tokens, so it gets the JSON lines. For a tool result that declares
+/// tools the prompt does not (`tool_search`).
+pub fn declarations(family: Family, tools: &[ToolDecl]) -> String {
+    match family {
+        Family::Harmony => harmony::functions_text(tools),
+        Family::QwenXml => qwen::tools_text(tools),
+        Family::Gemma4 => tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({"type": "function", "function": {
+                    "name": t.name, "description": t.description, "parameters": t.parameters,
+                }})
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
 pub use router::{Endpoint, Health, Lease, Priority, Router, RouterError, Scheduled};

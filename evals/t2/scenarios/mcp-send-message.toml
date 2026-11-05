@@ -1,0 +1,9 @@
+category = "mcp"
+prompt = "Post \"Deploy of v2.4.1 finished\" to the #releases channel."
+
+[mcp]
+tools = [5, 15, 40]
+
+[expect]
+mcp = { tool = "send_message", arguments = { channel = "#releases", text = "Deploy of v2.4.1 finished" } }
+answer_any = ["releases", "posted", "sent", "done"]

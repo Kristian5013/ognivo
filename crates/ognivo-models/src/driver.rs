@@ -37,6 +37,11 @@ const RETRY_SEED_STEP: u32 = 0x9E37_79B9;
 pub struct StepRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDecl>,
+    /// Tools the model may call that the prompt does not declare: the MCP servers' when
+    /// there are too many to declare, which `tool_search` shows the model. The Native path
+    /// takes them into its grammar and its reader with `tools`; the Generic path cannot,
+    /// as the server's grammar knows `tools` only ([`ModelDriver::calls_undeclared`]).
+    pub callable: Vec<ToolDecl>,
     pub tool_choice: ToolChoice,
     /// Fixed per request class by the caller, never derived from the window remainder
     /// (M0: OpenCode's remainder formula fell to 1024 tokens and broke a compaction).
@@ -95,6 +100,11 @@ pub trait ModelDriver: Send + Sync + fmt::Debug {
     /// Streams one generation. The stream ends with exactly one [`DriverEvent::Finished`]
     /// or one error, never silently; dropping it cancels the generation on the server.
     fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>>;
+
+    /// Whether the model may call the tools of [`StepRequest::callable`] by their names.
+    fn calls_undeclared(&self) -> bool {
+        false
+    }
 }
 
 /// The Generic path: llama-server renders the prompt with its chat template and parses
@@ -673,6 +683,7 @@ mod tests {
                 description: "Read a file".into(),
                 parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
             }],
+            callable: Vec::new(),
             tool_choice: ToolChoice::Auto,
             max_tokens: 16384,
             seed,

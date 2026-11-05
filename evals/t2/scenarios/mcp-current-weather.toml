@@ -1,0 +1,9 @@
+category = "mcp"
+prompt = "What is the weather in Oslo right now? Tell me the temperature."
+
+[mcp]
+tools = [5, 15, 40]
+
+[expect]
+mcp = { tool = "get_weather", arguments = { city = "Oslo" } }
+answer_any = ["-3", "−3", "minus 3"]

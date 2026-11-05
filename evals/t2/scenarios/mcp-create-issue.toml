@@ -1,0 +1,9 @@
+category = "mcp"
+prompt = "Open an issue in the acme/web repository titled \"Login button misaligned on Safari\", with the label bug. What is its number?"
+
+[mcp]
+tools = [5, 15, 40]
+
+[expect]
+mcp = { tool = "create_issue", arguments = { repo = "acme/web", title = "Login button misaligned on Safari", labels = ["bug"] } }
+answer = ["4127"]

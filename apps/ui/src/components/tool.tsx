@@ -79,7 +79,13 @@ export function ToolCard({
         className="flex w-full min-w-0 cursor-pointer items-center gap-3 px-3 text-left hover:bg-raised"
       >
         <span className="w-11 shrink-0 font-mono text-[11px] tracking-wide text-spark uppercase">
-          {item.call?.name === "ApplyPatch" ? "Patch" : item.call?.name === "Mcp" ? "MCP" : (item.call?.name ?? item.shown)}
+          {item.call?.name === "ApplyPatch"
+            ? "Patch"
+            : item.call?.name === "Mcp"
+              ? "MCP"
+              : item.call?.name === "ToolSearch"
+                ? "Find"
+                : (item.call?.name ?? item.shown)}
         </span>
         <span className="min-w-0 flex-1 truncate font-mono text-[12px]">
           {item.call ? summary(item.call) : `${item.shown} ${JSON.stringify(item.raw)}`}

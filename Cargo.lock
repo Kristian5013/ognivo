@@ -1088,8 +1088,10 @@ name = "ognivo-evals"
 version = "0.0.1"
 dependencies = [
  "ognivo-core",
+ "ognivo-mcp",
  "ognivo-models",
  "ognivo-store",
+ "ognivo-tools",
  "serde",
  "serde_json",
  "tempfile",

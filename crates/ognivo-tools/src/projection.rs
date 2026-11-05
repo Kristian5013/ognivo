@@ -75,6 +75,10 @@ pub enum Call {
         tool: String,
         arguments: String,
     },
+    /// The MCP servers' tools that fit a query, when there are too many to declare.
+    ToolSearch {
+        query: String,
+    },
 }
 
 /// One task of `delegate`, for one subagent.
@@ -106,6 +110,7 @@ impl Call {
                 server: server.clone(),
                 tool: tool.clone(),
             },
+            Call::ToolSearch { .. } => ToolId::ToolSearch,
         }
     }
 }

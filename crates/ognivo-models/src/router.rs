@@ -461,6 +461,10 @@ impl Scheduled {
 }
 
 impl ModelDriver for Scheduled {
+    fn calls_undeclared(&self) -> bool {
+        self.driver.calls_undeclared()
+    }
+
     fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
         // a driver's step starts nothing until it is polled, so it waits for the lease
         let steps = self.driver.step(req);
@@ -635,6 +639,7 @@ mod tests {
         StepRequest {
             messages: Vec::new(),
             tools: Vec::new(),
+            callable: Vec::new(),
             tool_choice: crate::ToolChoice::Auto,
             max_tokens: 1,
             seed: 1,
