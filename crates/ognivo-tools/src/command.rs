@@ -679,15 +679,25 @@ fn word(node: Node<'_>, src: &str) -> Option<(String, bool)> {
         "word" => Some(unquoted(text)),
         "number" => Some((text.to_owned(), false)),
         "raw_string" => Some((text.get(1..text.len() - 1)?.to_owned(), false)),
+        // the exit status, a number of 0 to 255 whatever it is: `echo "exit $?"` (T2,
+        // 2026-11-05: Qwen ends its test runs so)
+        _ if exit_status(node, src) => Some((STATUS.to_owned(), false)),
         "string" => {
             let mut cursor = node.walk();
-            if node
-                .named_children(&mut cursor)
-                .any(|c| c.kind() != "string_content")
-            {
-                return None;
+            let start = node.start_byte() + 1;
+            let mut inner = String::new();
+            let mut at = start;
+            for c in node.named_children(&mut cursor) {
+                if exit_status(c, src) {
+                    inner.push_str(src.get(at..c.start_byte())?);
+                    inner.push_str(STATUS);
+                    at = c.end_byte();
+                } else if c.kind() != "string_content" {
+                    return None;
+                }
             }
-            Some((double_quoted(text.get(1..text.len() - 1)?), false))
+            inner.push_str(src.get(at..node.end_byte().checked_sub(1)?)?);
+            Some((double_quoted(&inner), false))
         }
         "concatenation" => {
             let mut out = String::new();
@@ -721,6 +731,15 @@ fn unquoted(raw: &str) -> (String, bool) {
         }
     }
     (out, expands)
+}
+
+/// What `$?` stands for when a line is classified: any exit status is digits alone, so one
+/// of them classifies the line as all of them would.
+const STATUS: &str = "0";
+
+/// `$?`, the exit status of the last command.
+fn exit_status(node: Node<'_>, src: &str) -> bool {
+    node.kind() == "simple_expansion" && &src[node.byte_range()] == "$?"
 }
 
 /// The inside of a `"…"` without expansions: `\` escapes only `$`, `` ` ``, `"` and `\`.
@@ -1432,6 +1451,12 @@ mod tests {
         ] {
             assert_eq!(c(cmd), Effect::ExecutesProjectCode, "{cmd}");
         }
+        // how Qwen runs a test: from the root, by its absolute path, with the exit status
+        let qwen = format!(
+            "cd {} && bash scripts/run.sh; echo \"EXIT:$?\"",
+            f.ctx.root.display()
+        );
+        assert_eq!(c(&qwen), Effect::ExecutesProjectCode, "{qwen}");
         for cmd in [
             "bash scripts/missing.sh",
             "bash -x scripts/run.sh",
@@ -1531,7 +1556,15 @@ mod tests {
             w(&[&["rm", "a b", "--name=x y"]])
         );
         assert_eq!(words("make |& tail"), w(&[&["make"], &["tail"]]));
+        // the exit status is a number, whatever it is
+        assert_eq!(
+            words("make; echo \"EXIT:$?\" $? x$?"),
+            w(&[&["make"], &["echo", "EXIT:0", "0", "x0"]])
+        );
+        assert_eq!(words("echo \"a \\$? $?\""), w(&[&["echo", "a $? 0"]]));
         for bad in [
+            "echo \"$?$HOME\"",
+            "echo ${?}",
             "echo $(rm -rf x)",
             "echo `id`",
             "echo \"$HOME\"",

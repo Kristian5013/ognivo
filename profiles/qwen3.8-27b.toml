@@ -56,5 +56,5 @@ known = [
 ]
 
 [server]
-recommended_flags = "-c 98304 -np 1 -fa on -ngl 99 -b 2048 -ub 1024 --ctx-checkpoints 16 --cache-ram 12288 --chat-template-file profiles/templates/Qwen3.8-27B/canonical.jinja"
-notes = "Dense hybrid: ~46 tok/s decode, 64K cache miss ~48 s on the RTX 5090 Laptop. Each checkpoint holds the 150 MiB recurrent state. For 131K use -ctk q8_0 -ctv q8_0. MTP (--spec-type draft-mtp) only after a soak test. Never offload DeltaNet layers to CPU (#30906)."
+recommended_flags = "-c 98304 -np 1 -fa on -ngl 99 -b 2048 -ub 1024 --ctx-checkpoints 16 --checkpoint-min-step 512 --cache-ram 12288 --chat-template-file profiles/templates/Qwen3.8-27B/canonical.jinja"
+notes = "Dense hybrid: ~46 tok/s decode, 64K cache miss ~48 s on the RTX 5090 Laptop. Each checkpoint holds the 150 MiB recurrent state. --checkpoint-min-step 512, not the default 8192: the checkpoint where the system message ends (~1.2K) is made again by each session and kept when the list is full; with 8192 one long session erased it for good, and every later session read the tools again (T2, 2026-11-05). For 131K use -ctk q8_0 -ctv q8_0. MTP (--spec-type draft-mtp) only after a soak test. Never offload DeltaNet layers to CPU (#30906)."

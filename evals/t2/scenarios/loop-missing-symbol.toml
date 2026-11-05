@@ -22,4 +22,4 @@ pub fn wrap(s: &str, width: usize) -> String {
 
 [expect]
 answer = ["frobnicate"]
-answer_any = ["not", "no", "nowhere", "isn't", "doesn't"]
+answer_any = ["not", "no", "nowhere", "isn't", "doesn't", "couldn't", "can't", "cannot"]
