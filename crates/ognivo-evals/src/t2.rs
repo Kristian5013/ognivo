@@ -23,7 +23,7 @@ use ognivo_core::agent::{
 };
 use ognivo_core::approval::WorkspaceState;
 use ognivo_core::instructions::UserInstructions;
-use ognivo_core::rules::Rules;
+use ognivo_core::rules::{self, Places, Rules};
 use ognivo_core::session::Session;
 use ognivo_models::llama::LlamaServer;
 use ognivo_models::{
@@ -44,7 +44,9 @@ const MCP_START: Duration = Duration::from_secs(20);
 /// Steps of a turn unless the scenario sets a number.
 const MAX_STEPS: u32 = 15;
 /// The tool names scenarios may expect: Claude Code's, as ognivo's tool ids name them.
-const TOOLS: [&str; 6] = ["Read", "Edit", "Write", "Bash", "Grep", "Glob"];
+const TOOLS: [&str; 8] = [
+    "Read", "Edit", "Write", "Bash", "Grep", "Glob", "Skill", "Task",
+];
 /// Stand-ins for the profile's own control tokens, so no scenario file holds one (§5.3):
 /// its first framing string, and its first guarded string that frames nothing.
 const FRAMING: &str = "⟦framing⟧";
@@ -73,6 +75,8 @@ pub enum Category {
     Parallel,
     /// The right tool of an MCP server among few or many.
     Mcp,
+    /// A project set up for Claude Code: its skills, commands, hooks and subagents.
+    Claude,
 }
 
 impl Category {
@@ -88,6 +92,7 @@ impl Category {
             Category::Shell => "shell",
             Category::Parallel => "parallel",
             Category::Mcp => "mcp",
+            Category::Claude => "claude",
         }
     }
 }
@@ -118,6 +123,9 @@ pub struct Scenario {
     /// The session's MCP server, for an `mcp` scenario.
     #[serde(default)]
     pub mcp: Option<McpServer>,
+    /// The agent may hand tasks to subagents, whatever the target says.
+    #[serde(default)]
+    pub subagents: bool,
     /// The size of this run of an `mcp` scenario: one of `mcp.tools`, by which [`load`]
     /// made it.
     #[serde(skip)]
@@ -190,6 +198,9 @@ pub struct Expect {
     /// An MCP tool that must be called, with these arguments.
     #[serde(default)]
     pub mcp: Option<ExpectMcp>,
+    /// A task of `delegate` must go to this subagent of `.claude/agents`.
+    #[serde(default)]
+    pub subagent: Option<String>,
 }
 
 impl Expect {
@@ -446,9 +457,10 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     let session = Session::create(store, &new).map_err(|e| e.to_string())?;
     let server = LlamaServer::new(&t.url, None).map_err(|e| e.to_string())?;
     let date = t.native.then(|| native::utc_date(native::now()));
+    let with_subagents = t.subagents || s.subagents;
     // alone the agent keeps slot 0, as it always did; with subagents the server places
     // every request, and its prompt cache keeps each conversation (docs/architecture.md §4)
-    let slot = (!t.subagents).then_some(0);
+    let slot = (!with_subagents).then_some(0);
     let router = Router::new(
         vec![Endpoint {
             server: server.clone(),
@@ -457,7 +469,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         }],
         None,
     );
-    let subagents: Option<Arc<dyn Subagents>> = if t.subagents {
+    let subagents: Option<Arc<dyn Subagents>> = if with_subagents {
         let model = SameModel::new(
             server.clone(),
             t.profile.clone(),
@@ -479,7 +491,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
             Box::new(d.map_err(|e| e.to_string())?)
         }
     };
-    let driver: Box<dyn ModelDriver> = if t.subagents {
+    let driver: Box<dyn ModelDriver> = if with_subagents {
         Box::new(Scheduled::new(
             driver,
             router,
@@ -490,7 +502,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         driver
     };
     // an mcp scenario's server, its tools allowed: there is no user to ask
-    let (mcp, rules) = match s.mcp_tools {
+    let (mcp, mut rules) = match s.mcp_tools {
         Some(n) => {
             let server = ognivo_mcp::ServerConfig {
                 name: MCP_SERVER.into(),
@@ -518,6 +530,21 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         None => (None, Rules::default()),
     };
     let listed = mcp.as_ref().map(|g| (g.tools().len(), g.searched()));
+    // what the project sets up for Claude Code, trusted: the eval is the user who set it
+    // up; nothing of the user's own ~/.claude
+    let places = Places {
+        root: root.clone(),
+        home: None,
+        claude_dir: None,
+    };
+    let skills = ognivo_core::skills::load(&places);
+    for k in skills.all() {
+        let (allowed, _) = rules::for_skill(&k.allowed_tools, &k.name, &k.shown, &places);
+        rules.add(allowed);
+    }
+    let mut hooks = ognivo_core::hooks::load(&places);
+    hooks.trust();
+    let agents = ognivo_core::agents::load(&places);
     let opts = AgentOptions {
         root: root.clone(),
         data_dir: work.join("data"),
@@ -538,9 +565,9 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         writable: None,
         subagents,
         mcp,
-        skills: Default::default(),
-        hooks: Default::default(),
-        agents: Default::default(),
+        skills,
+        hooks: Arc::new(hooks.hooks),
+        agents,
         only: None,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
@@ -550,6 +577,8 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     // the MCP calls: their ids, tools and arguments
     let mut mcp_calls: Vec<(String, String, String)> = Vec::new();
     let mut refused_ids: HashSet<String> = HashSet::new();
+    // the subagents of `.claude/agents` that delegate gave tasks to
+    let mut delegated: Vec<String> = Vec::new();
     // the subagents' calls count too: a suite a subagent ran was run
     let mut on = |e: AgentEvent| {
         let (e, of) = match e {
@@ -558,6 +587,9 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         };
         match e {
             AgentEvent::ToolStarted { id, tool, call, .. } => {
+                if let Some(Call::Delegate { tasks }) = &call {
+                    delegated.extend(tasks.iter().filter_map(|t| t.agent.clone()));
+                }
                 if let Some(Call::Mcp {
                     tool, arguments, ..
                 }) = &call
@@ -589,6 +621,11 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         .map(|(_, tool, arguments)| (tool, arguments))
         .collect();
     let mut failures = judge(&s, &root, &fixtures, &end, &tools, &refused);
+    if let Some(want) = &s.expect.subagent
+        && !delegated.contains(want)
+    {
+        failures.push(format!("no task went to the subagent {want}"));
+    }
     failures.extend(judge_mcp(&s.expect, &mcp_calls));
     let mcp = listed.map(|(n, searched)| McpRun {
         tools: n,

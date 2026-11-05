@@ -1,0 +1,45 @@
+# A skill of the project says how its release notes are written, and where their changes
+# come from; nothing else in the project does.
+category = "claude"
+prompt = "Write the release notes of the new version into the changelog."
+
+[files]
+"VERSION" = "2.4.0\n"
+"CHANGELOG.md" = '''
+# Changelog
+
+## 2.3.0
+
+- Faster startup.
+'''
+".release/commits.txt" = '''
+feat: add --json output
+chore: bump dependencies
+fix: crash on empty input
+'''
+".claude/skills/release-notes/SKILL.md" = '''
+---
+name: release-notes
+description: Adds the notes of a new release to CHANGELOG.md, the way this project writes them. Use it whenever release notes or a changelog entry are asked for.
+---
+The new version is !`cat VERSION`.
+
+Add a section for it at the top of CHANGELOG.md, right under `# Changelog`, in this form:
+
+## <version> (unreleased)
+
+- <one line per change, in plain words>
+
+The changes of this release are the commits below. Leave out those whose title starts with `chore:`.
+
+!`cat .release/commits.txt`
+'''
+
+[expect]
+tools = ["Skill"]
+
+[expect.contains]
+"CHANGELOG.md" = ["## 2.4.0 (unreleased)", "rash", "## 2.3.0"]
+
+[expect.absent]
+"CHANGELOG.md" = ["ependenc"]

@@ -1,0 +1,34 @@
+# A Stop hook of the project keeps the turn open until the change is in the changelog.
+category = "claude"
+prompt = 'Change the greeting in greet.py from "Hi" to "Hello".'
+
+[files]
+"greet.py" = '''
+def greet(name):
+    return "Hi, " + name + "!"
+'''
+"CHANGELOG.md" = '''
+# Changelog
+
+## Unreleased
+'''
+".claude/settings.json" = '''
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -q 'Hello' \"$CLAUDE_PROJECT_DIR/CHANGELOG.md\" || { echo 'Every change of this project goes into CHANGELOG.md under ## Unreleased: add a line that says the greeting is now Hello before you finish.' >&2; exit 2; }"
+          }
+        ]
+      }
+    ]
+  }
+}
+'''
+
+[expect.contains]
+"greet.py" = ['"Hello, "']
+"CHANGELOG.md" = ["## Unreleased", "Hello"]

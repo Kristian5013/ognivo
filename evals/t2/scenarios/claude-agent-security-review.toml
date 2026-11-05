@@ -1,0 +1,45 @@
+# Subagent templates of the project: the security review should go to the one for it.
+category = "claude"
+subagents = true
+prompt = "Have the code in src/ reviewed for security problems by the right subagent, and tell me what it found. Change nothing."
+max_steps = 20
+
+[files]
+".claude/agents/security-reviewer.md" = '''
+---
+name: security-reviewer
+description: Reviews code for security problems (secrets in the code, injection, unsafe deserialization) and reports each with its file and line.
+tools: Read, Grep, Glob
+---
+You review code for security problems only. Report each problem on a line of its own as `SECURITY <file>:<line> <what>`, and nothing else.
+'''
+".claude/agents/doc-writer.md" = '''
+---
+name: doc-writer
+description: Writes and updates the documentation of the project.
+tools: Read, Edit, Write
+---
+You write documentation.
+'''
+"src/app.py" = '''
+import os
+import pickle
+
+API_KEY = "sk-live-4f9a2c71d3"
+
+
+def load(blob):
+    return pickle.loads(blob)
+
+
+def run(name):
+    os.system("convert " + name)
+'''
+"src/util.py" = '''
+def add(a, b):
+    return a + b
+'''
+
+[expect]
+subagent = "security-reviewer"
+answer_any = ["pickle", "secret", "key", "injection", "system"]

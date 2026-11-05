@@ -1,0 +1,44 @@
+# A PreToolUse hook of the project refuses edits of a generated file and says where the
+# change goes instead.
+category = "claude"
+prompt = "Rename the field `name` of the Item struct to `title`."
+
+[files]
+"schema.json" = '''
+{
+  "Item": {
+    "id": "u64",
+    "name": "String"
+  }
+}
+'''
+"src/generated.rs" = '''
+// Generated from schema.json by gen.py: do not edit.
+pub struct Item {
+    pub id: u64,
+    pub name: String,
+}
+'''
+".claude/settings.json" = '''
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "grep -q 'generated.rs' || exit 0; echo 'src/generated.rs is generated from schema.json: change schema.json instead, the build makes the file again.' >&2; exit 2"
+          }
+        ]
+      }
+    ]
+  }
+}
+'''
+
+[expect.contains]
+"schema.json" = ['"title"']
+
+[expect.absent]
+"schema.json" = ['"name"']

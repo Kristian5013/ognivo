@@ -1,0 +1,58 @@
+# The user runs a command of the project with an argument; the command says where the
+# issues are.
+category = "claude"
+prompt = "/fix-issue 7"
+
+[files]
+".claude/commands/fix-issue.md" = '''
+---
+description: Fixes an issue of the tracker, by its number.
+argument-hint: <number>
+---
+Fix issue $0 of this project. The issues are in docs/issues.md, each under its number as a heading. Fix exactly that issue in the code, change nothing else, and say what you changed.
+'''
+"docs/issues.md" = '''
+# Issues
+
+## 6
+
+The greeting says "Helo" instead of "Hello".
+
+## 7
+
+`add` in src/calc.py subtracts instead of adding.
+
+## 8
+
+`mul` should accept floats too.
+'''
+"src/calc.py" = '''
+def add(a, b):
+    return a - b
+
+
+def sub(a, b):
+    return a - b
+
+
+def mul(a, b):
+    return a * b
+'''
+"src/greet.py" = '''
+def greet(name):
+    return "Helo, " + name
+'''
+
+[expect.files]
+"src/calc.py" = '''
+def add(a, b):
+    return a + b
+
+
+def sub(a, b):
+    return a - b
+
+
+def mul(a, b):
+    return a * b
+'''
