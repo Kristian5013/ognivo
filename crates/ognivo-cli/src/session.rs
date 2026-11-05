@@ -68,7 +68,7 @@ pub struct SessionArgs {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
     /// The Native path: ognivo renders the model's format itself, and the server only
-    /// tokenizes and generates (gpt-oss only so far)
+    /// tokenizes and generates (gpt-oss and Qwen3.8 so far)
     #[arg(long)]
     pub native: bool,
     /// With --native: gpt-oss gets the tools of its training, container.exec and

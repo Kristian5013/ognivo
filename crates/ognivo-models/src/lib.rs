@@ -36,6 +36,7 @@ pub mod harmony;
 pub mod llama;
 pub mod native;
 pub mod profile;
+pub mod qwen;
 pub mod repeat;
 pub mod router;
 pub mod sse;

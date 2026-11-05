@@ -526,7 +526,7 @@ fn stray(words: impl Iterator<Item = String>, h: &mut Header) {
 
 /// The whole characters at the start of `pending`, taken out of it. An incomplete character
 /// at its end stays for the next piece; invalid bytes come out as U+FFFD.
-fn whole_chars(pending: &mut Vec<u8>) -> String {
+pub(crate) fn whole_chars(pending: &mut Vec<u8>) -> String {
     let mut out = String::new();
     let mut rest = pending.as_slice();
     loop {

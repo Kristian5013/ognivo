@@ -1,7 +1,11 @@
-//! The Native path for gpt-oss (docs/architecture.md §5.2, §5.4; M2): ognivo renders Harmony
-//! itself, and the server only tokenizes and generates.
+//! The Native path (docs/architecture.md §5.2, §5.4): ognivo renders the model's format itself,
+//! and the server only tokenizes and generates. Two formats so far: Harmony for gpt-oss (M2)
+//! and Qwen3.8's XML calls ([`qwen`](crate::qwen), M3). For Qwen the prompt is the template's
+//! rendering with every past reasoning block, the model's messages go back as the ids it
+//! generated, content is tokenized as for gpt-oss, and a call is held to the grammar of its
+//! tools from `<tool_call>` on.
 //!
-//! The prompt of a step is the history in Harmony ([`harmony`](crate::harmony)):
+//! The prompt of a gpt-oss step is the history in Harmony ([`harmony`](crate::harmony)):
 //! - the system message is gpt-oss's own, with the day the session began and its reasoning
 //!   effort; the history's system texts become the developer message's instructions, and
 //!   the tools its `functions` namespace;
@@ -31,6 +35,7 @@ use crate::driver::{DriverError, DriverEvent, Finished, ModelDriver, StepRequest
 use crate::engine::{
     self, CompletionRequest, Constraint, EngineError, SamplerSpec, Stop, TokenEvent, TokenId, Usage,
 };
+use crate::generic::ToolDecl;
 use crate::generic::{
     Channel, ChatMessage, ExecutableCalls, FinishReason, Outcome, ToolCall, is_context_exceeded,
 };
@@ -38,6 +43,7 @@ use crate::harmony::parse::{self, CONTROL, End, Event, Kind, Reader};
 use crate::harmony::{self, Effort, Message, Namespace, Piece, Prompt, Special, System, Tool};
 use crate::llama::LlamaServer;
 use crate::profile::ModelProfile;
+use crate::qwen;
 use crate::repeat::{Loop, Repeats};
 
 /// Seconds since the Unix epoch.
@@ -63,7 +69,7 @@ pub fn utc_date(unix_secs: u64) -> String {
 }
 
 /// Stands between the texts of one tokenization request: a control token, which no text
-/// cut at its guarded strings can produce.
+/// cut at its guarded strings can produce (gpt-oss's end; Qwen's end of text).
 const SEPARATOR: TokenId = 200_007;
 /// Requests that may continue a step, after reasoning that ended with neither a call nor an
 /// answer, ran past its budget (three quarters of the step's tokens), or was ended from
@@ -78,7 +84,7 @@ const MIN_PREDICT: u32 = 256;
 pub struct NativeDriver {
     server: LlamaServer,
     profile: Arc<ModelProfile>,
-    system: System,
+    format: Format,
     slot: Option<u32>,
     /// The profile's guarded strings, cut in every content text (§5.3).
     guarded: Arc<Vec<String>>,
@@ -104,27 +110,36 @@ impl NativeDriver {
         slot: Option<u32>,
         date: &str,
     ) -> Result<Self, DriverError> {
-        if profile.family != Family::Harmony {
-            return Err(DriverError::InvalidRequest(format!(
-                "{}: the Native path reads only gpt-oss's format so far",
-                profile.id
-            )));
-        }
         let level = level.unwrap_or(&profile.reasoning.default);
-        let effort = match level {
-            "low" => Effort::Low,
-            "medium" => Effort::Medium,
-            "high" => Effort::High,
-            other => {
+        let unknown = |level: &str| {
+            DriverError::InvalidRequest(format!(
+                "{}: reasoning level {level:?} is not one of {:?}",
+                profile.id, profile.reasoning.levels
+            ))
+        };
+        let format = match profile.family {
+            Family::Harmony => {
+                let effort = match level {
+                    "low" => Effort::Low,
+                    "medium" => Effort::Medium,
+                    "high" => Effort::High,
+                    other => return Err(unknown(other)),
+                };
+                Format::Harmony(System::new(date, effort))
+            }
+            Family::QwenXml => {
+                Format::Qwen(qwen::Level::named(level).ok_or_else(|| unknown(level))?)
+            }
+            Family::Gemma4 => {
                 return Err(DriverError::InvalidRequest(format!(
-                    "{}: reasoning level {other:?} is not one of {:?}",
-                    profile.id, profile.reasoning.levels
+                    "{}: the Native path reads gpt-oss's and Qwen3.8's formats so far",
+                    profile.id
                 )));
             }
         };
         Ok(Self {
             server,
-            system: System::new(date, effort),
+            format,
             slot,
             guarded: Arc::new(profile.tokens.guarded().map(str::to_owned).collect()),
             profile: Arc::new(profile),
@@ -148,7 +163,7 @@ impl NativeDriver {
             let l = self.learnt();
             ids.iter()
                 .copied()
-                .filter(|id| *id < CONTROL && !l.pieces.contains_key(id))
+                .filter(|id| *id < self.format.control() && !l.pieces.contains_key(id))
                 .collect()
         };
         missing.sort_unstable();
@@ -165,14 +180,26 @@ impl NativeDriver {
     }
 
     /// The step's prompt, ending where the model's next message begins.
-    async fn prompt(&self, req: &StepRequest) -> Result<Prompt, DriverError> {
+    async fn prompt(&self, req: &StepRequest) -> Result<Vec<Chunk>, DriverError> {
+        Ok(match &self.format {
+            Format::Harmony(system) => chunks_of_harmony(self.harmony_prompt(system, req).await?),
+            Format::Qwen(level) => chunks_of_qwen(self.qwen_prompt(*level, req).await?),
+        })
+    }
+
+    /// The step's prompt in Harmony.
+    async fn harmony_prompt(
+        &self,
+        system: &System,
+        req: &StepRequest,
+    ) -> Result<Prompt, DriverError> {
         let tool = |t: &crate::generic::ToolDecl, name: &str| Tool {
             name: name.to_owned(),
             description: t.description.clone(),
             parameters: Some(t.parameters.clone()),
         };
         // a tool named with a namespace is one of the model's own, in the system message
-        let mut system = self.system.clone();
+        let mut system = system.clone();
         let mut plain = Vec::new();
         for t in &req.tools {
             match t.name.split_once('.') {
@@ -188,7 +215,6 @@ impl NativeDriver {
             }
         }
         let functions = !plain.is_empty();
-        let declared: Vec<String> = req.tools.iter().map(|t| t.name.clone()).collect();
         let mut p = Prompt::default();
         p.message(&Message::system(system), functions);
         let instructions: Vec<&str> = req
@@ -237,7 +263,7 @@ impl NativeDriver {
                     let thought = last_final.is_none_or(|f| i > f);
                     if thought
                         && let Some(ids) = tokens
-                        && self.replays(ids, m, &declared).await?
+                        && self.replays(ids, m, &req.tools).await?
                     {
                         p.assistant();
                         p.tokens(sealed(ids));
@@ -275,13 +301,75 @@ impl NativeDriver {
         Ok(p)
     }
 
+    /// The step's prompt in Qwen3.8's format: the template's rendering, with the model's
+    /// messages as the ids it generated where they read back to them.
+    async fn qwen_prompt(
+        &self,
+        level: qwen::Level,
+        req: &StepRequest,
+    ) -> Result<qwen::Prompt, DriverError> {
+        let system: Vec<&str> = req
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::System(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        let mut replayed = Vec::with_capacity(req.messages.len());
+        for m in &req.messages {
+            replayed.push(match m {
+                ChatMessage::Assistant {
+                    tokens: Some(ids), ..
+                } => self.replays(ids, m, &req.tools).await?,
+                _ => false,
+            });
+        }
+        let mut turns = Vec::new();
+        for (m, replay) in req.messages.iter().zip(replayed) {
+            match m {
+                ChatMessage::System(_) => {}
+                ChatMessage::User(t) => turns.push(qwen::Turn::User(t)),
+                ChatMessage::Tool { content, .. } => turns.push(qwen::Turn::Tool(content)),
+                ChatMessage::Assistant {
+                    tokens: Some(ids), ..
+                } if replay => turns.push(qwen::Turn::Replay(ids)),
+                ChatMessage::Assistant {
+                    content,
+                    reasoning,
+                    tool_calls,
+                    ..
+                } => turns.push(qwen::Turn::Assistant {
+                    reasoning: reasoning.as_deref().unwrap_or_default(),
+                    content,
+                    calls: tool_calls
+                        .iter()
+                        .map(|c| qwen::Call {
+                            name: &c.name,
+                            arguments: match serde_json::from_str::<Value>(&c.arguments) {
+                                Ok(Value::Object(m)) => m,
+                                _ => serde_json::Map::new(),
+                            },
+                        })
+                        .collect(),
+                }),
+            }
+        }
+        Ok(qwen::render(
+            &req.tools,
+            &system.join("\n\n"),
+            &turns,
+            level,
+        ))
+    }
+
     /// Whether `ids` read back to the assistant message `m`, so that they can go back as
     /// they came.
     async fn replays(
         &self,
         ids: &[TokenId],
         m: &ChatMessage,
-        names: &[String],
+        tools: &[ToolDecl],
     ) -> Result<bool, DriverError> {
         let ChatMessage::Assistant {
             content,
@@ -293,18 +381,20 @@ impl NativeDriver {
             return Ok(false);
         };
         let pieces = self.pieces(ids).await.map_err(failure)?;
-        let mut reader = Reader::new();
+        let mut reader = self.format.reader();
         for (id, piece) in ids.iter().zip(&pieces) {
             reader.push(*id, piece);
         }
-        reader.finish();
-        let k = kept(reader.messages(), false, "", names);
-        let same = match (&k.outcome, tool_calls.first()) {
-            (Outcome::Calls(calls), Some(c)) => {
-                let read = &calls.calls()[0];
-                read.name == c.name && same_json(&read.arguments, &c.arguments)
+        reader.finish(true);
+        let k = reader.kept(false, "", tools, None);
+        let same = match &k.outcome {
+            Outcome::Calls(calls) => {
+                calls.calls().len() == tool_calls.len()
+                    && calls.calls().iter().zip(tool_calls).all(|(read, c)| {
+                        read.name == c.name && same_json(&read.arguments, &c.arguments)
+                    })
             }
-            (Outcome::Answer, None) => true,
+            Outcome::Answer => tool_calls.is_empty(),
             _ => false,
         };
         Ok(same
@@ -316,13 +406,12 @@ impl NativeDriver {
 
     /// The prompt as ids. Each text is cut at its guarded strings and the parts tokenized on
     /// their own, those not seen before in one request.
-    async fn ids(&self, p: &Prompt) -> Result<Vec<TokenId>, DriverError> {
+    async fn ids(&self, p: &[Chunk]) -> Result<Vec<TokenId>, DriverError> {
         let parts: Vec<Vec<&str>> = p
-            .pieces
             .iter()
             .map(|piece| match piece {
-                Piece::Text(t) => cut(t, &self.guarded),
-                Piece::Special(_) | Piece::Tokens(_) => Vec::new(),
+                Chunk::Text(t) => cut(t, &self.guarded),
+                Chunk::Control(_) | Chunk::Tokens(_) => Vec::new(),
             })
             .collect();
         let new: Vec<&str> = {
@@ -337,9 +426,10 @@ impl NativeDriver {
         };
         if !new.is_empty() {
             let mut content = Vec::with_capacity(2 * new.len());
+            let separator = self.format.separator();
             for (i, t) in new.iter().enumerate() {
                 if i > 0 {
-                    content.push(json!(SEPARATOR));
+                    content.push(json!(separator));
                 }
                 content.push(json!(t));
             }
@@ -348,7 +438,7 @@ impl NativeDriver {
                 .tokenize_mixed(&content)
                 .await
                 .map_err(DriverError::Engine)?;
-            let groups: Vec<&[TokenId]> = ids.split(|id| *id == SEPARATOR).collect();
+            let groups: Vec<&[TokenId]> = ids.split(|id| *id == separator).collect();
             if groups.len() != new.len() {
                 return Err(DriverError::Engine(EngineError::Protocol(format!(
                     "/tokenize: {} texts came back as {}",
@@ -359,7 +449,7 @@ impl NativeDriver {
             let mut l = self.learnt();
             for (t, g) in new.iter().zip(groups) {
                 // no content may become a control token (§5.3)
-                if let Some(id) = g.iter().find(|id| **id >= CONTROL) {
+                if let Some(id) = g.iter().find(|id| **id >= self.format.control()) {
                     let start: String = t.chars().take(80).collect();
                     return Err(DriverError::InvalidRequest(format!(
                         "content tokenized into control token {id}: {start:?}"
@@ -370,11 +460,11 @@ impl NativeDriver {
         }
         let l = self.learnt();
         let mut out = Vec::new();
-        for (piece, parts) in p.pieces.iter().zip(&parts) {
+        for (piece, parts) in p.iter().zip(&parts) {
             match piece {
-                Piece::Special(s) => out.push(s.id()),
-                Piece::Tokens(ids) => out.extend_from_slice(ids),
-                Piece::Text(_) => {
+                Chunk::Control(id) => out.push(*id),
+                Chunk::Tokens(ids) => out.extend_from_slice(ids),
+                Chunk::Text(_) => {
                     for t in parts {
                         out.extend_from_slice(&l.texts[*t]);
                     }
@@ -396,7 +486,7 @@ impl NativeDriver {
             ..SamplerSpec::from(self.profile.sampling.main)
         };
         // with tools, a call is one of them, with arguments as its schema has them (§5.7)
-        let constraint = (!req.tools.is_empty()).then(|| harmony::arguments_constraint(&req.tools));
+        let constraint = self.format.constraint(&req.tools);
         let completion = CompletionRequest {
             prompt: ids.clone(),
             sampler,
@@ -412,8 +502,9 @@ impl NativeDriver {
             .map_err(failure)?;
         let g = Generation {
             events: engine::terminated(payloads),
-            reader: Reader::new(),
+            reader: self.format.reader(),
             open: None,
+            calls_shown: 0,
             watch: Watch::default(),
             received: 0,
             released: String::new(),
@@ -429,7 +520,7 @@ impl NativeDriver {
             request_start: 0,
             counts: Counts::default(),
             constraint,
-            names: req.tools.iter().map(|t| t.name.clone()).collect(),
+            tools: req.tools.clone(),
         };
         let events = stream::unfold(Some((self, g)), |state| async move {
             let (this, g) = state?;
@@ -449,24 +540,39 @@ impl NativeDriver {
     async fn go_on(&self, g: &mut Generation) -> Result<(), DriverError> {
         let mut ids = g.reader.ids().to_vec();
         // the token that ended the generation goes: the reasoning ends instead
-        if ids
-            .last()
-            .is_some_and(|id| *id == Special::Call.id() || *id == Special::Return.id())
-        {
+        let ended = |id: &TokenId| match self.format {
+            Format::Harmony(_) => *id == Special::Call.id() || *id == Special::Return.id(),
+            Format::Qwen(_) => qwen::Special::ends_generation(*id),
+        };
+        if ids.last().is_some_and(ended) {
             ids.pop();
         }
-        let mut reader = Reader::new();
+        let mut reader = self.format.reader();
         let pieces = self.pieces(&ids).await.map_err(failure)?;
         for (id, piece) in ids.iter().zip(&pieces) {
             reader.push(*id, piece);
         }
-        let mut tail = Vec::new();
-        if reader.open().is_some() {
-            tail.push(Special::End.id());
-        }
-        let mut next = Prompt::default();
-        next.assistant();
-        tail.extend(self.ids(&next).await?);
+        let tail = match self.format {
+            // the open message ends, and the model's next one begins
+            Format::Harmony(_) => {
+                let mut tail = Vec::new();
+                if reader.message_open() {
+                    tail.push(Chunk::Control(Special::End.id()));
+                }
+                let mut next = Prompt::default();
+                next.assistant();
+                tail.extend(chunks_of_harmony(next));
+                tail
+            }
+            // the reasoning ends as the template ends it
+            Format::Qwen(_) if reader.in_reasoning() => vec![
+                Chunk::Text("\n".into()),
+                Chunk::Control(qwen::Special::ThinkEnd.id()),
+                Chunk::Text("\n\n".into()),
+            ],
+            Format::Qwen(_) => Vec::new(),
+        };
+        let tail = self.ids(&tail).await?;
         let pieces = self.pieces(&tail).await.map_err(failure)?;
         for (id, piece) in tail.iter().zip(&pieces) {
             reader.push(*id, piece);
@@ -540,8 +646,8 @@ async fn advance(
                         return Some((batch, None));
                     }
                 }
-                // a token of reasoning: text of an open analysis
-                if *id < CONTROL && g.reader.open() == Some(Kind::Analysis) {
+                // a token of reasoning
+                if *id < this.format.control() && g.reader.in_reasoning() {
                     g.thought += 1;
                     if g.continued < MAX_CONTINUATIONS
                         && (g.thought > g.budget || this.answer_now.take())
@@ -560,8 +666,8 @@ async fn advance(
                     break;
                 }
             }
-            if g.reader.stopped() && !g.at_end_of_generation() {
-                let f = g.finish(false);
+            if g.reader.stopped() && !g.reader.at_end_of_generation() {
+                let f = g.finish(false, false);
                 batch.push(Ok(DriverEvent::Finished(Box::new(f))));
                 return Some((batch, None));
             }
@@ -595,13 +701,13 @@ async fn advance(
             g.counts.finished(usage);
             let limit = matches!(stop, Stop::Limit | Stop::ContextFull);
             // reasoning that ended with neither a call nor an answer goes on to one
-            if !limit && g.continued < MAX_CONTINUATIONS && g.bare() {
+            if !limit && g.continued < MAX_CONTINUATIONS && g.reader.bare() {
                 if let Err(e) = this.go_on(&mut g).await {
                     return Some((vec![Err(e)], None));
                 }
                 return Some((batch, Some((this, g))));
             }
-            let f = g.finish(limit);
+            let f = g.finish(limit, !limit);
             Some((vec![Ok(DriverEvent::Finished(Box::new(f)))], None))
         }
         Err(e) => Some((vec![Err(failure(e))], None)),
@@ -640,9 +746,12 @@ impl AnswerNow {
 /// One step as it streams: the generation, and the requests that continue it.
 struct Generation {
     events: BoxStream<'static, Result<TokenEvent, EngineError>>,
-    reader: Reader,
-    /// The kind of the open message, which decides where its text shows.
-    open: Option<Kind>,
+    reader: AnyReader,
+    /// What is open for display, which decides where its text shows; a call with its index
+    /// among the step's calls and its name.
+    open: Option<(Shown, u32, Option<String>)>,
+    /// Calls shown so far.
+    calls_shown: u32,
     watch: Watch,
     /// Ids the request's stream brought, those after reading stopped included.
     received: usize,
@@ -668,7 +777,7 @@ struct Generation {
     counts: Counts,
     constraint: Option<Constraint>,
     /// The tools the step declared.
-    names: Vec<String>,
+    tools: Vec<ToolDecl>,
 }
 
 /// The repetition guard over the streams of one generation.
@@ -734,91 +843,72 @@ impl Counts {
 
 impl Generation {
     /// A reader's event for display; the loop the repetition guard saw in it, if any.
-    fn show(&mut self, ev: Event, out: &mut Batch) -> Option<(Channel, Loop)> {
+    fn show(&mut self, ev: Display, out: &mut Batch) -> Option<(Channel, Loop)> {
         match ev {
-            Event::Open {
-                kind, recipient, ..
+            Display::Open {
+                part: Shown::Call,
+                name,
             } => {
-                self.open = Some(kind);
-                if kind == Kind::Call {
-                    out.push(Ok(DriverEvent::ToolCallDelta {
-                        index: 0,
-                        name: recipient.map(|r| parse::function(&r).unwrap_or(&r).to_owned()),
-                        arguments: String::new(),
-                    }));
-                }
+                let index = self.calls_shown;
+                self.calls_shown += 1;
+                // each call's arguments are their own: parallel calls look alike
+                self.watch.arguments = Repeats::default();
+                out.push(Ok(DriverEvent::ToolCallDelta {
+                    index,
+                    name: name.clone(),
+                    arguments: String::new(),
+                }));
+                self.open = Some((Shown::Call, index, name));
                 None
             }
-            Event::Text { text, .. } => match self.open {
-                Some(Kind::Call) => {
+            Display::Open { part, .. } => {
+                self.open = Some((part, 0, None));
+                None
+            }
+            Display::Text(text) => match &self.open {
+                Some((Shown::Call, index, name)) => {
+                    let (index, name) = (*index, name.clone());
                     let looped = self.watch.arguments.push(&text);
                     out.push(Ok(DriverEvent::ToolCallDelta {
-                        index: 0,
+                        index,
                         name: None,
                         arguments: text,
                     }));
-                    looped.map(|l| {
-                        let name = self.reader.messages().last().and_then(|m| {
-                            let to = m.header.recipient.as_deref()?;
-                            Some(parse::function(to).unwrap_or(to).to_owned())
-                        });
-                        (Channel::Arguments { index: 0, name }, l)
-                    })
+                    looped.map(|l| (Channel::Arguments { index, name }, l))
                 }
-                Some(Kind::Preamble | Kind::Final) => {
+                Some((Shown::Text, ..)) => {
                     let looped = self.watch.text.push(&text);
                     out.push(Ok(DriverEvent::Text(text)));
                     looped.map(|l| (Channel::Text, l))
                 }
-                // analysis, and junk shown as reasoning
+                // reasoning, and junk shown as reasoning
                 _ => {
                     let looped = self.watch.reasoning.push(&text);
                     out.push(Ok(DriverEvent::Reasoning(text)));
                     looped.map(|l| (Channel::Reasoning, l))
                 }
             },
-            Event::Close { .. } => {
+            Display::Close => {
                 self.open = None;
                 None
             }
         }
     }
 
-    /// Whether reading stopped at a token the server stops at itself, a call or a return:
-    /// then the stream ends on its own, with the server's counts.
-    fn at_end_of_generation(&self) -> bool {
-        self.reader
-            .ids()
-            .last()
-            .is_some_and(|id| *id == Special::Call.id() || *id == Special::Return.id())
-    }
-
-    /// Whether the generation ended with neither a call nor an answer.
-    fn bare(&self) -> bool {
-        !self
-            .reader
-            .messages()
-            .iter()
-            .any(|m| matches!(m.kind, Kind::Call | Kind::Final))
-    }
-
-    /// The step as the agent gets it; `limit` when the server cut its generation.
     /// Whether the messages, mended, are each whole in the text the server released: a lost
     /// id of a character the reader could decode would leave a piece out unseen.
     fn mendable(&self) -> bool {
-        mend(self.reader.messages(), &self.released)
-            .iter()
-            .all(|m| self.released.contains(&*m.text()))
+        self.reader.mendable(&self.released)
     }
 
-    fn finish(&mut self, limit: bool) -> Finished {
-        self.reader.finish();
-        let messages = if self.lost {
-            mend(self.reader.messages(), &self.released)
-        } else {
-            self.reader.messages().to_vec()
-        };
-        let k = kept(&messages, limit, &self.call_id, &self.names);
+    /// The step as the agent gets it; `limit` when the server cut its generation, `eog` when
+    /// it ended it at an end of generation.
+    fn finish(&mut self, limit: bool, eog: bool) -> Finished {
+        self.reader.finish(eog);
+        let released = self.lost.then_some(self.released.as_str());
+        let k = self
+            .reader
+            .kept(limit, &self.call_id, &self.tools, released);
         // ids that are not all there do not go back as they came
         let tokens =
             (k.clean && !self.lost && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
@@ -836,8 +926,8 @@ impl Generation {
 
     /// A generation the repetition guard stopped: nothing in it may run.
     fn repeating(&mut self, channel: Channel, l: Loop) -> Finished {
-        self.reader.finish();
-        let k = kept(self.reader.messages(), true, &self.call_id, &self.names);
+        self.reader.finish(false);
+        let k = self.reader.kept(true, &self.call_id, &self.tools, None);
         let partial = match k.outcome {
             Outcome::Truncated { partial } => partial,
             Outcome::Malformed { calls, .. } => calls,
@@ -862,13 +952,255 @@ impl Generation {
 
 /// What the agent keeps of a generation.
 #[derive(Debug)]
-struct Kept {
-    content: String,
-    reasoning: String,
-    outcome: Outcome,
-    finish: Option<FinishReason>,
+pub(crate) struct Kept {
+    pub(crate) content: String,
+    pub(crate) reasoning: String,
+    pub(crate) outcome: Outcome,
+    pub(crate) finish: Option<FinishReason>,
     /// Nothing in it was junk or needed repair: its ids can go back as they came.
-    clean: bool,
+    pub(crate) clean: bool,
+}
+
+/// The format the Native path renders and reads.
+#[derive(Debug, Clone)]
+enum Format {
+    /// gpt-oss: Harmony, with the session's system message.
+    Harmony(System),
+    /// Qwen3.8: XML calls, at a level of reasoning.
+    Qwen(qwen::Level),
+}
+
+impl Format {
+    /// Ids from here on are control tokens.
+    fn control(&self) -> TokenId {
+        match self {
+            Format::Harmony(_) => CONTROL,
+            Format::Qwen(_) => qwen::CONTROL,
+        }
+    }
+
+    /// Stands between the texts of one tokenization request: a control token, which no text
+    /// cut at its guarded strings can produce.
+    fn separator(&self) -> TokenId {
+        match self {
+            Format::Harmony(_) => SEPARATOR,
+            Format::Qwen(_) => qwen::Special::EndOfText.id(),
+        }
+    }
+
+    /// A reader for one generation.
+    fn reader(&self) -> AnyReader {
+        match self {
+            Format::Harmony(_) => AnyReader::Harmony(Reader::new()),
+            Format::Qwen(level) => {
+                AnyReader::Qwen(qwen::parse::Reader::new(*level != qwen::Level::Off))
+            }
+        }
+    }
+
+    /// With tools, a call is one of them, with arguments as its schema has them (§5.7).
+    fn constraint(&self, tools: &[ToolDecl]) -> Option<Constraint> {
+        (!tools.is_empty()).then(|| match self {
+            Format::Harmony(_) => harmony::arguments_constraint(tools),
+            Format::Qwen(_) => qwen::calls_constraint(tools),
+        })
+    }
+}
+
+/// A piece of a prompt in either format: a control token by id, text tokenized as content,
+/// or ids the model generated, sent back as they came.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Chunk {
+    Control(TokenId),
+    Text(String),
+    Tokens(Vec<TokenId>),
+}
+
+fn chunks_of_harmony(p: Prompt) -> Vec<Chunk> {
+    p.pieces
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Special(s) => Chunk::Control(s.id()),
+            Piece::Text(t) => Chunk::Text(t),
+            Piece::Tokens(ids) => Chunk::Tokens(ids),
+        })
+        .collect()
+}
+
+fn chunks_of_qwen(p: qwen::Prompt) -> Vec<Chunk> {
+    p.pieces
+        .into_iter()
+        .map(|piece| match piece {
+            qwen::Piece::Special(s) => Chunk::Control(s.id()),
+            qwen::Piece::Text(t) => Chunk::Text(t),
+            qwen::Piece::Tokens(ids) => Chunk::Tokens(ids),
+        })
+        .collect()
+}
+
+/// Where a reader's text shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Reasoning,
+    Text,
+    Call,
+}
+
+/// What a reader reports for display, in either format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Display {
+    /// A part begins; a call with its function's name, once read.
+    Open {
+        part: Shown,
+        name: Option<String>,
+    },
+    Text(String),
+    Close,
+}
+
+/// The reader of one generation, in the driver's format.
+#[derive(Debug)]
+enum AnyReader {
+    Harmony(Reader),
+    Qwen(qwen::parse::Reader),
+}
+
+impl AnyReader {
+    fn push(&mut self, id: TokenId, piece: &[u8]) -> Vec<Display> {
+        match self {
+            AnyReader::Harmony(r) => r
+                .push(id, piece)
+                .into_iter()
+                .map(|ev| match ev {
+                    Event::Open {
+                        kind, recipient, ..
+                    } => Display::Open {
+                        part: match kind {
+                            Kind::Call => Shown::Call,
+                            Kind::Preamble | Kind::Final => Shown::Text,
+                            Kind::Analysis | Kind::Junk => Shown::Reasoning,
+                        },
+                        name: (kind == Kind::Call)
+                            .then_some(())
+                            .and(recipient.map(|r| parse::function(&r).unwrap_or(&r).to_owned())),
+                    },
+                    Event::Text { text, .. } => Display::Text(text),
+                    Event::Close { .. } => Display::Close,
+                })
+                .collect(),
+            AnyReader::Qwen(r) => r
+                .push(id, piece)
+                .into_iter()
+                .map(|ev| match ev {
+                    qwen::parse::Event::Open { part, name } => Display::Open {
+                        part: match part {
+                            qwen::parse::Part::Call => Shown::Call,
+                            qwen::parse::Part::Content => Shown::Text,
+                            qwen::parse::Part::Reasoning | qwen::parse::Part::Junk => {
+                                Shown::Reasoning
+                            }
+                        },
+                        name,
+                    },
+                    qwen::parse::Event::Text(text) => Display::Text(text),
+                    qwen::parse::Event::Close => Display::Close,
+                })
+                .collect(),
+        }
+    }
+
+    fn stopped(&self) -> bool {
+        match self {
+            AnyReader::Harmony(r) => r.stopped(),
+            AnyReader::Qwen(r) => r.stopped(),
+        }
+    }
+
+    /// Ends reading where the stream ended; `eog` when the server ended the generation at an
+    /// end of generation, which Qwen's reader takes as the end of its message.
+    fn finish(&mut self, eog: bool) {
+        match self {
+            AnyReader::Harmony(r) => {
+                r.finish();
+            }
+            AnyReader::Qwen(r) => {
+                if eog {
+                    r.end_of_generation();
+                }
+                r.finish();
+            }
+        }
+    }
+
+    fn ids(&self) -> &[TokenId] {
+        match self {
+            AnyReader::Harmony(r) => r.ids(),
+            AnyReader::Qwen(r) => r.ids(),
+        }
+    }
+
+    /// Whether the reasoning is being read: its tokens count against the budget.
+    fn in_reasoning(&self) -> bool {
+        match self {
+            AnyReader::Harmony(r) => r.open() == Some(Kind::Analysis),
+            AnyReader::Qwen(r) => r.in_reasoning(),
+        }
+    }
+
+    /// Whether a message is open (Harmony).
+    fn message_open(&self) -> bool {
+        match self {
+            AnyReader::Harmony(r) => r.open().is_some(),
+            AnyReader::Qwen(_) => false,
+        }
+    }
+
+    /// Whether the generation ended with neither a call nor an answer.
+    fn bare(&self) -> bool {
+        match self {
+            AnyReader::Harmony(r) => !r
+                .messages()
+                .iter()
+                .any(|m| matches!(m.kind, Kind::Call | Kind::Final)),
+            AnyReader::Qwen(r) => r.bare(),
+        }
+    }
+
+    /// Whether reading stopped at a token the server stops at itself (a call or a return; the
+    /// end of a message or of text): then the stream ends on its own, with the server's counts.
+    fn at_end_of_generation(&self) -> bool {
+        match self {
+            AnyReader::Harmony(r) => r
+                .ids()
+                .last()
+                .is_some_and(|id| *id == Special::Call.id() || *id == Special::Return.id()),
+            AnyReader::Qwen(r) => r.at_end_of_generation(),
+        }
+    }
+
+    fn mendable(&self, released: &str) -> bool {
+        match self {
+            AnyReader::Harmony(r) => mend(r.messages(), released)
+                .iter()
+                .all(|m| released.contains(&*m.text())),
+            AnyReader::Qwen(r) => r.mendable(released),
+        }
+    }
+
+    /// What the agent keeps; `released`, the server's text, mends what lost bytes.
+    fn kept(&self, limit: bool, call_id: &str, tools: &[ToolDecl], released: Option<&str>) -> Kept {
+        match self {
+            AnyReader::Harmony(r) => {
+                let names: Vec<String> = tools.iter().map(|t| t.name.clone()).collect();
+                let messages = match released {
+                    Some(text) => mend(r.messages(), text),
+                    None => r.messages().to_vec(),
+                };
+                kept(&messages, limit, call_id, &names)
+            }
+            AnyReader::Qwen(r) => r.kept(limit, call_id, tools, released),
+        }
+    }
 }
 
 fn kept(messages: &[parse::Message], limit: bool, call_id: &str, names: &[String]) -> Kept {
@@ -1039,7 +1371,7 @@ fn mend(messages: &[parse::Message], released: &str) -> Vec<parse::Message> {
 /// `decoded` with each run of U+FFFD replaced by the one character of more than one byte
 /// that `released` has there; as it is when its parts do not lie in `released` in order
 /// around one such character each.
-fn mended(decoded: &str, released: &str) -> String {
+pub(crate) fn mended(decoded: &str, released: &str) -> String {
     const LOST: char = '\u{FFFD}';
     if !decoded.contains(LOST) {
         return decoded.to_owned();
@@ -1128,18 +1460,34 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    /// The fake vocabulary: a byte is token 1000 + its value, control tokens are Harmony's ids.
-    /// llama.cpp reads gpt-oss's control tokens in text even without special parsing, and so
-    /// does this one: the text of one becomes its id.
+    /// The special tokens of both formats, by text and id: their ids do not meet.
+    fn specials() -> Vec<(String, TokenId)> {
+        Special::ALL
+            .into_iter()
+            .map(|s| (s.text(), s.id()))
+            .chain(qwen::Special::ALL.into_iter().map(|s| (s.text(), s.id())))
+            .collect()
+    }
+
+    fn special_text(id: TokenId) -> Option<String> {
+        specials()
+            .into_iter()
+            .find(|(_, i)| *i == id)
+            .map(|(t, _)| t)
+    }
+
+    /// The fake vocabulary: a byte is token 1000 + its value, control tokens are Harmony's and
+    /// Qwen3.8's ids. llama.cpp reads gpt-oss's control tokens and Qwen's added ones in text
+    /// even without special parsing, and so does this one: the text of one becomes its id.
     fn tokenize(text: &str) -> Vec<TokenId> {
         let bytes = text.as_bytes();
+        let specials = specials();
         let mut out = Vec::new();
         let mut i = 0;
         'next: while i < bytes.len() {
-            for s in Special::ALL {
-                let t = s.text();
+            for (t, id) in &specials {
                 if bytes[i..].starts_with(t.as_bytes()) {
-                    out.push(s.id());
+                    out.push(*id);
                     i += t.len();
                     continue 'next;
                 }
@@ -1151,8 +1499,8 @@ mod tests {
     }
 
     fn piece(id: TokenId) -> Value {
-        match Special::from_id(id) {
-            Some(s) => json!(s.text()),
+        match special_text(id) {
+            Some(t) => json!(t),
             None if (1000..1256).contains(&id) => {
                 let b = (id - 1000) as u8;
                 if b < 0x80 {
@@ -1169,8 +1517,8 @@ mod tests {
     fn text(ids: &[TokenId]) -> String {
         let mut bytes = Vec::new();
         for id in ids {
-            match Special::from_id(*id) {
-                Some(s) => bytes.extend_from_slice(s.text().as_bytes()),
+            match special_text(*id) {
+                Some(t) => bytes.extend_from_slice(t.as_bytes()),
                 None => bytes.push((*id - 1000) as u8),
             }
         }
@@ -1182,11 +1530,11 @@ mod tests {
         let mut out = Vec::new();
         for (i, part) in fixture.split(['«', '»']).enumerate() {
             if i % 2 == 1 {
-                let s = Special::ALL
+                let (_, id) = specials()
                     .into_iter()
-                    .find(|s| s.text() == format!("<|{part}|>"))
+                    .find(|(t, _)| *t == format!("<|{part}|>") || *t == format!("<{part}>"))
                     .unwrap();
-                out.push(s.id());
+                out.push(id);
             } else {
                 out.extend(part.bytes().map(|b| 1000 + TokenId::from(b)));
             }
@@ -1308,8 +1656,8 @@ mod tests {
                         let (mut events, mut held, mut text) =
                             (String::new(), Vec::new(), String::new());
                         for (i, id) in c.ids.iter().enumerate() {
-                            match Special::from_id(*id) {
-                                Some(s) => held.extend_from_slice(s.text().as_bytes()),
+                            match special_text(*id) {
+                                Some(t) => held.extend_from_slice(t.as_bytes()),
                                 None => held.push((*id - 1000) as u8),
                             }
                             if let Ok(t) = std::str::from_utf8(&held) {
@@ -1352,6 +1700,24 @@ mod tests {
         )
         .unwrap()
     }
+
+    fn qwen_driver(url: &str, level: Option<&str>) -> NativeDriver {
+        let p = profile::builtin()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.family == Family::QwenXml)
+            .unwrap();
+        NativeDriver::new(
+            LlamaServer::new(url, None).unwrap(),
+            p,
+            level,
+            Some(0),
+            "2026-11-05",
+        )
+        .unwrap()
+    }
+
+    const QWEN_CALL: &str = "Need the file.\n«/think»\n\n«tool_call»\n<function=read>\n<parameter=path>\na.rs\n</parameter>\n</function>\n«/tool_call»«im_end»";
 
     fn read_tool() -> ToolDecl {
         ToolDecl {
@@ -2069,7 +2435,10 @@ mod tests {
             max_tokens: 1,
             seed: 0,
         };
-        let got = d.prompt(&req).await.unwrap().display();
+        let Format::Harmony(system) = &d.format else {
+            panic!("{:?}", d.format)
+        };
+        let got = d.harmony_prompt(system, &req).await.unwrap().display();
         let want = std::fs::read_to_string(repo.join(
             "profiles/templates/gpt-oss-20b/golden/seq.effort-high.harmony-reference-0.0.8.txt",
         ))
@@ -2077,5 +2446,187 @@ mod tests {
         .replace("\\u003c", "<")
         .replace("\\u003e", ">");
         assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn a_qwen_call_streams_and_becomes_executable() {
+        let (url, prompts, bodies) = fake_server_bodies(vec![answer(QWEN_CALL)]).await;
+        let d = qwen_driver(&url, None);
+        let start = vec![
+            ChatMessage::System("Be brief.".into()),
+            ChatMessage::User("Read a.rs".into()),
+        ];
+        let events = run(&d, request(start, 7)).await;
+        let f = finished(&events);
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].name, "read");
+        assert_eq!(calls.calls()[0].arguments, "{\"path\":\"a.rs\"}");
+        assert_eq!(f.reasoning, "Need the file.");
+        assert_eq!(f.finish, Some(FinishReason::ToolCalls));
+        assert_eq!(f.tokens, Some(generation(QWEN_CALL)));
+        assert!(events.iter().any(
+            |e| matches!(e, Ok(DriverEvent::ToolCallDelta { name: Some(n), .. }) if n == "read")
+        ));
+        // the prompt is the template's rendering, its special tokens by id
+        let sent = prompts.lock().unwrap()[0].clone();
+        let want = qwen::render(
+            &[read_tool()],
+            "Be brief.",
+            &[qwen::Turn::User("Read a.rs")],
+            qwen::Level::Medium,
+        );
+        assert_eq!(text(&sent), want.display());
+        assert!(sent.contains(&qwen::Special::ToolCall.id()));
+        // the call is held to the grammar from the call token on
+        let b = &bodies.lock().unwrap()[0];
+        assert_eq!(
+            b["grammar_triggers"],
+            json!([{"type": 0, "value": qwen::Special::ToolCall.text(), "token": qwen::Special::ToolCall.id()}])
+        );
+        assert!(
+            b["grammar"]
+                .as_str()
+                .unwrap()
+                .contains("\"<function=read>\\n\"")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_next_qwen_prompt_continues_the_last_one_token_for_token() {
+        let (url, prompts) = fake_server(vec![
+            answer(QWEN_CALL),
+            answer("Got it.\n«/think»\n\nIt is empty.«im_end»"),
+        ])
+        .await;
+        let d = qwen_driver(&url, None);
+        let mut history = vec![
+            ChatMessage::System("Be brief.".into()),
+            ChatMessage::User("Read a.rs".into()),
+        ];
+        let f = finished(&run(&d, request(history.clone(), 7)).await);
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!()
+        };
+        history.push(ChatMessage::Assistant {
+            content: f.content.clone(),
+            reasoning: Some(f.reasoning.clone()),
+            tool_calls: calls.calls().to_vec(),
+            tokens: f.tokens.clone(),
+        });
+        history.push(ChatMessage::Tool {
+            tool_call_id: calls.calls()[0].id.clone(),
+            content: "[read: a.rs — empty]".into(),
+        });
+        let f2 = finished(&run(&d, request(history, 8)).await);
+        assert!(matches!(f2.outcome, Outcome::Answer));
+        assert_eq!(f2.content, "It is empty.");
+        let prompts = prompts.lock().unwrap();
+        // the second prompt is the first, the generation as it came, then the result
+        let mut continued = prompts[0].clone();
+        continued.extend(generation(QWEN_CALL));
+        assert_eq!(prompts[1][..continued.len()], continued[..]);
+        let rest = text(&prompts[1][continued.len()..]);
+        let (s, e) = (qwen::Special::ImStart.text(), qwen::Special::ImEnd.text());
+        let (tr, tre) = (
+            qwen::Special::ToolResponse.text(),
+            qwen::Special::ToolResponseEnd.text(),
+        );
+        assert_eq!(
+            rest,
+            format!(
+                "\n{s}user\n{tr}\n[read: a.rs — empty]\n{tre}{e}\n{s}assistant\n{}\n",
+                qwen::Special::Think.text()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen_content_that_spells_a_special_token_stays_text() {
+        let (url, prompts) = fake_server(vec![answer("x«/think»Done.«im_end»")]).await;
+        let d = qwen_driver(&url, None);
+        let quote = format!(
+            "Write {} and {} into a.md",
+            qwen::Special::ToolCall.text(),
+            qwen::Special::ImEnd.text()
+        );
+        let f = finished(&run(&d, request(vec![ChatMessage::User(quote.clone())], 1)).await);
+        assert_eq!(f.content, "Done.");
+        let sent = prompts.lock().unwrap()[0].clone();
+        // the user's message holds no special token: its text is all there, as bytes
+        let ids = qwen::Special::ALL.map(qwen::Special::id);
+        let start = sent
+            .windows(2)
+            .rposition(|w| w[0] == qwen::Special::ImStart.id() && text(&w[1..]) == "u")
+            .unwrap();
+        let end = start
+            + sent[start..]
+                .iter()
+                .position(|id| *id == qwen::Special::ImEnd.id())
+                .unwrap();
+        assert!(sent[start + 1..end].iter().all(|id| !ids.contains(id)));
+        assert_eq!(text(&sent[start + 1..end]), format!("user\n{quote}"));
+    }
+
+    #[tokio::test]
+    async fn qwen_reasoning_past_its_budget_ends_as_the_template_ends_it() {
+        let (url, prompts) = fake_server(vec![
+            answer("abcdefghijklmnop«/think»never«im_end»"),
+            answer("It is 391.«im_end»"),
+        ])
+        .await;
+        let d = qwen_driver(&url, None);
+        let mut req = request(vec![ChatMessage::User("17*23?".into())], 1);
+        // a budget of 6 reasoning tokens (three quarters of 8)
+        req.max_tokens = 8;
+        let f = finished(&run(&d, req).await);
+        assert_eq!(f.content, "It is 391.");
+        assert_eq!(f.reasoning, "abcdefg");
+        let prompts = prompts.lock().unwrap();
+        let mut continued = prompts[0].clone();
+        continued.extend(generation("abcdefg"));
+        continued.extend(tokenize("\n"));
+        continued.push(qwen::Special::ThinkEnd.id());
+        continued.extend(tokenize("\n\n"));
+        assert_eq!(prompts[1], continued);
+    }
+
+    #[tokio::test]
+    async fn with_qwen_reasoning_off_the_generation_begins_with_the_answer() {
+        let (url, prompts) = fake_server(vec![answer("It is 391.«im_end»")]).await;
+        let d = qwen_driver(&url, Some("off"));
+        let f = finished(&run(&d, request(vec![ChatMessage::User("17*23?".into())], 1)).await);
+        assert!(matches!(f.outcome, Outcome::Answer));
+        assert_eq!(
+            (f.content.as_str(), f.reasoning.as_str()),
+            ("It is 391.", "")
+        );
+        let sent = text(&prompts.lock().unwrap()[0]);
+        let end = format!(
+            "assistant\n{}\n\n{}\n\n",
+            qwen::Special::Think.text(),
+            qwen::Special::ThinkEnd.text()
+        );
+        assert!(sent.ends_with(&end), "{sent}");
+        // and an unknown level is refused
+        let p = profile::builtin()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.family == Family::QwenXml)
+            .unwrap();
+        let e = NativeDriver::new(
+            LlamaServer::new(&url, None).unwrap(),
+            p,
+            Some("high"),
+            None,
+            "2026-11-05",
+        )
+        .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("reasoning level \"high\" is not one of"),
+            "{e}"
+        );
     }
 }
