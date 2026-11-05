@@ -499,7 +499,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     }
     let (end, answer) = match end {
         Ok(TurnEnd::Answer(a)) => ("answer", Some(a.text)),
-        Ok(TurnEnd::StepLimit) => ("step_limit", None),
+        Ok(TurnEnd::StepLimit(a)) => ("step_limit", a.map(|a| a.text)),
         Ok(TurnEnd::Stuck(_)) => ("stuck", None),
         Ok(TurnEnd::TimeLimit) => ("time_limit", None),
         Err(_) => ("error", None),
@@ -534,7 +534,8 @@ fn judge(
     let mut out = Vec::new();
     let answer = match end {
         Ok(TurnEnd::Answer(a)) => Some(a.text.as_str()),
-        Ok(TurnEnd::StepLimit) => {
+        // the answer asked for at the limit does not make it pass: the model did not stop
+        Ok(TurnEnd::StepLimit(_)) => {
             out.push("the turn reached its step limit".into());
             None
         }

@@ -208,9 +208,9 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     };
     let (code, answer, stopped) = match end {
         Ok(TurnEnd::Answer(a)) => (0, Some(a), None),
-        Ok(TurnEnd::StepLimit) => {
+        Ok(TurnEnd::StepLimit(answer)) => {
             eprintln!("ognivo run: step limit ({}) reached", a.session.max_steps);
-            (1, None, Some("step_limit"))
+            (1, answer, Some("step_limit"))
         }
         Ok(TurnEnd::Stuck(why)) => {
             eprintln!("ognivo run: stopped: {why}");

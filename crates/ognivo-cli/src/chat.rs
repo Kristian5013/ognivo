@@ -684,7 +684,7 @@ async fn confirmed(screen: &Screen, input: &Input, name: &str) -> bool {
 
 fn why(end: &TurnEnd, max_steps: u32) -> String {
     match end {
-        TurnEnd::StepLimit => format!("the step limit ({max_steps}) was reached"),
+        TurnEnd::StepLimit(_) => format!("the step limit ({max_steps}) was reached"),
         TurnEnd::Stuck(why) => why.clone(),
         TurnEnd::TimeLimit => "the time limit ran out".to_owned(),
         TurnEnd::Answer(_) => "answered".to_owned(),

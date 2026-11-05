@@ -311,8 +311,9 @@ pub struct Answer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TurnEnd {
     Answer(Answer),
-    /// The step limit was reached before an answer.
-    StepLimit,
+    /// The step limit came before the model answered on its own: the answer it gave then,
+    /// asked for once more without tools, if it gave one.
+    StepLimit(Option<Answer>),
     /// Several generations in a row ended without usable calls, or a call kept repeating
     /// itself with nothing new in between.
     Stuck(String),
@@ -907,13 +908,13 @@ impl Agent {
                 answer: Some(a.text.clone()),
                 verification: verify::summary(&a.verification),
             },
-            Ok(TurnEnd::StepLimit) => AgentEvent::TurnEnded {
+            Ok(TurnEnd::StepLimit(a)) => AgentEvent::TurnEnded {
                 end: "step_limit".into(),
                 why: Some(format!(
                     "the step limit ({}) came first",
                     self.opts.max_steps
                 )),
-                answer: None,
+                answer: a.as_ref().map(|a| a.text.clone()),
                 verification: facts(),
             },
             Ok(TurnEnd::Stuck(why)) => AgentEvent::TurnEnded {
@@ -940,7 +941,10 @@ impl Agent {
                 json!({"end": "answer", "verification": a.verification, "unsupported_claim": a.unsupported_claim}),
                 Some(a.text.as_str()),
             ),
-            Ok(TurnEnd::StepLimit) => (json!({"end": "step_limit"}), None),
+            Ok(TurnEnd::StepLimit(a)) => (
+                json!({"end": "step_limit", "answered": a.is_some()}),
+                a.as_ref().map(|a| a.text.as_str()),
+            ),
             Ok(TurnEnd::Stuck(why)) => (json!({"end": "stuck", "why": why}), None),
             Ok(TurnEnd::TimeLimit) => (json!({"end": "time_limit"}), None),
             Err(e) => (json!({"end": "error", "why": e.to_string()}), None),
@@ -1447,7 +1451,53 @@ impl Agent {
                 )));
             }
         }
-        Ok(TurnEnd::StepLimit)
+        Ok(TurnEnd::StepLimit(self.answer_at_limit(on).await?))
+    }
+
+    /// The answer of a turn whose steps ran out: asked for once more, without tools, so the
+    /// user, or the main agent of a subagent, gets what the turn found instead of nothing
+    /// (T2, 2026-11-05: told that two steps were left, Gemma searched on). `None` when the
+    /// time is up or the model still does not answer.
+    async fn answer_at_limit(
+        &mut self,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> Result<Option<Answer>, DriverError> {
+        let deadline = self.clock.map(|c| c.deadline());
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(None);
+        }
+        let note = format!(
+            "[ognivo] This turn has used all its {} steps, so no more tools run. Give the final answer now from the results above: what you found or changed, and what is not done.",
+            self.opts.max_steps
+        );
+        self.emit(on, AgentEvent::Notice { text: note.clone() });
+        self.append_to_last(&note);
+        let req = self.request(ToolChoice::None, self.messages.clone());
+        let Some(f) = self.generate(req, deadline, on, true, "answer").await? else {
+            return Ok(None);
+        };
+        // calls, if any came, are not run, and they stay out of the history
+        if !matches!(f.outcome, Outcome::Answer) || f.content.trim().is_empty() {
+            return Ok(None);
+        }
+        let verification = self.ledger.status(&self.opts.root);
+        let unsupported_claim = match verification {
+            Verification::NoChanges => verify::claims_changes(&f.content),
+            Verification::Unverified { .. } => verify::claims_a_passing_run(&f.content),
+            Verification::Passed { .. } => false,
+        };
+        self.messages.push(ChatMessage::Assistant {
+            content: f.content.clone(),
+            reasoning: (!f.reasoning.is_empty()).then_some(f.reasoning),
+            tool_calls: Vec::new(),
+            tokens: f.tokens,
+        });
+        self.save();
+        Ok(Some(Answer {
+            text: f.content,
+            verification,
+            unsupported_claim,
+        }))
     }
 
     async fn execute(
@@ -2729,7 +2779,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_steps_before_the_limit_the_model_is_told_to_finish() {
+    async fn two_steps_before_the_limit_the_model_is_told_to_finish_and_at_it_asked_to_answer() {
         // different commands: the same one again is a repeat of its own
         let ls = |dir: &str| {
             calls(
@@ -2741,19 +2791,38 @@ mod tests {
             )
         };
         let mut r = agent_with(
-            vec![ls("."), ls("/"), ls("/tmp"), ls("..")],
+            vec![
+                ls("."),
+                ls("/"),
+                ls("/tmp"),
+                ls(".."),
+                answer("Listed four directories; nothing else was done."),
+            ],
             WorkspaceState::CLEAN,
             Box::new(AllowAll),
         );
         r.agent.opts.max_steps = 4;
         let (end, events) = turn(&mut r).await;
-        assert!(matches!(end, TurnEnd::StepLimit), "{end:?}");
+        // the limit came: asked once more without tools, the model answered
+        let TurnEnd::StepLimit(Some(a)) = &end else {
+            panic!("{end:?}");
+        };
+        assert_eq!(a.text, "Listed four directories; nothing else was done.");
+        let asked = r.seen.lock().unwrap();
+        assert_eq!(asked.len(), 5);
+        assert_eq!(asked[4].tool_choice, ToolChoice::None);
+        drop(asked);
         let results = tool_results(&r.agent);
         let told: Vec<bool> = results
             .iter()
             .map(|t| t.ends_with("[ognivo] 2 steps of this turn are left. Finish now: if the results above answer the task, give the final answer; otherwise make the change that is left, then answer and say what is not done."))
             .collect();
         assert_eq!(told, [false, true, false, false]);
+        assert!(
+            results[3].ends_with("[ognivo] This turn has used all its 4 steps, so no more tools run. Give the final answer now from the results above: what you found or changed, and what is not done."),
+            "{}",
+            results[3]
+        );
         assert_eq!(
             events
                 .iter()
@@ -2761,6 +2830,33 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn calls_made_when_the_steps_ran_out_do_not_run() {
+        let ls = |dir: &str| {
+            calls(
+                &[(
+                    "shell",
+                    serde_json::json!({ "command": format!("ls {dir}") }),
+                )],
+                FinishReason::ToolCalls,
+            )
+        };
+        let mut r = agent_with(
+            vec![ls("."), ls("/")],
+            WorkspaceState::CLEAN,
+            Box::new(AllowAll),
+        );
+        r.agent.opts.max_steps = 1;
+        let (end, _) = turn(&mut r).await;
+        assert!(matches!(end, TurnEnd::StepLimit(None)), "{end:?}");
+        // one ls ran; the second call is not in the history, so nothing waits for its result
+        assert_eq!(tool_results(&r.agent).len(), 1);
+        assert!(matches!(
+            r.agent.messages().last(),
+            Some(ChatMessage::Tool { .. })
+        ));
     }
 
     #[tokio::test]
@@ -4163,6 +4259,48 @@ mod tests {
         assert!(finished.contains(&(1, "answer", vec!["a.txt".to_owned()])));
         assert!(events.iter().any(|e| matches!(e,
             AgentEvent::Subagent { index: 1, event } if matches!(**event, AgentEvent::FileChanged { .. }))));
+    }
+
+    #[tokio::test]
+    async fn a_subagent_out_of_steps_still_reports_what_it_found() {
+        let tasks = json!({"tasks": [
+            {"title": "Look", "goal": "What do a.txt and b.txt say?", "mode": "read"}
+        ]});
+        let read = |path: &str| {
+            calls(
+                &[("read", json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let (mut r, subagents) = delegating(
+            vec![
+                calls(&[("delegate", tasks)], FinishReason::ToolCalls),
+                answer("Done."),
+            ],
+            vec![vec![
+                read("b.txt"),
+                read("a.txt"),
+                answer("b.txt says b and a.txt says one."),
+            ]],
+        );
+        // the subagent's limit is the session's when that is lower
+        r.agent.opts.max_steps = 2;
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        let report = tool_results(&r.agent)
+            .into_iter()
+            .find(|t| t.starts_with("[delegate]"))
+            .unwrap();
+        assert!(
+            report.contains("1. Look (read) ran out of its 2 steps; asked then, it reported:\nb.txt says b and a.txt says one."),
+            "{report}"
+        );
+        let subs = subagents.lock().unwrap();
+        let asked = subs[0].lock().unwrap();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(asked[2].tool_choice, ToolChoice::None);
+        assert!(events.iter().any(|e| matches!(e,
+            AgentEvent::SubagentFinished { index: 0, end, .. } if end == "step_limit")));
     }
 
     #[tokio::test]

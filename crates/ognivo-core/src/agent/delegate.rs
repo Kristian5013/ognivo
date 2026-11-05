@@ -348,6 +348,7 @@ impl Agent {
             .map(|r| format!("{} {}", verify::quoted(&r.command), r.outcome()))
             .collect();
         let steps = sub.stats.steps;
+        let limit = sub.opts.max_steps;
         self.stats.subagents += 1;
         self.stats.subagent_steps += steps;
         self.stats.subagent_tokens += sub.stats.completion_tokens;
@@ -370,10 +371,20 @@ impl Agent {
                 }
                 ("answer", format!("answered after {steps} steps:\n{text}"))
             }
-            Ok(TurnEnd::StepLimit) => (
+            Ok(TurnEnd::StepLimit(None)) => (
                 "step_limit",
-                format!("ran out of its {steps} steps before a report."),
+                format!("ran out of its {limit} steps before a report."),
             ),
+            Ok(TurnEnd::StepLimit(Some(a))) => {
+                let mut text = cut(a.text.trim(), REPORT_CHARS);
+                if let Some(line) = verify::summary(&a.verification) {
+                    text.push_str(&format!("\n[ognivo] {line}"));
+                }
+                (
+                    "step_limit",
+                    format!("ran out of its {limit} steps; asked then, it reported:\n{text}"),
+                )
+            }
             Ok(TurnEnd::Stuck(why)) => ("stuck", format!("stopped after {steps} steps: {why}.")),
             Ok(TurnEnd::TimeLimit) => (
                 "time_limit",
