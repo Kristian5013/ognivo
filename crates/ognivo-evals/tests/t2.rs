@@ -310,6 +310,15 @@ async fn an_mcp_scenario_runs_at_each_size_with_its_tools_declared_or_searched()
     };
     let bodies = server.bodies();
     assert!(names(&bodies[0]).contains(&"mcp__workspace__get_weather".to_owned()));
+    // the project's message says what the servers are for
+    let project = bodies[0]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        project.contains("MCP servers give tools that reach beyond the project: workspace (5 tools). A question about what they cover"),
+        "{project}"
+    );
 
     let many = t2::run(&scenario("mcp-current-weather@40"), &target, 1, out.path())
         .await
@@ -326,6 +335,15 @@ async fn an_mcp_scenario_runs_at_each_size_with_its_tools_declared_or_searched()
     let declared = names(searched);
     assert!(
         declared.contains(&"tool_search".to_owned()) && declared.contains(&"mcp_call".to_owned())
+    );
+    let project = searched["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        project.contains("workspace (40 tools)")
+            && project.contains("call the tool, found with tool_search, rather"),
+        "{project}"
     );
     assert!(
         !declared.iter().any(|n| n.starts_with("mcp__")),

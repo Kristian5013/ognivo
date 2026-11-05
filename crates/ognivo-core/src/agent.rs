@@ -493,11 +493,11 @@ const SEARCH_LIMIT: usize = 5;
 
 /// The tools an agent declares: ognivo's for its family and layout, then those of its MCP
 /// servers, by name, or `tool_search` and `mcp_call` in their place.
-fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset) -> Vec<ToolDecl> {
+fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset, by_name: bool) -> Vec<ToolDecl> {
     let mut tools = projection::declarations_for(family, opts.layout, toolset);
     if let Some(g) = &opts.mcp {
         if g.searched() {
-            tools.extend(search_tools(g));
+            tools.extend(search_tools(g, by_name));
         } else {
             tools.extend(g.tools().iter().map(declaration_of));
         }
@@ -527,10 +527,56 @@ fn declaration_of(t: &ognivo_mcp::Tool) -> ToolDecl {
     }
 }
 
-/// `tool_search` and `mcp_call`. The names of all the tools are `mcp_call`'s choices, so
-/// the model knows what there is and cannot call what there is not; the prompt holds them
-/// whatever a search finds.
-fn search_tools(g: &ognivo_mcp::Gateway) -> [ToolDecl; 2] {
+/// Characters of the catalog in `tool_search`'s description: past them it names the tools
+/// without what they do.
+const CATALOG_CHARS: usize = 8_000;
+/// Characters of a tool's line there.
+const CATALOG_LINE: usize = 100;
+
+/// The tools for `tool_search`'s description: each with the first sentence of what it
+/// does, or only their names when that takes more than [`CATALOG_CHARS`]. T2, 2026-11-05:
+/// with the names alone, gpt-oss chose among 40 tools by name and searched only for the
+/// one it chose; it took get_exchange_rate for convert_currency, search_issues for
+/// create_issue (tool_correct 8 of 15, declared 12 of 15).
+fn catalog(g: &ognivo_mcp::Gateway) -> String {
+    let lines: Vec<String> = g
+        .tools()
+        .iter()
+        .map(|t| {
+            let first = t
+                .description
+                .split_inclusive(". ")
+                .next()
+                .unwrap_or_default()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .trim();
+            let mut about: String = first.chars().take(CATALOG_LINE).collect();
+            if about.len() < first.len() {
+                about.push('…');
+            }
+            if about.is_empty() {
+                format!("- {}", t.name)
+            } else {
+                format!("- {}: {about}", t.name)
+            }
+        })
+        .collect();
+    let text = lines.join("\n");
+    if text.len() <= CATALOG_CHARS {
+        text
+    } else {
+        let names: Vec<&str> = g.tools().iter().map(|t| t.name.as_str()).collect();
+        names.join(", ")
+    }
+}
+
+/// `tool_search` and `mcp_call`. `tool_search`'s description has the catalog of the tools,
+/// and their names are `mcp_call`'s choices, so the model knows what there is and cannot
+/// call what there is not; the prompt holds them whatever a search finds. `by_name`: the
+/// driver lets the model call a found tool by its name.
+fn search_tools(g: &ognivo_mcp::Gateway, by_name: bool) -> [ToolDecl; 2] {
     let servers: Vec<&str> = g
         .started()
         .iter()
@@ -542,9 +588,15 @@ fn search_tools(g: &ognivo_mcp::Gateway) -> [ToolDecl; 2] {
         ToolDecl {
             name: TOOL_SEARCH.into(),
             description: format!(
-                "Finds tools of the MCP servers {} ({} tools) by what they do and gives their declarations. `query`: a few words of what the tool should do, or `select:` and tool names, separated by commas.",
+                "Finds tools of the MCP servers {} ({} tools) by what they do and gives their declarations; then call one {}. `query`: a few words of what the tool should do, or `select:` and tool names, separated by commas. The tools:\n{}",
                 servers.join(", "),
-                g.tools().len()
+                g.tools().len(),
+                if by_name {
+                    "by its name"
+                } else {
+                    "with mcp_call"
+                },
+                catalog(g)
             ),
             parameters: json!({
                 "type": "object",
@@ -587,8 +639,11 @@ fn search_call(arguments: &str) -> Result<Call, ArgError> {
 }
 
 /// An `mcp_call` call: the tool it names, with its arguments. Arguments written as a JSON
-/// text are read as the object they hold.
-fn mcp_call(g: &ognivo_mcp::Gateway, arguments: &str) -> Result<Call, ArgError> {
+/// text are read as the object they hold. Nothing holds them to the tool's schema as a
+/// grammar holds a declared tool's, so they are checked here, and a call that does not
+/// fit gets the tool's declaration back (T2, 2026-11-05: gpt-oss called create_issue
+/// through it with `repository` for `repo`, never having searched).
+fn mcp_call(g: &ognivo_mcp::Gateway, arguments: &str, family: Family) -> Result<Call, ArgError> {
     let tool = || MCP_CALL.to_owned();
     let v: Value =
         serde_json::from_str(arguments).map_err(|_| ArgError::NotObject { tool: tool() })?;
@@ -617,11 +672,47 @@ fn mcp_call(g: &ognivo_mcp::Gateway, arguments: &str) -> Result<Call, ArgError> 
         },
         Some(v) => v.to_string(),
     };
+    if let Err(why) = fits(&t.schema, &arguments) {
+        return Err(ArgError::Invalid {
+            tool: t.name.clone(),
+            why: format!(
+                "{why}. It is declared so:\n{}",
+                ognivo_models::declarations(family, &[declaration_of(t)])
+            ),
+        });
+    }
     Ok(Call::Mcp {
         server: t.server.clone(),
         tool: t.tool.clone(),
         arguments,
     })
+}
+
+/// Whether `arguments` (a JSON object) have what `schema` requires, and nothing it does not
+/// allow when it allows nothing more than its properties.
+fn fits(schema: &Value, arguments: &str) -> Result<(), String> {
+    let args: Value = serde_json::from_str(arguments).unwrap_or(Value::Null);
+    let Some(args) = args.as_object() else {
+        return Err("the arguments are not a JSON object".into());
+    };
+    for need in schema["required"].as_array().into_iter().flatten() {
+        if let Some(k) = need.as_str()
+            && !args.contains_key(k)
+        {
+            return Err(format!("missing required argument `{k}`"));
+        }
+    }
+    if let Some(props) = schema["properties"].as_object()
+        && schema.get("additionalProperties") == Some(&Value::Bool(false))
+        && let Some(k) = args.keys().find(|k| !props.contains_key(k.as_str()))
+    {
+        let known: Vec<&str> = props.keys().map(String::as_str).collect();
+        return Err(format!(
+            "unknown argument `{k}`; the arguments are: {}",
+            known.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// The fixed instructions of every session. Short on purpose: the reference agents that
@@ -660,7 +751,11 @@ const PROJECT_AT: &str = "[ognivo] The project is at ";
 /// The project's part of a conversation's start, the message after the system prompt:
 /// where the project is, what checks a change in it, and the text of the user's and the
 /// project's instruction files.
-pub fn project_context(root: &Path, instructions: &str) -> String {
+pub fn project_context(
+    root: &Path,
+    instructions: &str,
+    mcp: Option<&ognivo_mcp::Gateway>,
+) -> String {
     let mut text = format!("{PROJECT_AT}{}.", root.display());
     let checks = verify::project_checks(root);
     if checks.is_empty() {
@@ -673,11 +768,46 @@ pub fn project_context(root: &Path, instructions: &str) -> String {
             checks.join(", ")
         ));
     }
+    if let Some(note) = mcp.and_then(mcp_note) {
+        text.push_str("\n\n");
+        text.push_str(&note);
+    }
     if !instructions.is_empty() {
         text.push_str("\n\n");
         text.push_str(instructions);
     }
     text
+}
+
+/// What the session's MCP servers are for. T2, 2026-11-05: with the system prompt's "a
+/// question that needs nothing from the project ... directly, without tools", gpt-oss gave
+/// a rate from memory beside convert_currency, and searched the empty project for "our
+/// internal docs" beside search_docs.
+fn mcp_note(g: &ognivo_mcp::Gateway) -> Option<String> {
+    let servers: Vec<String> = g
+        .started()
+        .iter()
+        .filter_map(|s| match &s.outcome {
+            Ok(n) if *n > 0 => Some(format!(
+                "{} ({n} tool{})",
+                s.name,
+                if *n == 1 { "" } else { "s" }
+            )),
+            _ => None,
+        })
+        .collect();
+    if servers.is_empty() {
+        return None;
+    }
+    let found = if g.searched() {
+        ", found with tool_search,"
+    } else {
+        ""
+    };
+    Some(format!(
+        "MCP servers give tools that reach beyond the project: {}. A question about what they cover (the user's services, live data, documents that are not among the project's files) needs them: call the tool{found} rather than answer from memory or search the project for it.",
+        servers.join(", ")
+    ))
 }
 
 impl Agent {
@@ -697,9 +827,13 @@ impl Agent {
         Self {
             messages: vec![
                 ChatMessage::System(system_prompt(opts.layout)),
-                ChatMessage::User(project_context(&opts.root, &prompt_instructions.text)),
+                ChatMessage::User(project_context(
+                    &opts.root,
+                    &prompt_instructions.text,
+                    opts.mcp.as_deref(),
+                )),
             ],
-            tools: tools_of(family, &opts, toolset),
+            tools: tools_of(family, &opts, toolset, driver.calls_undeclared()),
             callable: callable_of(&opts),
             toolset,
             driver,
@@ -955,6 +1089,7 @@ impl Agent {
             ChatMessage::User(project_context(
                 &self.opts.root,
                 &self.prompt_instructions.text,
+                self.opts.mcp.as_deref(),
             )),
         ];
         self.seen.clear();
@@ -1644,7 +1779,9 @@ impl Agent {
                 arguments: call.arguments.clone(),
             }),
             (None, Some(_)) if searched && call.name == TOOL_SEARCH => search_call(&call.arguments),
-            (None, Some(g)) if searched && call.name == MCP_CALL => mcp_call(g, &call.arguments),
+            (None, Some(g)) if searched && call.name == MCP_CALL => {
+                mcp_call(g, &call.arguments, self.family)
+            }
             (None, _) => projection::parse_for(
                 self.family,
                 self.opts.layout,
@@ -2917,6 +3054,31 @@ mod tests {
                 .starts_with("[ognivo] Not finished yet: NOT verified: lib.rs changed")
         );
         assert_eq!(r.agent.stats.answers_sent_back, 1);
+    }
+
+    #[test]
+    fn an_mcp_call_must_fit_its_tools_schema() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"repo": {"type": "string"}, "title": {"type": "string"}},
+            "required": ["repo", "title"],
+        });
+        assert_eq!(fits(&schema, r#"{"repo": "a/b", "title": "x"}"#), Ok(()));
+        assert_eq!(
+            fits(&schema, r#"{"repository": "a/b", "title": "x"}"#),
+            Err("missing required argument `repo`".into())
+        );
+        // more than its properties only where it says so
+        assert_eq!(
+            fits(&schema, r#"{"repo": "a", "title": "x", "z": 1}"#),
+            Ok(())
+        );
+        let closed = json!({"properties": {"q": {}}, "additionalProperties": false});
+        assert_eq!(
+            fits(&closed, r#"{"q": 1, "z": 1}"#),
+            Err("unknown argument `z`; the arguments are: q".into())
+        );
+        assert!(fits(&schema, "[1]").is_err());
     }
 
     #[tokio::test]

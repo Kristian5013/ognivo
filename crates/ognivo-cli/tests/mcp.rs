@@ -189,6 +189,23 @@ async fn with_search_the_model_finds_a_tool_and_calls_it_through_mcp_call() {
         &names(&bodies[0])[names(&bodies[0]).len() - 2..],
         ["tool_search", "mcp_call"]
     );
+    // its description has what each tool does, and how to call one on this path
+    let search = bodies[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["function"]["name"] == "tool_search")
+        .unwrap()["function"]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        search.contains("then call one with mcp_call.")
+            && search.ends_with(
+                "The tools:\n- mcp__echo__add_up: Adds numbers up.\n- mcp__echo__echo: Says the text back.\n- mcp__echo__fail: Always fails."
+            ),
+        "{search}"
+    );
     let last = |b: &Value| b["messages"].as_array().unwrap().last().unwrap()["content"].clone();
     let found = last(&bodies[1]);
     let found = found.as_str().unwrap();
@@ -199,4 +216,99 @@ async fn with_search_the_model_finds_a_tool_and_calls_it_through_mcp_call() {
     assert!(found.contains("type mcp__echo__echo = (_: {"), "{found}");
     // the rule on the tool holds through mcp_call
     assert_eq!(last(&bodies[2]), "[mcp: echo · echo]\nhi there");
+}
+
+/// A browser for the tests: it opens the page it is given and, the user saying yes, follows
+/// the redirect back to ognivo.
+const FOLLOW: &str = r#"import sys
+import urllib.error
+import urllib.request
+
+
+class Stay(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+try:
+    urllib.request.build_opener(Stay).open(sys.argv[1])
+    sys.exit("no redirect")
+except urllib.error.HTTPError as e:
+    back = e.headers["Location"]
+urllib.request.urlopen(back).read()
+"#;
+
+#[test]
+fn a_remote_server_is_signed_in_to_from_the_command_line_and_out_again() {
+    use std::io::BufRead as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../ognivo-mcp/tests/fixtures/oauth_server.py");
+    let mut server = Command::new("python3")
+        .arg("-I")
+        .arg(&script)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut port = String::new();
+    std::io::BufReader::new(server.stdout.take().unwrap())
+        .read_line(&mut port)
+        .unwrap();
+    let url = format!("http://127.0.0.1:{}/mcp", port.trim());
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(".ognivo")).unwrap();
+    std::fs::create_dir_all(dir.path().join("proj")).unwrap();
+    let config = json!({"mcpServers": {"docs": {"type": "http", "url": url}}});
+    std::fs::write(dir.path().join(".ognivo/mcp.json"), config.to_string()).unwrap();
+    let follow = dir.path().join("follow.py");
+    std::fs::write(&follow, FOLLOW).unwrap();
+    let browser = dir.path().join("browser");
+    std::fs::write(
+        &browser,
+        format!("#!/bin/sh\nexec python3 -I '{}' \"$1\"\n", follow.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mcp = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO_BIN_EXE_ognivo"))
+            .arg("mcp")
+            .args(args)
+            .arg("--cwd")
+            .arg(dir.path().join("proj"))
+            .arg("--data-dir")
+            .arg(dir.path().join("data"))
+            .env("HOME", dir.path())
+            .env("BROWSER", &browser)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (out.status.success(), text)
+    };
+    let (ok, out) = mcp(&[]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("✗ docs") && out.contains("it wants you to sign in: ognivo mcp login docs"),
+        "{out}"
+    );
+    let (ok, out) = mcp(&["login", "docs"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("Sign in to docs in your browser:"), "{out}");
+    assert!(out.contains("✓ signed in to docs: 1 tool"), "{out}");
+    let (ok, out) = mcp(&[]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("✓ docs (~/.ognivo/mcp.json, signed in)") && out.contains("mcp__docs__whoami"),
+        "{out}"
+    );
+    let (ok, out) = mcp(&["logout", "docs"]);
+    assert!(ok && out.contains("signed out of docs"), "{out}");
+    let (_, out) = mcp(&["logout", "nope"]);
+    assert!(out.contains("there is no MCP server nope"), "{out}");
+    server.kill().unwrap();
+    server.wait().unwrap();
 }

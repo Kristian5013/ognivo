@@ -171,7 +171,34 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             mcp_untrusted = true;
         }
     }
-    let mcp_lines = s.start_mcp().await;
+    let mut mcp_lines = s.start_mcp().await;
+    // a remote server that wants a sign-in: now, in the browser, if the user says so
+    let mut signed = false;
+    for (server, challenge) in s.mcp_wanting_sign_in() {
+        if !sign_in_now(&screen, &input, &server).await {
+            continue;
+        }
+        let opened = |url: &str| {
+            screen.line(&format!("  sign in on this page: {url}"), Paint::Plain);
+            crate::session::open_in_browser(url);
+        };
+        match s.sign_in_mcp(&server, &challenge, opened).await {
+            Ok(()) => {
+                screen.line(
+                    &format!("· signed in to {}", printable(&server.name)),
+                    Paint::Plain,
+                );
+                signed = true;
+            }
+            Err(why) => screen.line(
+                &format!("· {}: {}", printable(&server.name), printable(&why)),
+                Paint::Yellow,
+            ),
+        }
+    }
+    if signed {
+        mcp_lines = s.start_mcp().await;
+    }
     let agent = match &stored {
         Some(row) => s.resumed_agent(row, store, Box::new(approver)),
         None => s.new_agent("chat", &a.session.url, store, Box::new(approver)),
@@ -441,6 +468,22 @@ async fn trust_mcp(screen: &Screen, input: &Input, servers: &[ognivo_mcp::Server
     }
     matches!(
         input.read("  start them? [y]es [n]o > ").await,
+        Read::Line(line) if answer(&line) == Some(Answer::Yes)
+    )
+}
+
+/// Whether to sign in to a remote MCP server that wants it, now, before the session starts.
+async fn sign_in_now(screen: &Screen, input: &Input, server: &ognivo_mcp::ServerConfig) -> bool {
+    screen.line(
+        &format!(
+            "? the MCP server {} ({}) wants you to sign in",
+            printable(&server.name),
+            printable(&server.shown())
+        ),
+        Paint::Bold,
+    );
+    matches!(
+        input.read("  sign in now, in the browser? [y]es [n]o > ").await,
         Read::Line(line) if answer(&line) == Some(Answer::Yes)
     )
 }

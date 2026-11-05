@@ -32,7 +32,7 @@ async fn a_server_of_the_initialize_era_starts_lists_and_answers() {
         },
         source: "test".into(),
     };
-    let g = Gateway::start(&[echo(), missing], Duration::from_secs(20)).await;
+    let g = Gateway::start(&[echo(), missing], Duration::from_secs(20), None).await;
     let started = g.started();
     assert_eq!(started[0].outcome, Ok(3), "{started:?}");
     assert!(
@@ -88,10 +88,11 @@ async fn a_server_over_streamable_http_gets_its_headers() {
         transport: Transport::Http {
             url: url.clone(),
             headers: [("Authorization".to_owned(), format!("Bearer {token}"))].into(),
+            oauth: Default::default(),
         },
         source: "test".into(),
     };
-    let g = Gateway::start(&[config("t0k")], Duration::from_secs(20)).await;
+    let g = Gateway::start(&[config("t0k")], Duration::from_secs(20), None).await;
     assert_eq!(g.started()[0].outcome, Ok(1), "{:?}", g.started());
     assert_eq!(
         g.call(
@@ -104,7 +105,7 @@ async fn a_server_over_streamable_http_gets_its_headers() {
     );
     g.shutdown().await;
     // without the token the server says no
-    let g = Gateway::start(&[config("wrong")], Duration::from_secs(20)).await;
+    let g = Gateway::start(&[config("wrong")], Duration::from_secs(20), None).await;
     assert!(g.started()[0].outcome.is_err(), "{:?}", g.started());
     child.kill().unwrap();
     child.wait().unwrap();

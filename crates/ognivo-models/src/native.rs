@@ -90,7 +90,12 @@ pub struct NativeDriver {
     guarded: Arc<Vec<String>>,
     learnt: Arc<Mutex<Learnt>>,
     answer_now: AnswerNow,
+    /// The session's first step sent its system message ahead ([`NativeDriver::warm`]).
+    warmed: Arc<AtomicBool>,
 }
+
+/// How long the system message sent ahead may take; past that the step goes without it.
+const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// What the driver learnt from its server: the bytes of ids, and the ids of texts.
 #[derive(Debug, Default)]
@@ -145,7 +150,52 @@ impl NativeDriver {
             profile: Arc::new(profile),
             learnt: Arc::default(),
             answer_now: AnswerNow::default(),
+            warmed: Arc::default(),
         })
+    }
+
+    /// The first step of a new session sends its system message alone ahead, so that
+    /// llama.cpp makes a checkpoint where it ends, which the sessions after it on the slot
+    /// start from. A hybrid model's cache goes back only to a checkpoint, and llama.cpp
+    /// makes those at the starts of user messages on the chat path alone, where it knows
+    /// them; on `/completion` it makes them near the end of a prompt only (T2, 2026-11-05:
+    /// 65.2% of Qwen's prompt tokens from the cache on the Native path, 82.4% on the Generic
+    /// one). A session that goes on has its history on the slot, which this would cut
+    /// back: it goes without. gpt-oss runs with `--swa-full` and needs no checkpoints.
+    async fn warm(&self, req: &StepRequest, ids: &[TokenId]) {
+        let Format::Qwen(_) = self.format else {
+            return;
+        };
+        let new = !req
+            .messages
+            .iter()
+            .any(|m| matches!(m, ChatMessage::Assistant { .. }));
+        if !new || self.warmed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        // the system message: everything before the second message's start
+        let start = qwen::Special::ImStart.id();
+        let Some(end) = ids
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| **id == start)
+            .nth(1)
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let ahead = CompletionRequest {
+            prompt: ids[..end].to_vec(),
+            sampler: SamplerSpec::from(self.profile.sampling.main),
+            n_predict: 0,
+            slot: self.slot,
+            constraint: None,
+            banned: Vec::new(),
+        };
+        let mut body = engine::completion_body(&ahead);
+        body["stream"] = json!(false);
+        // the step goes on whatever came of it
+        let _ = self.server.post("/completion", &body, WARM_TIMEOUT).await;
     }
 
     pub fn profile(&self) -> &ModelProfile {
@@ -482,6 +532,7 @@ impl NativeDriver {
     ) -> Result<BoxStream<'static, Result<DriverEvent, DriverError>>, DriverError> {
         let prompt = self.prompt(&req).await?;
         let ids = self.ids(&prompt).await?;
+        self.warm(&req, &ids).await;
         let call_id = format!("call_{:08x}_{}", req.seed, ids.len());
         let sampler = SamplerSpec {
             seed: Some(req.seed),
@@ -1600,18 +1651,36 @@ mod tests {
         Arc<Mutex<Vec<Vec<TokenId>>>>,
         Arc<Mutex<Vec<Value>>>,
     ) {
+        let (url, prompts, bodies, _) = fake_server_warm(completions).await;
+        (url, prompts, bodies)
+    }
+
+    /// The same, and the bodies of the prompts sent ahead without a stream
+    /// ([`NativeDriver::warm`]), which get an empty completion of their own.
+    #[allow(clippy::type_complexity)]
+    async fn fake_server_warm(
+        completions: Vec<Completion>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Vec<TokenId>>>>,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<Mutex<Vec<Value>>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let seen = prompts.clone();
         let bodies = Arc::new(Mutex::new(Vec::new()));
         let kept = bodies.clone();
+        let warm = Arc::new(Mutex::new(Vec::new()));
+        let ahead = warm.clone();
         let queue = Arc::new(Mutex::new(completions.into_iter()));
         tokio::spawn(async move {
             loop {
                 let (mut sock, _) = listener.accept().await.unwrap();
                 let seen = seen.clone();
                 let kept = kept.clone();
+                let ahead = ahead.clone();
                 let queue = queue.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
@@ -1663,6 +1732,13 @@ mod tests {
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
                         )
+                    } else if body["stream"] == json!(false) {
+                        ahead.lock().unwrap().push(body.clone());
+                        let body = json!({"content": "", "tokens": [], "stop": true}).to_string();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
                     } else {
                         let prompt: Vec<TokenId> = body["prompt"]
                             .as_array()
@@ -1703,7 +1779,7 @@ mod tests {
                 });
             }
         });
-        (url, prompts, bodies)
+        (url, prompts, bodies, warm)
     }
 
     fn driver(url: &str) -> NativeDriver {
@@ -2514,6 +2590,57 @@ mod tests {
                 .unwrap()
                 .contains("\"<function=read>\\n\"")
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_qwen_session_sends_its_system_message_ahead_once() {
+        let (url, prompts, _, warm) = fake_server_warm(vec![
+            answer(QWEN_CALL),
+            answer(QWEN_CALL),
+            answer(QWEN_CALL),
+        ])
+        .await;
+        let d = qwen_driver(&url, None);
+        let start = vec![
+            ChatMessage::System("Be brief.".into()),
+            ChatMessage::User("Read a.rs".into()),
+        ];
+        run(&d, request(start.clone(), 1)).await;
+        run(&d, request(start.clone(), 2)).await;
+        let warm = warm.lock().unwrap().clone();
+        assert_eq!(warm.len(), 1, "{warm:?}");
+        assert_eq!(warm[0]["n_predict"], 0);
+        assert_eq!(warm[0]["id_slot"], json!(0));
+        // the system message, up to where the user's begins
+        let sent = prompts.lock().unwrap()[0].clone();
+        let ahead: Vec<TokenId> = warm[0]["prompt"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap() as TokenId)
+            .collect();
+        assert!(sent.starts_with(&ahead) && ahead.len() < sent.len());
+        assert_eq!(sent[ahead.len()], qwen::Special::ImStart.id());
+        assert_eq!(
+            ahead
+                .iter()
+                .filter(|id| **id == qwen::Special::ImStart.id())
+                .count(),
+            1
+        );
+        // a session that goes on keeps its history on the slot
+        let (url, _, _, warm) = fake_server_warm(vec![answer(QWEN_CALL)]).await;
+        let d = qwen_driver(&url, None);
+        let mut going_on = start;
+        going_on.push(ChatMessage::Assistant {
+            content: "Done.".into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tokens: None,
+        });
+        going_on.push(ChatMessage::User("And b.rs?".into()));
+        run(&d, request(going_on, 3)).await;
+        assert!(warm.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

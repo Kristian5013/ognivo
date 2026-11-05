@@ -4,8 +4,9 @@
 
 pub mod config;
 mod gateway;
+pub mod oauth;
 
-pub use config::{Loaded, ServerConfig, Transport};
+pub use config::{Loaded, OAuth, ServerConfig, Transport};
 pub use gateway::{
     DECLARED_CHARS, DECLARED_MAX, Found, Gateway, Listing, RESULT_CHARS, Started, Tool, name_of,
     search, text_of,

@@ -9,7 +9,8 @@
 //!
 //! A name configured in two places is the first one's, in that order: local, project, the
 //! user's own, Claude Code's user's. `${VAR}` and `${VAR:-default}` in a command, its
-//! arguments, its environment, a URL and its headers take the variable's value.
+//! arguments, its environment, a URL, its headers and its `oauth` texts take the variable's
+//! value.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -35,7 +36,21 @@ pub enum Transport {
     Http {
         url: String,
         headers: BTreeMap<String, String>,
+        oauth: OAuth,
     },
+}
+
+/// What signing in to a remote server needs from its config, `oauth` as Claude Code writes
+/// it; without it the client registers itself with the server's authorization server.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OAuth {
+    /// A client registered beforehand (`clientId`), and its secret (`clientSecret`).
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    /// The scopes to ask for (`scopes`, a list or a text of them); none: the server's.
+    pub scopes: Vec<String>,
+    /// The loopback port the browser comes back to (`callbackPort`); none: any free one.
+    pub callback_port: Option<u16>,
 }
 
 impl ServerConfig {
@@ -235,6 +250,7 @@ fn server(
             Transport::Http {
                 url,
                 headers: strings(e.get("headers"), "headers", var)?,
+                oauth: oauth(e.get("oauth"), var)?,
             }
         }
         (Some("sse"), _, _) => {
@@ -251,6 +267,58 @@ fn server(
         transport,
         source: source.to_owned(),
     }))
+}
+
+/// An entry's `oauth`.
+fn oauth(value: Option<&Value>, var: &impl Fn(&str) -> Option<String>) -> Result<OAuth, String> {
+    let Some(value) = value.filter(|v| !v.is_null()) else {
+        return Ok(OAuth::default());
+    };
+    let Some(o) = value.as_object() else {
+        return Err("`oauth` is not an object".into());
+    };
+    let text = |key: &str| -> Result<Option<String>, String> {
+        match o.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) => expand(s, var).map(Some),
+            Some(_) => Err(format!("`oauth.{key}` is not a string")),
+        }
+    };
+    let scopes = match o.get("scopes").or_else(|| o.get("scope")) {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::String(s)) => expand(s, var)?
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect(),
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|v| match v {
+                Value::String(s) => expand(s, var),
+                _ => Err("`oauth.scopes` holds something not a string".into()),
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err("`oauth.scopes` is not a list".into()),
+    };
+    let callback_port = match o.get("callbackPort") {
+        None | Some(Value::Null) => None,
+        Some(Value::Number(n)) => Some(
+            n.as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .ok_or("`oauth.callbackPort` is not a port")?,
+        ),
+        Some(Value::String(s)) => Some(
+            expand(s, var)?
+                .parse::<u16>()
+                .map_err(|_| "`oauth.callbackPort` is not a port")?,
+        ),
+        Some(_) => return Err("`oauth.callbackPort` is not a port".into()),
+    };
+    Ok(OAuth {
+        client_id: text("clientId")?,
+        client_secret: text("clientSecret")?,
+        scopes,
+        callback_port,
+    })
 }
 
 /// An object of strings, each expanded.
@@ -347,6 +415,10 @@ mod tests {
                     "old",
                     json!({"type": "sse", "url": "https://old.example/sse"}),
                 ),
+                (
+                    "signed",
+                    json!({"type": "http", "url": "https://signed.example/mcp", "oauth": {"clientId": "ognivo-${TOKEN}", "scopes": "read write", "callbackPort": 33418}}),
+                ),
             ]),
         );
         write(
@@ -371,7 +443,7 @@ mod tests {
         let names = |v: &[ServerConfig]| v.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
         assert_eq!(names(&l.servers), ["local", "notes", "gh"]);
         // in the order of their file
-        assert_eq!(names(&l.pending), ["repo", "docs"]);
+        assert_eq!(names(&l.pending), ["repo", "docs", "signed"]);
         assert_eq!(
             l.servers[1].transport,
             Transport::Stdio {
@@ -382,8 +454,17 @@ mod tests {
         );
         assert_eq!(l.pending[0].shown(), "npx -y repo-mcp");
         assert!(
-            matches!(&l.pending[1].transport, Transport::Http { headers, .. } if headers["Authorization"] == "Bearer t0k")
+            matches!(&l.pending[1].transport, Transport::Http { headers, oauth, .. } if headers["Authorization"] == "Bearer t0k" && *oauth == OAuth::default())
         );
+        assert!(matches!(
+            &l.pending[2].transport,
+            Transport::Http { oauth, .. } if *oauth == OAuth {
+                client_id: Some("ognivo-t0k".into()),
+                client_secret: None,
+                scopes: vec!["read".into(), "write".into()],
+                callback_port: Some(33418),
+            }
+        ));
         assert_eq!(l.problems.len(), 1);
         assert!(
             l.problems[0].starts_with("old in .mcp.json: the HTTP+SSE transport is gone"),
@@ -395,7 +476,7 @@ mod tests {
         assert!(key.contains("mcp repo:") && key.contains("t0k"), "{key}");
         let mut trusted = l.clone();
         trusted.trust();
-        assert_eq!(trusted.servers.len(), 5);
+        assert_eq!(trusted.servers.len(), 6);
         assert!(trusted.pending.is_empty());
     }
 

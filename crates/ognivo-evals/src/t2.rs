@@ -506,7 +506,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
                 },
                 source: "T2".into(),
             };
-            let g = ognivo_mcp::Gateway::start(&[server], MCP_START)
+            let g = ognivo_mcp::Gateway::start(&[server], MCP_START, None)
                 .await
                 .with_listing(t.mcp_listing);
             if let Some(Err(why)) = g.started().first().map(|s| &s.outcome) {

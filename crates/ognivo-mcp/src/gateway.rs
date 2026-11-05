@@ -14,6 +14,7 @@
 //!   stays the same whatever it finds.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -97,6 +98,22 @@ pub struct Started {
     pub name: String,
     /// Its tools' count, or why it did not start.
     pub outcome: Result<usize, String>,
+    /// It did not start for want of a sign-in: its `WWW-Authenticate`, for
+    /// [`crate::oauth::sign_in`] (empty when it gave none).
+    pub sign_in: Option<String>,
+}
+
+/// Why a server did not start.
+enum Failed {
+    /// It wants a sign-in: its challenge.
+    SignIn(String),
+    Other(String),
+}
+
+impl From<String> for Failed {
+    fn from(why: String) -> Self {
+        Failed::Other(why)
+    }
 }
 
 /// The session's servers that started, and their tools.
@@ -126,13 +143,21 @@ impl Drop for Gateway {
 
 impl Gateway {
     /// Starts `servers` at once, each within `timeout`, and lists their tools; one that
-    /// fails is left out, with why.
-    pub async fn start(servers: &[ServerConfig], timeout: Duration) -> Gateway {
+    /// fails is left out, with why. A remote server's sign-in comes from `signed`
+    /// ([`crate::oauth`]); without it, a server that wants one does not start.
+    pub async fn start(
+        servers: &[ServerConfig],
+        timeout: Duration,
+        signed: Option<&Path>,
+    ) -> Gateway {
         let connecting = servers.iter().map(|s| async move {
-            let r = tokio::time::timeout(timeout, connect(s)).await;
+            let r = tokio::time::timeout(timeout, connect(s, signed)).await;
             let r = match r {
                 Ok(r) => r,
-                Err(_) => Err(format!("it did not answer within {} s", timeout.as_secs())),
+                Err(_) => Err(Failed::Other(format!(
+                    "it did not answer within {} s",
+                    timeout.as_secs()
+                ))),
             };
             (s.name.clone(), r)
         });
@@ -145,13 +170,20 @@ impl Gateway {
                     gateway.started.push(Started {
                         name: name.clone(),
                         outcome: Ok(tools.len()),
+                        sign_in: None,
                     });
                     found.extend(tools.into_iter().map(|t| (name.clone(), t)));
                     gateway.clients.insert(name, client);
                 }
-                Err(why) => gateway.started.push(Started {
+                Err(Failed::SignIn(challenge)) => gateway.started.push(Started {
+                    outcome: Err(format!("it wants you to sign in: ognivo mcp login {name}")),
+                    name,
+                    sign_in: Some(challenge),
+                }),
+                Err(Failed::Other(why)) => gateway.started.push(Started {
                     name,
                     outcome: Err(why),
+                    sign_in: None,
                 }),
             }
         }
@@ -249,13 +281,14 @@ impl Gateway {
 #[allow(clippy::type_complexity)]
 async fn connect(
     s: &ServerConfig,
+    signed: Option<&Path>,
 ) -> Result<
     (
         RunningService<RoleClient, Client>,
         Vec<rmcp::model::Tool>,
         Option<u32>,
     ),
-    String,
+    Failed,
 > {
     let lifecycle = ClientLifecycleMode::Auto {
         preferred_versions: vec![ProtocolVersion::V_2026_07_28],
@@ -276,29 +309,48 @@ async fn connect(
             let client = Client
                 .serve_with_lifecycle(process, lifecycle)
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| Failed::Other(e.to_string()))?;
             (client, group)
         }
-        Transport::Http { url, headers } => {
+        Transport::Http { url, headers, .. } => {
             let mut custom = HashMap::new();
             for (k, v) in headers {
                 let name = reqwest::header::HeaderName::from_bytes(k.as_bytes())
-                    .map_err(|e| format!("header {k}: {e}"))?;
+                    .map_err(|e| Failed::Other(format!("header {k}: {e}")))?;
                 let value = reqwest::header::HeaderValue::from_str(v)
-                    .map_err(|e| format!("header {k}: {e}"))?;
+                    .map_err(|e| Failed::Other(format!("header {k}: {e}")))?;
                 custom.insert(name, value);
             }
             let config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(custom);
-            let transport = StreamableHttpClientTransport::from_config(config);
-            let client = Client
-                .serve_with_lifecycle(transport, lifecycle)
-                .await
-                .map_err(|e| e.to_string())?;
+            let signed = match signed {
+                Some(dir) => crate::oauth::client(dir, s).await?,
+                None => None,
+            };
+            let started = match signed {
+                Some(auth) => {
+                    let transport = StreamableHttpClientTransport::with_client(auth, config);
+                    Client.serve_with_lifecycle(transport, lifecycle).await
+                }
+                None => {
+                    let transport = StreamableHttpClientTransport::from_config(config);
+                    Client.serve_with_lifecycle(transport, lifecycle).await
+                }
+            };
+            let client = started.map_err(|e| {
+                if e.is_authorization_required() {
+                    Failed::SignIn(e.auth_challenge().unwrap_or_default().to_owned())
+                } else {
+                    Failed::Other(e.to_string())
+                }
+            })?;
             (client, None)
         }
     };
-    let tools = client.list_all_tools().await.map_err(|e| e.to_string())?;
+    let tools = client
+        .list_all_tools()
+        .await
+        .map_err(|e| Failed::Other(e.to_string()))?;
     Ok((client, tools, group))
 }
 

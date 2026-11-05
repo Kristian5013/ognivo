@@ -131,6 +131,8 @@ pub struct Connected {
     /// The MCP servers configured for the project; [`Connected::start_mcp`] starts them.
     pub mcp: ognivo_mcp::Loaded,
     mcp_tools: ognivo_mcp::Listing,
+    /// Where the sign-ins to remote servers are kept, when there is a home.
+    mcp_signed: Option<PathBuf>,
     pub opts: AgentOptions,
 }
 
@@ -153,9 +155,10 @@ impl Connected {
         if self.mcp.servers.is_empty() {
             return lines;
         }
-        let gateway = ognivo_mcp::Gateway::start(&self.mcp.servers, MCP_START)
-            .await
-            .with_listing(self.mcp_tools);
+        let gateway =
+            ognivo_mcp::Gateway::start(&self.mcp.servers, MCP_START, self.mcp_signed.as_deref())
+                .await
+                .with_listing(self.mcp_tools);
         for s in gateway.started() {
             lines.push(match &s.outcome {
                 Ok(n) => (
@@ -176,6 +179,36 @@ impl Connected {
         }
         self.opts.mcp = Some(Arc::new(gateway));
         lines
+    }
+
+    /// The servers of the last [`Connected::start_mcp`] that did not start for want of a
+    /// sign-in, with their challenges.
+    pub fn mcp_wanting_sign_in(&self) -> Vec<(ognivo_mcp::ServerConfig, String)> {
+        let Some(g) = &self.opts.mcp else {
+            return Vec::new();
+        };
+        g.started()
+            .iter()
+            .filter_map(|s| {
+                let challenge = s.sign_in.clone()?;
+                let config = self.mcp.servers.iter().find(|c| c.name == s.name)?;
+                Some((config.clone(), challenge))
+            })
+            .collect()
+    }
+
+    /// Signs in to `server`, `challenge` its own: `open` gets the page for the browser.
+    /// [`Connected::start_mcp`] then starts it with the sign-in.
+    pub async fn sign_in_mcp(
+        &self,
+        server: &ognivo_mcp::ServerConfig,
+        challenge: &str,
+        open: impl FnOnce(&str),
+    ) -> Result<(), String> {
+        let Some(dir) = &self.mcp_signed else {
+            return Err("there is no home directory to keep the sign-in in".into());
+        };
+        ognivo_mcp::oauth::sign_in(dir, server, Some(challenge), open).await
     }
 
     /// The agent of a new session, kept in `store` from the start.
@@ -390,6 +423,7 @@ impl SessionArgs {
         let mcp = ognivo_mcp::config::load(&root, home.as_deref(), claude_dir.as_deref(), |v| {
             std::env::var(v).ok()
         });
+        let mcp_signed = home.as_deref().map(ognivo_mcp::oauth::credentials_dir);
         let loaded = rules::load(&Places {
             root: root.clone(),
             home,
@@ -429,6 +463,7 @@ impl SessionArgs {
             },
             mcp,
             mcp_tools: self.mcp_tools,
+            mcp_signed,
             changed,
             pending: loaded.pending,
             rule_files: loaded.files,
@@ -616,6 +651,28 @@ fn user_instructions() -> UserInstructions {
 }
 
 /// `$HOME`, canonical, and Claude Code's `CLAUDE_CONFIG_DIR` if it is set.
+/// Opens `url` in the user's browser, if there is one to open it in: `$BROWSER`, as other
+/// tools take it, or the desktop's opener. The caller shows the URL too, for when there is
+/// none.
+pub fn open_in_browser(url: &str) {
+    let opener = std::env::var("BROWSER")
+        .ok()
+        .filter(|b| !b.trim().is_empty())
+        .unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                "open".into()
+            } else {
+                "xdg-open".into()
+            }
+        });
+    let _ = std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 pub fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
     let home = std::env::var_os("HOME")
         .filter(|h| !h.is_empty())
