@@ -17,6 +17,7 @@ use crate::{Event, Hunk, ItemId, ThreadId, ThreadInfo};
 
 pub const INITIALIZE: &str = "initialize";
 pub const THREAD_LIST: &str = "thread/list";
+pub const SERVER_DETECT: &str = "server/detect";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_RESUME: &str = "thread/resume";
 pub const THREAD_READ: &str = "thread/read";
@@ -127,6 +128,17 @@ pub struct Server {
     pub api_key: Option<String>,
     /// For llama-server's router: the model, by its id or alias.
     pub model: Option<String>,
+}
+
+/// `server/detect`: the profile of the model a server runs, as a thread there would find it,
+/// with its reasoning levels; params are a `Server`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Detected {
+    /// `None`: no profile fits the server's model.
+    pub profile: Option<String>,
+    /// The profile's levels, and the one a thread gets without a level of its own.
+    pub levels: Vec<String>,
+    pub default_level: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

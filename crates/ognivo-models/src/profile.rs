@@ -41,7 +41,8 @@ impl ModelProfile {
             Family::QwenXml => {
                 kw.insert("enable_thinking".into(), json!(level != "off"));
                 kw.insert("preserve_thinking".into(), json!(preserve));
-                if level != "off" {
+                // Qwen3.6 thinks or does not; Qwen3.8 has levels
+                if level != "off" && self.reasoning.control == ReasoningControl::Effort {
                     kw.insert("reasoning_effort".into(), json!(level));
                 }
             }
@@ -224,6 +225,10 @@ const BUILTIN: &[(&str, &str)] = &[
         "qwen3.8-27b.toml",
         include_str!("../../../profiles/qwen3.8-27b.toml"),
     ),
+    (
+        "qwen3.6-35b-a3b.toml",
+        include_str!("../../../profiles/qwen3.6-35b-a3b.toml"),
+    ),
 ];
 
 /// The profiles compiled into the binary.
@@ -248,7 +253,15 @@ mod tests {
     fn builtin_profiles_are_consistent() {
         let profiles = builtin().unwrap();
         let families: Vec<Family> = profiles.iter().map(|p| p.family).collect();
-        assert_eq!(families, [Family::Harmony, Family::Gemma4, Family::QwenXml]);
+        assert_eq!(
+            families,
+            [
+                Family::Harmony,
+                Family::Gemma4,
+                Family::QwenXml,
+                Family::QwenXml
+            ]
+        );
         for p in &profiles {
             assert!(
                 p.tokens.structural.contains(&p.detect.probe.text),
@@ -301,6 +314,11 @@ mod tests {
         assert_eq!(
             Value::Object(p[2].chat_template_kwargs(Some("off"))),
             json!({"enable_thinking": false, "preserve_thinking": true})
+        );
+        // Qwen3.6: thinking on or off, no effort
+        assert_eq!(
+            Value::Object(p[3].chat_template_kwargs(None)),
+            json!({"enable_thinking": true, "preserve_thinking": true})
         );
     }
 

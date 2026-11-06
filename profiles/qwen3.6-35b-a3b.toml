@@ -1,0 +1,63 @@
+# Qwen3.6-35B-A3B (arch qwen3_5_moe: 40 layers, 30 Gated DeltaNet + 10 full attention; 256
+# experts, 8 routed + 1 shared per token, 3B active; MTP head), the XML tool calls of Qwen3.8
+# (<tool_call><function=NAME><parameter=K>V</parameter></function></tool_call>).
+# Sources: the model card and config.json of Qwen/Qwen3.6-35B-A3B at 995ad96e (2026-04-24);
+# the owner's llama-server, 2026-11-06 (b12079, UD-IQ4_XS).
+id = "qwen3.6-35b-a3b"
+family = "qwen-xml"
+display_name = "Qwen3.6-35B-A3B"
+
+[detect]
+probe = { text = "<tool_call>", id = 248058 }
+name_hints = ["qwen3.6-35b-a3b", "qwen3.6-35b"]
+
+[tokens]
+structural = [
+    "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>",
+    "<think>", "</think>", "<tool_response>", "</tool_response>",
+]
+# Without <think> and </think>, which tasks quote, as for Qwen3.8.
+framing = [
+    "<|im_start|>", "<|im_end|>", "<tool_call>", "</tool_call>", "<tool_response>", "</tool_response>",
+]
+eog = [248046, 248044] # <|im_end|>, <|endoftext|> (generation_config.json)
+specials = [
+    "<|endoftext|>", "<|object_ref_start|>", "<|object_ref_end|>", "<|box_start|>", "<|box_end|>",
+    "<|quad_start|>", "<|quad_end|>", "<|vision_start|>", "<|vision_end|>", "<|vision_pad|>",
+    "<|image_pad|>", "<|video_pad|>", "<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>", "<|fim_pad|>",
+    "<|repo_name|>", "<|file_sep|>", "<|audio_start|>", "<|audio_end|>", "<|audio_pad|>",
+    "<tts_pad>", "<tts_text_bos>", "<tts_text_eod>", "<tts_text_bos_single>",
+]
+# No BOS.
+
+[sampling.main]
+# The card's agentic evaluations (SWE-bench, Terminal-Bench 2.0): temperature 1.0, top_p 0.95,
+# top_k 20; min_p must be sent as 0 (llama.cpp keeps 0.05 otherwise).
+temperature = 1.0
+top_p = 0.95
+top_k = 20
+min_p = 0.0
+
+[reasoning]
+control = "toggle"              # enable_thinking: on or off for the session; no effort levels
+levels = ["on", "off"]
+default = "on"                  # thinking by default, as the card has it
+history = "preserve"            # preserve_thinking: trained to use past reasoning; append-only, KV kept
+
+[context]
+working_max = 131072            # the card: keep at least 128K so that thinking keeps its room
+compact_at = 0.85
+max_tokens = 32768              # the card's output length for most queries
+
+[template]
+dir = "profiles/templates/Qwen3.6-35B-A3B"
+file_sha256 = "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259"
+# sha256 of the served form, as /props reports it (template.rs: served_form)
+known = [
+    { sha256 = "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259", verdict = "canonical", note = "Qwen/Qwen3.6-35B-A3B, 2026-04-24" },
+    { sha256 = "55d4931433fe502b794226ee7f4d206a6bdd436ac9f80eb7d8ebb4c639f9ea0c", verdict = "ok", note = "Unsloth GGUF template (UD-IQ4_XS): merges system and developer messages, no raise_exception checks" },
+]
+
+[server]
+recommended_flags = "-c 131072 -np 1 -fa on -ngl 99 -b 2048 -ub 2048 --ctx-checkpoints 16 --checkpoint-min-step 512 --cache-ram 12288 --chat-template-file profiles/templates/Qwen3.6-35B-A3B/canonical.jinja"
+notes = "MoE hybrid of the Qwen3.8 kind: 3B active of 35B, so decode is fast; its 30 DeltaNet layers keep a recurrent state, so context checkpoints matter as for Qwen3.8 (--checkpoint-min-step 512). UD-IQ4_XS is 17.7 GB. The Native path renders it with ognivo's Qwen renderer: Qwen3.6's template renders all ognivo sends as Qwen3.8's does at medium (no effort line) or off, byte for byte (golden/)."

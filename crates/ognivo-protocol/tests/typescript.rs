@@ -74,12 +74,14 @@ fn typescript() -> String {
         McpServer::decl(&cfg),
         McpSignInAsked::decl(&cfg),
         SignInAnswer::decl(&cfg),
+        Detected::decl(&cfg),
         HooksTrustAsked::decl(&cfg),
         HookShown::decl(&cfg),
         Cancel::decl(&cfg),
     ];
     // what a client may call, and what the core may ask it
     let methods = [
+        method::<Server, Detected>(&cfg, rpc::SERVER_DETECT),
         method::<Initialize, Initialized>(&cfg, rpc::INITIALIZE),
         method::<ListThreads, Threads>(&cfg, rpc::THREAD_LIST),
         method::<StartThread, Opened>(&cfg, rpc::THREAD_START),

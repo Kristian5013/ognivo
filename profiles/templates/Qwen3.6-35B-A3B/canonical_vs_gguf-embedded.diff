@@ -1,0 +1,67 @@
+44a45,57
+> {%- set num_sys = 0 %}
+> {%- set merged_system = '' %}
+> {%- if messages[0].role == 'system' or messages[0].role == 'developer' %}
+>     {%- set first = render_content(messages[0].content, false, true)|trim %}
+>     {%- if messages|length > 1 and (messages[1].role == 'system' or messages[1].role == 'developer') %}
+>         {%- set second = render_content(messages[1].content, false, true)|trim %}
+>         {%- set merged_system = first + '\n' + second %}
+>         {%- set num_sys = 2 %}
+>     {%- else %}
+>         {%- set merged_system = first %}
+>         {%- set num_sys = 1 %}
+>     {%- endif %}
+> {%- endif %}
+54,58c67,68
+<     {%- if messages[0].role == 'system' %}
+<         {%- set content = render_content(messages[0].content, false, true)|trim %}
+<         {%- if content %}
+<             {{- '\n\n' + content }}
+<         {%- endif %}
+---
+>     {%- if merged_system %}
+>         {{- '\n\n' + merged_system }}
+62,64c72,73
+<     {%- if messages[0].role == 'system' %}
+<         {%- set content = render_content(messages[0].content, false, true)|trim %}
+<         {{- '<|im_start|>system\n' + content + '<|im_end|>\n' }}
+---
+>     {%- if merged_system %}
+>         {{- '<|im_start|>system\n' + merged_system + '<|im_end|>\n' }}
+78,80d86
+< {%- if ns.multi_step_tool %}
+<     {{- raise_exception('No user query found in messages.') }}
+< {%- endif %}
+81a88
+>     {%- if loop.index0 >= num_sys and message.role != "system" and message.role != "developer" %}
+83,87c90
+<     {%- if message.role == "system" %}
+<         {%- if not loop.first %}
+<             {{- raise_exception('System message must be at the beginning.') }}
+<         {%- endif %}
+<     {%- elif message.role == "user" %}
+---
+>     {%- if message.role == "user" %}
+119,120c122,124
+<                 {%- if tool_call.arguments is defined %}
+<                     {%- for args_name, args_value in tool_call.arguments|items %}
+---
+>                 {%- if tool_call.arguments is mapping %}
+>                     {%- for args_name in tool_call.arguments %}
+>                         {%- set args_value = tool_call.arguments[args_name] %}
+122c126
+<                         {%- set args_value = args_value | string if args_value is string else args_value | tojson | safe %}
+---
+>                         {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}
+143,144c147
+<     {%- else %}
+<         {{- raise_exception('Unexpected message role.') }}
+---
+>     {%- endif %}
+154c157,158
+< {%- endif %}
+\ В конце файла нет новой строки
+---
+> {%- endif %}
+> {#- Unsloth fixes - developer role, tool calling #}
+\ В конце файла нет новой строки

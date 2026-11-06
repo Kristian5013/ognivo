@@ -119,9 +119,9 @@ for (const [name, rel] of Object.entries(SESSIONS)) {
 }
 
 // Each profile's control tokens (framing ones frame the model's own messages and calls,
-// §5.3) and context budget, by profile id
+// §5.3), context budget and reasoning levels, by profile id
 const profiles = join(here, "../../../profiles");
-/** @type {Record<string, { tokens: { framing: string[]; other: string[] }; context: { working_max: number; compact_at: number } }>} */
+/** @type {Record<string, { tokens: { framing: string[]; other: string[] }; context: { working_max: number; compact_at: number }; reasoning: { levels: string[]; default: string } }>} */
 const table = {};
 for (const file of readdirSync(profiles).filter((f) => f.endsWith(".toml"))) {
   const toml = readFileSync(join(profiles, file), "utf8");
@@ -140,9 +140,12 @@ for (const file of readdirSync(profiles).filter((f) => f.endsWith(".toml"))) {
   );
   const context = /^\[context\]\n([\s\S]*?)(?=^\[)/m.exec(toml)?.[1] ?? "";
   const number = (key) => Number(new RegExp(`^${key} = ([0-9.]+)`, "m").exec(context)?.[1]);
+  const reasoning = /^\[reasoning\]\n([\s\S]*?)(?=^\[)/m.exec(toml)?.[1] ?? "";
+  const levels = [...(/^levels = \[([^\]]*)\]/m.exec(reasoning)?.[1] ?? "").matchAll(/"([^"]*)"/g)].map((m) => m[1]);
   table[id] = {
     tokens: { framing, other },
     context: { working_max: number("working_max"), compact_at: number("compact_at") },
+    reasoning: { levels, default: /^default = "([^"]*)"/m.exec(reasoning)?.[1] ?? "" },
   };
 }
 writeFileSync(join(here, "../src/profiles.json"), `${safe(table, 1)}\n`);

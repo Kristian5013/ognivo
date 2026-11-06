@@ -42,7 +42,7 @@ use crate::generic::{
 use crate::harmony::parse::{self, CONTROL, End, Event, Kind, Reader};
 use crate::harmony::{self, Effort, Message, Namespace, Piece, Prompt, Special, System, Tool};
 use crate::llama::LlamaServer;
-use crate::profile::ModelProfile;
+use crate::profile::{ModelProfile, ReasoningControl};
 use crate::qwen;
 use crate::repeat::{Loop, Repeats};
 
@@ -132,12 +132,20 @@ impl NativeDriver {
                 };
                 Format::Harmony(System::new(date, effort))
             }
-            Family::QwenXml => {
-                Format::Qwen(qwen::Level::named(level).ok_or_else(|| unknown(level))?)
-            }
+            // Qwen3.6 thinks or does not: its template renders all ognivo sends as Qwen3.8's
+            // does at medium, which adds no line of effort, or off (profiles/templates/
+            // Qwen3.6-35B-A3B/golden)
+            Family::QwenXml => Format::Qwen(match (profile.reasoning.control, level) {
+                (ReasoningControl::Toggle, "on") => qwen::Level::Medium,
+                (ReasoningControl::Toggle, "off") => qwen::Level::Off,
+                (ReasoningControl::Toggle, other) => return Err(unknown(other)),
+                (ReasoningControl::Effort, level) => {
+                    qwen::Level::named(level).ok_or_else(|| unknown(level))?
+                }
+            }),
             Family::Gemma4 => {
                 return Err(DriverError::InvalidRequest(format!(
-                    "{}: the Native path reads gpt-oss's and Qwen3.8's formats so far",
+                    "{}: the Native path reads gpt-oss's and Qwen's formats so far",
                     profile.id
                 )));
             }

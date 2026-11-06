@@ -21,7 +21,10 @@ import type { ThreadStore } from "./store.ts";
 import type { Threads } from "./threads.ts";
 
 const PROFILES = Object.keys(profiles);
-const LEVELS = ["low", "medium", "high"];
+/** Each profile's reasoning levels, and the one a thread gets without a level of its own. */
+const REASONING: Record<string, { levels: string[]; default: string } | undefined> = Object.fromEntries(
+  Object.entries(profiles).map(([id, p]) => [id, (p as { reasoning?: { levels: string[]; default: string } }).reasoning]),
+);
 const SETTINGS = "ognivo.settings";
 
 /** What the form for a new thread starts with: what it was last time. */
@@ -197,8 +200,42 @@ function ThreadList({
 }
 
 /** A new thread: the project, the server, and how the agent works. */
-function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Settings, project: string) => Promise<void> }) {
+function NewThread({
+  settings,
+  onStart,
+  detect,
+}: {
+  settings: Settings;
+  onStart: (s: Settings, project: string) => Promise<void>;
+  /** The profile of the model a server runs, as the core finds it. */
+  detect: (url: string) => Promise<P.Detected>;
+}) {
   const [form, setForm] = useState(settings);
+  const [detected, setDetected] = useState<P.Detected>();
+  // without a profile chosen, the server's model: its levels are the ones to choose from
+  useEffect(() => {
+    const url = form.url.trim();
+    if (form.profile || !url) return;
+    let live = true;
+    const t = setTimeout(() => {
+      detect(url).then(
+        (d) => live && setDetected(d),
+        () => live && setDetected(undefined),
+      );
+    }, 400);
+    return () => {
+      live = false;
+      clearTimeout(t);
+    };
+  }, [form.url, form.profile, detect]);
+  const reasoning = form.profile
+    ? REASONING[form.profile]
+    : detected?.profile
+      ? { levels: detected.levels, default: detected.default_level ?? "" }
+      : undefined;
+  const levels = reasoning?.levels ?? [];
+  // a level the model does not have is not sent: the model's default is
+  const level = levels.includes(form.level) ? form.level : "";
   const [project, setProject] = useState(settings.projects[0] ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
@@ -211,7 +248,7 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
         e.preventDefault();
         setBusy(true);
         setError(undefined);
-        onStart(form, project.trim())
+        onStart({ ...form, level }, project.trim())
           .catch((e: unknown) => setError(message(e)))
           .finally(() => setBusy(false));
       }}
@@ -265,7 +302,7 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
             onChange={(e) => setForm({ ...form, profile: e.target.value })}
             className={field}
           >
-            <option value="">the server's model</option>
+            <option value="">{detected?.profile ? `the server's model: ${detected.profile}` : "the server's model"}</option>
             {PROFILES.map((p) => (
               <option key={p} value={p}>
                 {p}
@@ -279,12 +316,12 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
           </label>
           <select
             id="level"
-            value={form.level}
+            value={level}
             onChange={(e) => setForm({ ...form, level: e.target.value })}
             className={field}
           >
-            <option value="">the profile's default</option>
-            {LEVELS.map((l) => (
+            <option value="">{reasoning?.default ? `the model's default: ${reasoning.default}` : "the model's default"}</option>
+            {levels.map((l) => (
               <option key={l} value={l}>
                 {l}
               </option>
@@ -294,7 +331,7 @@ function NewThread({ settings, onStart }: { settings: Settings; onStart: (s: Set
       </div>
       <label className="flex items-center gap-2 text-[13px]">
         <input type="checkbox" checked={form.native} onChange={(e) => setForm({ ...form, native: e.target.checked })} />
-        Native path: ognivo renders the model's format itself (gpt-oss)
+        Native path: ognivo renders the model's format itself (gpt-oss, Qwen)
       </label>
       <label className="flex items-center gap-2 text-[13px]">
         <input
@@ -506,6 +543,10 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
     setListed((n) => n + 1);
   };
 
+  const detect = useCallback(
+    (url: string) => core.call("server/detect", { url, api_key: null, model: null }),
+    [core],
+  );
   const start = async (form: Settings, project: string) => {
     const o = await core.call("thread/start", {
       project,
@@ -616,7 +657,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       <Resizer width={sidebar} onWidth={setSidebar} side="left" initial={SIDEBAR} />
       <main className={`flex min-w-0 flex-1 flex-col ${creating || selected === undefined ? "hearth" : ""}`}>
         {creating || selected === undefined ? (
-          <NewThread key={settings.projects[0] ?? ""} settings={settings} onStart={start} />
+          <NewThread key={settings.projects[0] ?? ""} settings={settings} onStart={start} detect={detect} />
         ) : store ? (
           <>
             <Hud store={store} panel={panel} onPanel={setPanel} waiting={here.length} />

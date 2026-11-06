@@ -27,6 +27,7 @@ const START_MS = 10_000;
 const METHODS = new Set([
   "initialize",
   "thread/list",
+  "server/detect",
   "thread/start",
   "thread/resume",
   "thread/read",

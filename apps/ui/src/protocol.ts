@@ -556,6 +556,16 @@ export type McpSignInAsked = { project: string, server: McpServer, };
 
 export type SignInAnswer = { sign_in: boolean, };
 
+export type Detected = { 
+/**
+ * `None`: no profile fits the server's model.
+ */
+profile: string | null, 
+/**
+ * The profile's levels, and the one a thread gets without a level of its own.
+ */
+levels: Array<string>, default_level: string | null, };
+
 export type HooksTrustAsked = { project: string, hooks: Array<HookShown>, };
 
 export type HookShown = { 
@@ -572,6 +582,7 @@ export type Cancel = { id: number, };
 
 /** The core's methods. */
 export type Methods = {
+  "server/detect": { params: Server; result: Detected };
   "initialize": { params: Initialize; result: Initialized };
   "thread/list": { params: ListThreads; result: Threads };
   "thread/start": { params: StartThread; result: Opened };

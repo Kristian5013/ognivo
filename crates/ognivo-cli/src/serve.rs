@@ -301,6 +301,7 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
             })
         }
         rpc::THREAD_LIST => thread::list(hub, parse(params)?),
+        rpc::SERVER_DETECT => detect(parse(params)?).await,
         rpc::THREAD_START => thread::start(hub, parse(params)?).await,
         rpc::THREAD_RESUME => thread::resume(hub, parse(params)?).await,
         rpc::THREAD_READ => thread::read(hub, parse(params)?),
@@ -344,6 +345,40 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
         }
         _ => Err(RpcError::new(-32601, format!("no method {method}"))),
     }
+}
+
+/// How long `server/detect` waits for the server.
+const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The profile of the model `s` runs, found as a thread's start finds it, with its levels.
+async fn detect(s: rpc::Server) -> Reply {
+    use ognivo_models::{doctor, llama::LlamaServer, profile};
+    let base =
+        LlamaServer::new(&s.url, s.api_key).map_err(|e| RpcError::new(-32602, e.to_string()))?;
+    let server = match &s.model {
+        Some(m) => base.for_model(m),
+        None => base,
+    };
+    let profiles = profile::builtin().map_err(|e| RpcError::new(-32603, e.to_string()))?;
+    let found = tokio::time::timeout(DETECT_TIMEOUT, doctor::identify(&server, &profiles))
+        .await
+        .map_err(|_| {
+            RpcError::new(
+                rpc::error::NOT_STARTED,
+                format!(
+                    "{} did not answer within {} s",
+                    s.url,
+                    DETECT_TIMEOUT.as_secs()
+                ),
+            )
+        })?
+        .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
+    let p = found.map(|(p, _)| p);
+    reply(rpc::Detected {
+        profile: p.map(|p| p.id.clone()),
+        levels: p.map(|p| p.reasoning.levels.clone()).unwrap_or_default(),
+        default_level: p.map(|p| p.reasoning.default.clone()),
+    })
 }
 
 pub fn reply(value: impl serde::Serialize) -> Reply {

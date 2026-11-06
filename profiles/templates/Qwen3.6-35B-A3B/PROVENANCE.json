@@ -1,0 +1,18 @@
+{
+ "checked_on": "2026-11-06",
+ "canonical": {
+  "repo": "Qwen/Qwen3.6-35B-A3B",
+  "main_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+  "file": "chat_template.jinja",
+  "url": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B/resolve/995ad96eacd98c81ed38be0c5b274b04031597b0/chat_template.jinja",
+  "sha256": "e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259",
+  "saved_as": "canonical.jinja"
+ },
+ "gguf_embedded": {
+  "gguf": "Qwen3.6-35B-A3B-UD-IQ4_XS.gguf (Unsloth)",
+  "seen_from": "/props of llama-server b12079-71efc559a, served form",
+  "sha256": "55d4931433fe502b794226ee7f4d206a6bdd436ac9f80eb7d8ebb4c639f9ea0c",
+  "saved_as": "gguf-embedded.jinja",
+  "differs": "merges a system and a developer message, drops the raise_exception checks, renders the arguments of tool calls that are not mappings"
+ }
+}

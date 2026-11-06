@@ -185,6 +185,16 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
         String::from_utf8_lossy(&second.stderr)
     );
 
+    // the model of a server that does not answer: why, and no profile
+    let none = a
+        .call(
+            "server/detect",
+            json!({"url": "http://127.0.0.1:9", "api_key": null, "model": null}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(none["code"], -32003, "{none}");
+
     let opened = a.ok("thread/start", start(&root, &url)).await;
     let thread = opened["thread"].clone();
     assert_eq!(opened["info"]["kind"], "chat");

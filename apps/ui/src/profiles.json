@@ -33,6 +33,13 @@
   "context": {
    "working_max": 65536,
    "compact_at": 0.65
+  },
+  "reasoning": {
+   "levels": [
+    "on",
+    "off"
+   ],
+   "default": "on"
   }
  },
  "gpt-oss-20b": {
@@ -66,6 +73,66 @@
   "context": {
    "working_max": 98304,
    "compact_at": 0.7
+  },
+  "reasoning": {
+   "levels": [
+    "low",
+    "medium",
+    "high"
+   ],
+   "default": "high"
+  }
+ },
+ "qwen3.6-35b-a3b": {
+  "tokens": {
+   "framing": [
+    "\u003c|im_start|\u003e",
+    "\u003c|im_end|\u003e",
+    "\u003ctool_call\u003e",
+    "\u003c/tool_call\u003e",
+    "\u003ctool_response\u003e",
+    "\u003c/tool_response\u003e"
+   ],
+   "other": [
+    "\u003cthink\u003e",
+    "\u003c/think\u003e",
+    "\u003c|endoftext|\u003e",
+    "\u003c|object_ref_start|\u003e",
+    "\u003c|object_ref_end|\u003e",
+    "\u003c|box_start|\u003e",
+    "\u003c|box_end|\u003e",
+    "\u003c|quad_start|\u003e",
+    "\u003c|quad_end|\u003e",
+    "\u003c|vision_start|\u003e",
+    "\u003c|vision_end|\u003e",
+    "\u003c|vision_pad|\u003e",
+    "\u003c|image_pad|\u003e",
+    "\u003c|video_pad|\u003e",
+    "\u003c|fim_prefix|\u003e",
+    "\u003c|fim_middle|\u003e",
+    "\u003c|fim_suffix|\u003e",
+    "\u003c|fim_pad|\u003e",
+    "\u003c|repo_name|\u003e",
+    "\u003c|file_sep|\u003e",
+    "\u003c|audio_start|\u003e",
+    "\u003c|audio_end|\u003e",
+    "\u003c|audio_pad|\u003e",
+    "\u003ctts_pad\u003e",
+    "\u003ctts_text_bos\u003e",
+    "\u003ctts_text_eod\u003e",
+    "\u003ctts_text_bos_single\u003e"
+   ]
+  },
+  "context": {
+   "working_max": 131072,
+   "compact_at": 0.85
+  },
+  "reasoning": {
+   "levels": [
+    "on",
+    "off"
+   ],
+   "default": "on"
   }
  },
  "qwen3.8-27b": {
@@ -111,6 +178,15 @@
   "context": {
    "working_max": 98304,
    "compact_at": 0.9
+  },
+  "reasoning": {
+   "levels": [
+    "xhigh",
+    "medium",
+    "low",
+    "off"
+   ],
+   "default": "medium"
   }
  }
 }

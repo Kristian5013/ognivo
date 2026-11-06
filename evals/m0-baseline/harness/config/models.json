@@ -27,6 +27,11 @@
       "profile": "profiles/qwen3.8-27b.toml",
       "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.8-27B-Q4_0.gguf",
       "agent_timeout_s": 1500
+    },
+    "qwen3.6-35b-a3b": {
+      "profile": "profiles/qwen3.6-35b-a3b.toml",
+      "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
+      "agent_timeout_s": 600
     }
   }
 }

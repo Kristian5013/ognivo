@@ -705,6 +705,20 @@ mod tests {
         .unwrap();
         // the generation prompt ends with the newline after the start of the reasoning
         assert_eq!(got, golden);
+        // Qwen3.6's template, thinking and keeping past reasoning, renders it the same, and
+        // so does it with thinking off as Off does
+        let qwen36 = |file: &str| {
+            std::fs::read_to_string(
+                repo.join("profiles/templates/Qwen3.6-35B-A3B/golden")
+                    .join(file),
+            )
+            .unwrap()
+        };
+        assert_eq!(got, qwen36("seq.think-preserve.canonical.py-hf.txt"));
+        assert_eq!(
+            render(&tools, system, &turns, Level::Off).display(),
+            qwen36("seq.off-preserve.canonical.py-hf.txt")
+        );
         // the template's own text holds the call tokens, as their ids
         let p = render(&tools, system, &turns, Level::Medium);
         let calls = p
