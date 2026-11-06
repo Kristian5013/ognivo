@@ -411,8 +411,11 @@ impl Skills {
         if skills.is_empty() {
             return None;
         }
+        // T2, 2026-11-06: told only to load the skill "before you start", gpt-oss searched
+        // the project's files for it and never called the tool, or loaded it and wrote a
+        // heading of its own
         Some(format!(
-            "Skills, from the user and the project: instructions for kinds of tasks. When a task fits a skill's description, load the skill with {tool} before you start, and follow it.\n{}",
+            "Skills of the user and the project: instructions for kinds of tasks, which no file of the project shows. When the task fits a skill's description, call the {tool} tool with its name before anything else, then do what it says exactly, its formats too.\n{}",
             list(&skills)
         ))
     }
