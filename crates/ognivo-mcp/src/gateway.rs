@@ -19,7 +19,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, ProtocolVersion,
+    CallToolRequestParams, ClientCapabilities, ClientConfig, GetPromptRequestParams,
+    Implementation, ProtocolVersion,
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt as _, RoleClient, RunningService};
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
@@ -95,6 +96,26 @@ pub struct Tool {
     pub read_only: bool,
 }
 
+/// A prompt of a server: instructions for a task, with its arguments. The user runs it as
+/// `/mcp__<server>__<prompt>`, and the model loads it with the skill tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prompt {
+    /// `mcp__<server>__<prompt>`, made a name.
+    pub name: String,
+    pub server: String,
+    /// As the server names it.
+    pub prompt: String,
+    pub description: String,
+    pub arguments: Vec<PromptArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PromptArgument {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
 /// A server that started, or why it did not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Started {
@@ -107,6 +128,8 @@ pub struct Started {
     /// What the server says about using it (`instructions`), at most
     /// [`INSTRUCTIONS_CHARS`].
     pub instructions: Option<String>,
+    /// Its prompts' count.
+    pub prompts: usize,
 }
 
 /// Characters of a server's instructions the model gets; the rest is cut with a note.
@@ -117,6 +140,7 @@ pub const INSTRUCTIONS_CHARS: usize = 2_000;
 struct Up {
     client: RunningService<RoleClient, Client>,
     tools: Vec<rmcp::model::Tool>,
+    prompts: Vec<rmcp::model::Prompt>,
     group: Option<u32>,
     instructions: Option<String>,
 }
@@ -139,6 +163,7 @@ impl From<String> for Failed {
 pub struct Gateway {
     clients: HashMap<String, RunningService<RoleClient, Client>>,
     tools: Vec<Tool>,
+    prompts: Vec<Prompt>,
     started: Vec<Started>,
     /// The process groups of the stdio servers, which end with the gateway.
     groups: Vec<u32>,
@@ -181,6 +206,7 @@ impl Gateway {
         });
         let mut gateway = Gateway::default();
         let mut found: Vec<(String, rmcp::model::Tool)> = Vec::new();
+        let mut prompts: Vec<(String, rmcp::model::Prompt)> = Vec::new();
         for (name, r) in futures::future::join_all(connecting).await {
             match r {
                 Ok(up) => {
@@ -190,8 +216,10 @@ impl Gateway {
                         outcome: Ok(up.tools.len()),
                         sign_in: None,
                         instructions: up.instructions,
+                        prompts: up.prompts.len(),
                     });
                     found.extend(up.tools.into_iter().map(|t| (name.clone(), t)));
+                    prompts.extend(up.prompts.into_iter().map(|p| (name.clone(), p)));
                     gateway.clients.insert(name, up.client);
                 }
                 Err(Failed::SignIn(challenge)) => gateway.started.push(Started {
@@ -199,17 +227,83 @@ impl Gateway {
                     name,
                     sign_in: Some(challenge),
                     instructions: None,
+                    prompts: 0,
                 }),
                 Err(Failed::Other(why)) => gateway.started.push(Started {
                     name,
                     outcome: Err(why),
                     sign_in: None,
                     instructions: None,
+                    prompts: 0,
                 }),
             }
         }
         gateway.tools = named(found);
+        gateway.prompts = prompts_named(prompts);
         gateway
+    }
+
+    /// The servers' prompts, by name.
+    pub fn prompts(&self) -> &[Prompt] {
+        &self.prompts
+    }
+
+    pub fn prompt(&self, name: &str) -> Option<&Prompt> {
+        self.prompts.iter().find(|p| p.name == name)
+    }
+
+    /// Gets the prompt known as `name` with `arguments` (texts by their names), as one text
+    /// for the model: its messages, an assistant's marked so. `Err` says why there is none.
+    pub async fn get_prompt(
+        &self,
+        name: &str,
+        arguments: Map<String, Value>,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let Some(prompt) = self.prompt(name) else {
+            return Err(format!("there is no prompt {name}"));
+        };
+        let Some(client) = self.clients.get(&prompt.server) else {
+            return Err(format!("the server {} is not running", prompt.server));
+        };
+        let mut params = GetPromptRequestParams::default();
+        params.name = prompt.prompt.clone();
+        params.arguments = Some(arguments);
+        let got = match tokio::time::timeout(timeout, client.get_prompt(params)).await {
+            Err(_) => {
+                return Err(format!(
+                    "{} gave no answer within {} s",
+                    prompt.server,
+                    timeout.as_secs()
+                ));
+            }
+            Ok(Err(e)) => return Err(format!("{}: {e}", prompt.server)),
+            Ok(Ok(r)) => r,
+        };
+        let value = serde_json::to_value(&got).map_err(|e| e.to_string())?;
+        let parts: Vec<String> = value["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|m| {
+                let text = block_text(&m["content"]);
+                if m["role"].as_str() == Some("assistant") {
+                    format!("[assistant] {text}")
+                } else {
+                    text
+                }
+            })
+            .collect();
+        let mut text = parts.join("\n\n");
+        if text.len() > RESULT_CHARS {
+            let mut at = RESULT_CHARS;
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            text.truncate(at);
+            text.push_str("\n[ognivo] cut here");
+        }
+        Ok(text)
     }
 
     /// The tools, by name.
@@ -361,6 +455,15 @@ async fn connect(s: &ServerConfig, signed: Option<&Path>) -> Result<Up, Failed> 
         .list_all_tools()
         .await
         .map_err(|e| Failed::Other(e.to_string()))?;
+    // prompts are a server's extra: one it cannot list leaves its tools working
+    let has_prompts = client
+        .peer_info()
+        .is_some_and(|i| i.capabilities.prompts.is_some());
+    let prompts = if has_prompts {
+        client.list_all_prompts().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let instructions = client
         .peer_info()
         .and_then(|i| i.instructions.clone())
@@ -380,9 +483,41 @@ async fn connect(s: &ServerConfig, signed: Option<&Path>) -> Result<Up, Failed> 
     Ok(Up {
         client,
         tools,
+        prompts,
         group,
         instructions,
     })
+}
+
+/// The prompts under the names the user runs them by, in order of those names.
+fn prompts_named(found: Vec<(String, rmcp::model::Prompt)>) -> Vec<Prompt> {
+    let mut prompts: Vec<Prompt> = found
+        .into_iter()
+        .map(|(server, p)| Prompt {
+            name: name_of(&server, &p.name),
+            description: p
+                .description
+                .or(p.title)
+                .unwrap_or_default()
+                .trim()
+                .to_owned(),
+            arguments: p
+                .arguments
+                .unwrap_or_default()
+                .into_iter()
+                .map(|a| PromptArgument {
+                    name: a.name,
+                    description: a.description.or(a.title).unwrap_or_default(),
+                    required: a.required.unwrap_or(false),
+                })
+                .collect(),
+            prompt: p.name,
+            server,
+        })
+        .collect();
+    prompts.sort_by(|a, b| a.name.cmp(&b.name));
+    prompts.dedup_by(|a, b| a.name == b.name);
+    prompts
 }
 
 /// The tools under the names the model calls them by, in order of those names.
@@ -594,37 +729,44 @@ fn cut(s: &str, n: usize) -> &str {
     &s[..s.len().min(n)]
 }
 
+/// One block of content as the model reads it: a text, or what the block is.
+fn block_text(block: &Value) -> String {
+    let s = |k: &str| block[k].as_str().unwrap_or_default();
+    match s("type") {
+        "text" => s("text").to_owned(),
+        "image" | "audio" => format!(
+            "[{} {}, {} bytes: not shown]",
+            s("type"),
+            s("mimeType"),
+            s("data").len() / 4 * 3
+        ),
+        "resource_link" => format!("[resource {} <{}>]", s("name"), s("uri")),
+        "resource" => {
+            let r = &block["resource"];
+            match r["text"].as_str() {
+                Some(text) => format!(
+                    "[resource <{}>]\n{text}",
+                    r["uri"].as_str().unwrap_or_default()
+                ),
+                None => format!(
+                    "[resource <{}>: not text]",
+                    r["uri"].as_str().unwrap_or_default()
+                ),
+            }
+        }
+        other => format!("[{other}: not shown]"),
+    }
+}
+
 /// A `tools/call` result as the model reads it, by its JSON: the first line names the call,
 /// or says it failed.
 pub fn text_of(server: &str, tool: &str, result: &Value) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    for block in result["content"].as_array().into_iter().flatten() {
-        let s = |k: &str| block[k].as_str().unwrap_or_default();
-        parts.push(match s("type") {
-            "text" => s("text").to_owned(),
-            "image" | "audio" => format!(
-                "[{} {}, {} bytes: not shown]",
-                s("type"),
-                s("mimeType"),
-                s("data").len() / 4 * 3
-            ),
-            "resource_link" => format!("[resource {} <{}>]", s("name"), s("uri")),
-            "resource" => {
-                let r = &block["resource"];
-                match r["text"].as_str() {
-                    Some(text) => format!(
-                        "[resource <{}>]\n{text}",
-                        r["uri"].as_str().unwrap_or_default()
-                    ),
-                    None => format!(
-                        "[resource <{}>: not text]",
-                        r["uri"].as_str().unwrap_or_default()
-                    ),
-                }
-            }
-            other => format!("[{other}: not shown]"),
-        });
-    }
+    let mut parts: Vec<String> = result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(block_text)
+        .collect();
     if parts.is_empty()
         && let Some(s) = result.get("structuredContent").filter(|v| !v.is_null())
     {

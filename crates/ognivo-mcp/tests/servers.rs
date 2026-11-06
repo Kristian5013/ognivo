@@ -69,6 +69,40 @@ async fn a_server_of_the_initialize_era_starts_lists_and_answers() {
     );
     assert!(g.call("mcp__echo__echo", "[1]", t).await.is_err());
     assert!(g.call("mcp__echo__nope", "{}", t).await.is_err());
+
+    // its prompt, with its arguments; got, its messages are one text
+    assert_eq!(started[0].prompts, 1);
+    let review = g.prompt("mcp__echo__review").unwrap();
+    assert_eq!(
+        (review.prompt.as_str(), review.description.as_str()),
+        ("review", "Reviews a file for bugs.")
+    );
+    let args: Vec<(&str, bool)> = review
+        .arguments
+        .iter()
+        .map(|a| (a.name.as_str(), a.required))
+        .collect();
+    assert_eq!(args, [("file", true), ("focus", false)]);
+    let file = |f: &str| {
+        let mut m = serde_json::Map::new();
+        m.insert("file".into(), serde_json::json!(f));
+        m
+    };
+    assert_eq!(
+        g.get_prompt("mcp__echo__review", file("src/lib.rs"), t)
+            .await,
+        Ok("Review src/lib.rs for bugs.\n\n[assistant] I will read it first.".into())
+    );
+    let refused = g
+        .get_prompt("mcp__echo__review", serde_json::Map::new(), t)
+        .await;
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| e.contains("review needs a file")),
+        "{refused:?}"
+    );
+    assert!(g.get_prompt("mcp__echo__nope", file("x"), t).await.is_err());
     g.shutdown().await;
 }
 

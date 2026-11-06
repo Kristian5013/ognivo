@@ -139,6 +139,33 @@ async fn list(
                         .collect();
                     println!("    {}  {about}", t.name);
                 }
+                let prompts: Vec<&ognivo_mcp::Prompt> = gateway
+                    .prompts()
+                    .iter()
+                    .filter(|p| p.server == config.name)
+                    .collect();
+                if !prompts.is_empty() {
+                    println!(
+                        "  {} prompt{}, run as /name or loaded by the model:",
+                        prompts.len(),
+                        if prompts.len() == 1 { "" } else { "s" }
+                    );
+                }
+                for p in prompts {
+                    let args: Vec<String> = p
+                        .arguments
+                        .iter()
+                        .map(|a| {
+                            if a.required {
+                                format!("<{}>", a.name)
+                            } else {
+                                format!("[{}]", a.name)
+                            }
+                        })
+                        .collect();
+                    let about: String = p.description.chars().take(90).collect();
+                    println!("    /{} {}  {about}", p.name, args.join(" "));
+                }
             }
             Err(why) => {
                 failed = true;

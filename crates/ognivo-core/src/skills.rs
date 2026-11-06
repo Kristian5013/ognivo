@@ -536,7 +536,7 @@ fn shown(path: &Path, places: &Places) -> String {
 }
 
 /// The words of the arguments, as a shell splits them: quotes keep blanks together.
-fn words(arguments: &str) -> Vec<String> {
+pub fn words(arguments: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut quote = None;

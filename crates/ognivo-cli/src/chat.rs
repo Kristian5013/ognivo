@@ -813,8 +813,28 @@ fn commands_help(agent: &Agent) -> Vec<String> {
             line
         })
         .collect();
+    // the MCP servers' prompts run the same way
+    for p in agent.mcp().map(|g| g.prompts()).unwrap_or_default() {
+        let mut line = format!("  /{}", p.name);
+        for a in &p.arguments {
+            line.push_str(&if a.required {
+                format!(" <{}>", a.name)
+            } else {
+                format!(" [{}]", a.name)
+            });
+        }
+        let about: String = p.description.chars().take(80).collect();
+        if !about.is_empty() {
+            line.push_str("  ");
+            line.push_str(&about);
+        }
+        lines.push(line);
+    }
     if !lines.is_empty() {
-        lines.insert(0, "commands and skills of the user and the project:".into());
+        lines.insert(
+            0,
+            "commands, skills and MCP prompts of the user and the project:".into(),
+        );
     }
     lines
 }

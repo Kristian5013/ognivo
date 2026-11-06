@@ -8,6 +8,6 @@ pub mod oauth;
 
 pub use config::{Loaded, OAuth, ServerConfig, Transport};
 pub use gateway::{
-    DECLARED_CHARS, DECLARED_MAX, Found, Gateway, INSTRUCTIONS_CHARS, Listing, RESULT_CHARS,
-    Started, Tool, name_of, search, text_of,
+    DECLARED_CHARS, DECLARED_MAX, Found, Gateway, INSTRUCTIONS_CHARS, Listing, Prompt,
+    PromptArgument, RESULT_CHARS, Started, Tool, name_of, search, text_of,
 };

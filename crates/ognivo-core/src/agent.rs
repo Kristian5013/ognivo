@@ -536,12 +536,29 @@ fn skill_keys(family: Family) -> (&'static str, &'static str) {
     }
 }
 
-/// The skill tool, when there are skills the model may load. Its names are all of them,
-/// those of subdirectories too, so that it stays the same for the whole session.
-fn skill_tool(family: Family, skills: &Skills) -> Option<ToolDecl> {
-    let names: Vec<Value> = skills.for_model().iter().map(|s| json!(s.name)).collect();
+/// The skill tool, when there are skills the model may load or prompts of the MCP servers.
+/// Its names are all of them, skills of subdirectories too, so that it stays the same for
+/// the whole session.
+fn skill_tool(
+    family: Family,
+    skills: &Skills,
+    mcp: Option<&ognivo_mcp::Gateway>,
+) -> Option<ToolDecl> {
+    let prompts = mcp.map(|g| g.prompts()).unwrap_or_default();
+    let names: Vec<Value> = skills
+        .for_model()
+        .iter()
+        .map(|s| json!(s.name))
+        .chain(prompts.iter().map(|p| json!(p.name)))
+        .collect();
     if names.is_empty() {
         return None;
+    }
+    let mut what = "What the skill should work on, if it takes anything: the words that would follow its name, such as an issue number. Leave it out otherwise.".to_owned();
+    if !prompts.is_empty() {
+        what.push_str(
+            " For an MCP prompt: its arguments as a JSON object, or their values in their order.",
+        );
     }
     let (name, args) = skill_keys(family);
     let mut properties = serde_json::Map::new();
@@ -549,13 +566,10 @@ fn skill_tool(family: Family, skills: &Skills) -> Option<ToolDecl> {
         name.into(),
         json!({"type": "string", "enum": names, "description": "The skill."}),
     );
-    properties.insert(
-        args.into(),
-        json!({"type": "string", "description": "What the skill should work on, if it takes anything: the words that would follow its name, such as an issue number. Leave it out otherwise."}),
-    );
+    properties.insert(args.into(), json!({"type": "string", "description": what}));
     Some(ToolDecl {
         name: skill_tool_name(family).into(),
-        description: "Loads a skill: instructions for a kind of task, from the user or the project, which the project message lists with what each is for. When the task fits one, load it before you start and follow it; the files it names are in its directory.".into(),
+        description: "Loads a skill or a prompt of an MCP server: instructions for a kind of task, which the project message lists with what each is for. When the task fits one, load it before you start and follow it; the files a skill names are in its directory.".into(),
         parameters: json!({
             "type": "object",
             "properties": properties,
@@ -607,6 +621,127 @@ fn skill_call(family: Family, arguments: &str) -> Result<Call, ArgError> {
     })
 }
 
+/// What the project message says of the skills and of the MCP servers' prompts: what they
+/// are for, and how the model loads them.
+fn skills_note(
+    family: Family,
+    skills: &Skills,
+    mcp: Option<&ognivo_mcp::Gateway>,
+) -> Option<String> {
+    let tool = skill_tool_name(family);
+    let note = skills.note(tool);
+    let prompts = mcp.map(|g| g.prompts()).unwrap_or_default();
+    if prompts.is_empty() {
+        return note;
+    }
+    let (_, args) = skill_keys(family);
+    let lines: Vec<String> = prompts.iter().map(prompt_line).collect();
+    let text = format!(
+        "Prompts of the MCP servers: instructions for kinds of tasks, which the servers give. When the task fits a prompt, call the {tool} tool with its name and its arguments in `{args}` as a JSON object, then do what it says.\n{}",
+        lines.join("\n")
+    );
+    Some(match note {
+        Some(note) => format!("{note}\n\n{text}"),
+        None => text,
+    })
+}
+
+/// A prompt in the project message: its name, what it is for, and its arguments.
+fn prompt_line(p: &ognivo_mcp::Prompt) -> String {
+    let mut line = format!("- {} (MCP server {})", p.name, p.server);
+    if !p.description.is_empty() {
+        let about: String = p.description.chars().take(300).collect();
+        line.push_str(&format!(": {about}"));
+    }
+    if !p.arguments.is_empty() {
+        let args: Vec<String> = p
+            .arguments
+            .iter()
+            .map(|a| {
+                let mut s = a.name.clone();
+                if a.required {
+                    s.push_str(" (required)");
+                }
+                if !a.description.is_empty() {
+                    s.push_str(&format!(": {}", a.description));
+                }
+                s
+            })
+            .collect();
+        line.push_str(&format!(" Arguments: {}.", args.join("; ")));
+    }
+    line
+}
+
+/// A prompt's arguments from what follows its name: a JSON object of them, or their values
+/// in their order, as shell words (one argument takes the whole text; more words than
+/// arguments go to the last). Every required one must be there.
+fn prompt_arguments(
+    p: &ognivo_mcp::Prompt,
+    text: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let text = text.trim();
+    let names = || {
+        p.arguments
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut args = serde_json::Map::new();
+    if text.starts_with('{') {
+        let Ok(Value::Object(given)) = serde_json::from_str::<Value>(text) else {
+            return Err(format!("the arguments of {} are not a JSON object", p.name));
+        };
+        for (k, v) in given {
+            if !p.arguments.iter().any(|a| a.name == k) {
+                return Err(format!(
+                    "{} has no argument {k}; its arguments: {}",
+                    p.name,
+                    names()
+                ));
+            }
+            let v = match v {
+                Value::String(s) => s,
+                other => other.to_string(),
+            };
+            args.insert(k, Value::String(v));
+        }
+    } else if !text.is_empty() {
+        match p.arguments.as_slice() {
+            [] => return Err(format!("{} takes no arguments", p.name)),
+            [one] => {
+                args.insert(one.name.clone(), json!(text));
+            }
+            all => {
+                for (i, w) in skills::words(text).into_iter().enumerate() {
+                    let name = &all[i.min(all.len() - 1)].name;
+                    let v = match args.get(name).and_then(Value::as_str) {
+                        Some(before) if i >= all.len() => format!("{before} {w}"),
+                        _ => w,
+                    };
+                    args.insert(name.clone(), Value::String(v));
+                }
+            }
+        }
+    }
+    let missing: Vec<&str> = p
+        .arguments
+        .iter()
+        .filter(|a| a.required && !args.contains_key(&a.name))
+        .map(|a| a.name.as_str())
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} needs {}; its arguments: {}",
+            p.name,
+            missing.join(", "),
+            names()
+        ));
+    }
+    Ok(args)
+}
+
 /// A command's output without the status lines exec puts before it.
 fn shell_output(text: &str) -> &str {
     let mut rest = text;
@@ -622,7 +757,7 @@ fn shell_output(text: &str) -> &str {
 /// servers, by name, or `tool_search` and `mcp_call` in their place.
 fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset, by_name: bool) -> Vec<ToolDecl> {
     let mut tools = projection::declarations_for(family, opts.layout, toolset);
-    tools.extend(skill_tool(family, &opts.skills));
+    tools.extend(skill_tool(family, &opts.skills, opts.mcp.as_deref()));
     if toolset == Toolset::Delegating && !opts.agents.all.is_empty() {
         let name = projection::delegate_name(family);
         if let Some(d) = tools.iter_mut().find(|t| t.name == name) {
@@ -1026,7 +1161,7 @@ impl Agent {
                     &opts.root,
                     &prompt_instructions.text,
                     opts.mcp.as_deref(),
-                    opts.skills.note(skill_tool_name(family)).as_deref(),
+                    skills_note(family, &opts.skills, opts.mcp.as_deref()).as_deref(),
                 )),
             ],
             tools: tools_of(family, &opts, toolset, driver.calls_undeclared()),
@@ -1300,7 +1435,7 @@ impl Agent {
                 &self.opts.root,
                 &self.prompt_instructions.text,
                 self.opts.mcp.as_deref(),
-                self.skills.note(skill_tool_name(self.family)).as_deref(),
+                skills_note(self.family, &self.skills, self.opts.mcp.as_deref()).as_deref(),
             )),
         ];
         self.seen.clear();
@@ -1829,7 +1964,11 @@ impl Agent {
                 }
                 Err(why) => return Ok(TurnEnd::NotRun(format!("/{}: {why}", skill.name))),
             },
-            None => request.to_owned(),
+            None => match self.prompt_command(request).await {
+                Some(Ok(text)) => text,
+                Some(Err(why)) => return Ok(TurnEnd::NotRun(why)),
+                None => request.to_owned(),
+            },
         };
         for note in hook_notes {
             user.push_str("\n\n");
@@ -2430,7 +2569,7 @@ impl Agent {
             }
             Call::Delegate { tasks } => self.delegate(tasks, on).await,
             Call::Skill { name, arguments } => {
-                self.load_skill(&name, arguments.as_deref().unwrap_or(""))
+                self.load_skill(&name, arguments.as_deref().unwrap_or(""), on)
                     .await
             }
             Call::ToolSearch { query } => match self.opts.mcp.clone() {
@@ -2930,20 +3069,87 @@ impl Agent {
         .await;
     }
 
+    /// `/mcp__<server>__<prompt> arguments`: the prompt as the model gets it with the line,
+    /// or why it did not run; `None` when the text runs no prompt. The user ran it, so it
+    /// asks nothing.
+    async fn prompt_command(&mut self, request: &str) -> Option<Result<String, String>> {
+        let rest = request.strip_prefix('/')?;
+        let (name, arguments) = match rest.split_once(char::is_whitespace) {
+            Some((name, arguments)) => (name, arguments.trim()),
+            None => (rest, ""),
+        };
+        let g = self.opts.mcp.clone()?;
+        let p = g.prompt(name)?.clone();
+        let got = match prompt_arguments(&p, arguments) {
+            Ok(args) => g.get_prompt(name, args, MCP_TIMEOUT).await,
+            Err(why) => Err(why),
+        };
+        Some(match got {
+            Ok(text) => Ok(format!(
+                "{request}\n\n[ognivo] The user ran /{name}, a prompt of the MCP server {}, which says:\n\n{text}",
+                p.server
+            )),
+            Err(why) => Err(format!("/{name}: {why}")),
+        })
+    }
+
+    /// The session's MCP servers, with their tools and prompts.
+    pub fn mcp(&self) -> Option<&ognivo_mcp::Gateway> {
+        self.opts.mcp.as_deref()
+    }
+
     /// Whether the model has the skill tool.
     fn has_skill_tool(&self) -> bool {
         let name = skill_tool_name(self.family);
         self.tools.iter().any(|t| t.name == name)
     }
 
-    /// A skill the model loads: its rendered body, or why it does not get it.
-    async fn load_skill(&mut self, name: &str, arguments: &str) -> String {
+    /// A skill or an MCP prompt the model loads: its text, or why it does not get it. A
+    /// prompt's arguments go to its server, so its load asks as the server's tools do.
+    async fn load_skill(
+        &mut self,
+        name: &str,
+        arguments: &str,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> String {
+        let gateway = self.opts.mcp.clone();
+        if let Some(g) = &gateway
+            && let Some(p) = g.prompt(name).cloned()
+        {
+            let args = match prompt_arguments(&p, arguments) {
+                Ok(args) => args,
+                Err(why) => return format!("[error] {why}"),
+            };
+            let ruling = self.opts.rules.mcp(&p.server, &p.prompt);
+            let reason = format!(
+                "a prompt of an MCP server, whose arguments go to it: {}",
+                Value::Object(args.clone())
+            );
+            let tool = skill_tool_name(self.family);
+            let action = format!("{} · prompt {}", p.server, p.prompt);
+            if let Some(refusal) = self
+                .permit(tool, ruling, &action, &reason, Vec::new(), on)
+                .await
+            {
+                return refusal;
+            }
+            return match g.get_prompt(name, args, MCP_TIMEOUT).await {
+                Ok(text) => format!("[mcp prompt: {} · {}]\n{text}", p.server, p.prompt),
+                Err(why) => format!("[error] the prompt {name}: {why}"),
+            };
+        }
         let Some(skill) = self.skills.get(name).cloned() else {
             let names: Vec<&str> = self
                 .skills
                 .for_model()
                 .iter()
                 .map(|s| s.name.as_str())
+                .chain(
+                    gateway
+                        .iter()
+                        .flat_map(|g| g.prompts())
+                        .map(|p| p.name.as_str()),
+                )
                 .collect();
             return format!(
                 "[error] there is no skill {name}; the skills are: {}",
@@ -5782,7 +5988,7 @@ mod tests {
             (Family::Harmony, "skill", ["name", "arguments"]),
             (Family::Gemma4, "skill", ["name", "task"]),
         ] {
-            let decl = skill_tool(family, &skills).unwrap();
+            let decl = skill_tool(family, &skills, None).unwrap();
             assert_eq!(decl.name, tool);
             let props: Vec<&String> = decl.parameters["properties"]
                 .as_object()
@@ -5799,7 +6005,7 @@ mod tests {
                 })
             );
         }
-        assert!(skill_tool(Family::Harmony, &Skills::default()).is_none());
+        assert!(skill_tool(Family::Harmony, &Skills::default(), None).is_none());
         assert!(matches!(
             skill_call(Family::Harmony, r#"{"skill": "pdf"}"#),
             Err(ArgError::Unknown { .. })
@@ -5971,6 +6177,151 @@ mod tests {
         assert!(
             content.starts_with("[error] unknown tool \"shell\""),
             "{content}"
+        );
+    }
+
+    fn prompt(arguments: Vec<ognivo_mcp::PromptArgument>) -> ognivo_mcp::Prompt {
+        ognivo_mcp::Prompt {
+            name: "mcp__s__p".into(),
+            server: "s".into(),
+            prompt: "p".into(),
+            description: String::new(),
+            arguments,
+        }
+    }
+
+    fn argument(name: &str, required: bool) -> ognivo_mcp::PromptArgument {
+        ognivo_mcp::PromptArgument {
+            name: name.into(),
+            description: String::new(),
+            required,
+        }
+    }
+
+    #[test]
+    fn prompt_arguments_come_as_json_or_in_their_order() {
+        let two = prompt(vec![argument("file", true), argument("focus", false)]);
+        let map = |v: Value| v.as_object().unwrap().clone();
+        assert_eq!(
+            prompt_arguments(&two, r#"{"file": "a.rs", "focus": 3}"#),
+            Ok(map(json!({"file": "a.rs", "focus": "3"})))
+        );
+        assert_eq!(
+            prompt_arguments(&two, "a.rs error handling"),
+            Ok(map(json!({"file": "a.rs", "focus": "error handling"})))
+        );
+        assert_eq!(
+            prompt_arguments(&two, "\"my file.rs\""),
+            Ok(map(json!({"file": "my file.rs"})))
+        );
+        assert_eq!(
+            prompt_arguments(&two, ""),
+            Err("mcp__s__p needs file; its arguments: file, focus".into())
+        );
+        assert!(
+            prompt_arguments(&two, r#"{"nope": 1}"#)
+                .is_err_and(|e| e.starts_with("mcp__s__p has no argument nope"))
+        );
+        let one = prompt(vec![argument("topic", false)]);
+        assert_eq!(
+            prompt_arguments(&one, "rust async io"),
+            Ok(map(json!({"topic": "rust async io"})))
+        );
+        assert_eq!(
+            prompt_arguments(&prompt(Vec::new()), "x"),
+            Err("mcp__s__p takes no arguments".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_model_and_the_user_load_prompts_of_the_mcp_servers() {
+        let echo = ognivo_mcp::ServerConfig {
+            name: "echo".into(),
+            transport: ognivo_mcp::Transport::Stdio {
+                command: "python3".into(),
+                args: vec![
+                    "-I".into(),
+                    concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../ognivo-mcp/tests/fixtures/echo.py"
+                    )
+                    .into(),
+                ],
+                env: Default::default(),
+            },
+            source: "test".into(),
+        };
+        let g = ognivo_mcp::Gateway::start(&[echo], Duration::from_secs(20), None).await;
+        assert_eq!(g.prompts().len(), 1, "{:?}", g.started());
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut opts = options(&root, WorkspaceState::CLEAN, None);
+        opts.mcp = Some(Arc::new(g));
+        opts.rules = Rules::allowing(&["mcp__echo"], "test").unwrap();
+        let (driver, seen) = played(
+            vec![
+                calls(
+                    &[(
+                        "skill",
+                        json!({"name": "mcp__echo__review", "arguments": "{\"file\": \"lib.rs\"}"}),
+                    )],
+                    FinishReason::ToolCalls,
+                ),
+                answer("reviewed"),
+                answer("reviewed again"),
+            ]
+            .into_iter()
+            .map(Step::from)
+            .collect(),
+        );
+        let mut agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        let end = agent.turn("review lib.rs", &mut |_| {}).await.unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "reviewed"),
+            "{end:?}"
+        );
+        let first = seen.lock().unwrap()[0].clone();
+        let tool = first.tools.iter().find(|t| t.name == "skill").unwrap();
+        assert_eq!(
+            tool.parameters["properties"]["name"]["enum"],
+            json!(["mcp__echo__review"])
+        );
+        let ChatMessage::User(project) = &first.messages[1] else {
+            panic!("{:?}", first.messages[1]);
+        };
+        assert!(
+            project.contains("- mcp__echo__review (MCP server echo): Reviews a file for bugs. Arguments: file (required): The file to review.; focus: What to look at most."),
+            "{project}"
+        );
+        assert_eq!(
+            tool_results(&agent)[0],
+            "[mcp prompt: echo · review]\nReview lib.rs for bugs.\n\n[assistant] I will read it first."
+        );
+        // the user runs it with its values in their order
+        let end = agent
+            .turn("/mcp__echo__review lib.rs error handling", &mut |_| {})
+            .await
+            .unwrap();
+        assert!(
+            matches!(&end, TurnEnd::Answer(a) if a.text == "reviewed again"),
+            "{end:?}"
+        );
+        let third = seen.lock().unwrap()[2].clone();
+        let Some(ChatMessage::User(sent)) = third.messages.last() else {
+            panic!("{:?}", third.messages.last());
+        };
+        assert_eq!(
+            sent,
+            "/mcp__echo__review lib.rs error handling\n\n[ognivo] The user ran /mcp__echo__review, a prompt of the MCP server echo, which says:\n\nReview lib.rs for bugs, above all error handling.\n\n[assistant] I will read it first."
+        );
+        let end = agent.turn("/mcp__echo__review", &mut |_| {}).await.unwrap();
+        assert_eq!(
+            end,
+            TurnEnd::NotRun(
+                "/mcp__echo__review: mcp__echo__review needs file; its arguments: file, focus"
+                    .into()
+            )
         );
     }
 }
