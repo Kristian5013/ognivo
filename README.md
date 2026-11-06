@@ -57,10 +57,16 @@ short diff, an action that needs approval asks `y`, `n` (or `n` and what to do i
 `a` (that exact action again without asking, for the rest of the session), and ^C stops a
 turn; `/help` lists the rest. `run` takes the prompt on stdin;
 actions that would need approval are refused and explained to the model. With `--native`
-(gpt-oss so far) ognivo renders the model's format itself and the server only tokenizes and
-generates: the Native path of M2, in progress. In `chat` on that path, ^\ ends the model's
+(gpt-oss and Qwen so far, not Gemma 4) ognivo renders the model's format itself and the
+server only tokenizes and generates. In `chat` on that path, ^\ ends the model's
 reasoning where it stands and asks for the answer, and `--priors` gives gpt-oss the tools of
 its training (container.exec, repo_browser with apply_patch) instead of ognivo's own.
+
+A session works with the server's context window (what llama-server was started with,
+`-c`), up to the most its model works with (256K for Gemma 4 and Qwen3.6, 128K for
+gpt-oss); `--context 64k` (or `OGNIVO_CONTEXT`, or Context in the GUI's form) sets another.
+The conversation is compacted at the profile's share of it, 65–90%; `chat` says where under
+its banner.
 
 llama-server in router mode works as well: every request names the model, which is
 `--model` (for `doctor` too), else the one model of `--profile`, else the one loaded; one

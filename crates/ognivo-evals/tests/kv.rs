@@ -166,6 +166,7 @@ async fn a_compaction_starts_the_one_new_prompt() {
         working_max: 6000,
         compact_at: 0.5,
         max_tokens: 1000,
+        ceiling: 6000,
     };
     let mut a = agent(&server.url, &p, opts);
     turn(&mut a, "look at big.txt").await;

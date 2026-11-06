@@ -14,6 +14,7 @@
 //! Exit codes: 0 idle or SIGTERM; 1 another core runs; 2 bad usage.
 
 mod hub;
+mod mcp;
 mod thread;
 
 use std::io::ErrorKind;
@@ -302,6 +303,11 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
         }
         rpc::THREAD_LIST => thread::list(hub, parse(params)?),
         rpc::SERVER_DETECT => detect(parse(params)?).await,
+        rpc::MCP_SERVERS => mcp::servers(hub, parse(params)?),
+        rpc::MCP_CONFIG => mcp::config(parse(params)?),
+        rpc::MCP_CONFIG_SET => mcp::set(parse(params)?),
+        rpc::MCP_LOGIN => mcp::login(parse(params)?).await,
+        rpc::MCP_LOGOUT => mcp::logout(parse(params)?),
         rpc::THREAD_START => thread::start(hub, parse(params)?).await,
         rpc::THREAD_RESUME => thread::resume(hub, parse(params)?).await,
         rpc::THREAD_READ => thread::read(hub, parse(params)?),
@@ -360,24 +366,31 @@ async fn detect(s: rpc::Server) -> Reply {
         None => base,
     };
     let profiles = profile::builtin().map_err(|e| RpcError::new(-32603, e.to_string()))?;
-    let found = tokio::time::timeout(DETECT_TIMEOUT, doctor::identify(&server, &profiles))
-        .await
-        .map_err(|_| {
-            RpcError::new(
-                rpc::error::NOT_STARTED,
-                format!(
-                    "{} did not answer within {} s",
-                    s.url,
-                    DETECT_TIMEOUT.as_secs()
-                ),
-            )
-        })?
-        .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
+    let found = tokio::time::timeout(DETECT_TIMEOUT, async {
+        let props = server.props().await?;
+        let found = doctor::detect_profile(&server, &props, &profiles).await?;
+        Ok::<_, ognivo_models::EngineError>((found, props.n_ctx))
+    })
+    .await
+    .map_err(|_| {
+        RpcError::new(
+            rpc::error::NOT_STARTED,
+            format!(
+                "{} did not answer within {} s",
+                s.url,
+                DETECT_TIMEOUT.as_secs()
+            ),
+        )
+    })?
+    .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
+    let (found, window) = found;
     let p = found.map(|(p, _)| p);
     reply(rpc::Detected {
         profile: p.map(|p| p.id.clone()),
         levels: p.map(|p| p.reasoning.levels.clone()).unwrap_or_default(),
         default_level: p.map(|p| p.reasoning.default.clone()),
+        native: p.is_some_and(|p| ognivo_models::native::reads(p.family)),
+        window,
     })
 }
 

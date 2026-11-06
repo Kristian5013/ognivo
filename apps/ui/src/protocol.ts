@@ -350,7 +350,26 @@ open: boolean, running: boolean,
 /**
  * Open on the Native path: `turn/answer_now` ends the model's reasoning.
  */
-answer_now: boolean, };
+answer_now: boolean, 
+/**
+ * Open: the context it works with.
+ */
+context: Context | null, };
+
+export type Context = { 
+/**
+ * Its working context: what the user chose, or else the server's window, or else the
+ * profile's; never past what the model works with.
+ */
+working: number, 
+/**
+ * What the conversation may hold before it is compacted.
+ */
+compacts_at: number, 
+/**
+ * The context of the server's slot, as `/props` says it.
+ */
+window: number | null, };
 
 export type Server = { 
 /**
@@ -390,13 +409,21 @@ priors: boolean,
 /**
  * The agent may hand tasks to subagents.
  */
-subagents: boolean, };
+subagents: boolean, 
+/**
+ * Tokens of working context; the server's window when `None`.
+ */
+context: number | null, };
 
 export type ResumeThread = { thread: ThreadId, 
 /**
  * Where its model is now; the server it last had when `None`.
  */
-server: Server | null, native: boolean, priors: boolean, subagents: boolean, };
+server: Server | null, native: boolean, priors: boolean, subagents: boolean, 
+/**
+ * Tokens of working context; the server's window when `None`.
+ */
+context: number | null, };
 
 export type Opened = { thread: ThreadId, info: ThreadInfo, 
 /**
@@ -407,7 +434,7 @@ notes: Array<string>,
 /**
  * On the Native path: `turn/answer_now` ends the model's reasoning.
  */
-answer_now: boolean, };
+answer_now: boolean, context: Context, };
 
 export type ThreadRef = { thread: ThreadId, };
 
@@ -564,7 +591,84 @@ profile: string | null,
 /**
  * The profile's levels, and the one a thread gets without a level of its own.
  */
-levels: Array<string>, default_level: string | null, };
+levels: Array<string>, default_level: string | null, 
+/**
+ * Whether the Native path reads the model's format.
+ */
+native: boolean, 
+/**
+ * The context of the server's slot, as `/props` says it.
+ */
+window: number | null, };
+
+export type McpServers = { servers: Array<McpServerState>, 
+/**
+ * Servers and files of the config that could not be used, with why.
+ */
+problems: Array<string>, };
+
+export type McpServerState = { name: string, 
+/**
+ * The config file it comes from.
+ */
+source: string, 
+/**
+ * What starts it: the command line, or the URL.
+ */
+command: string, 
+/**
+ * A server over HTTP, which may want a sign-in.
+ */
+remote: boolean, 
+/**
+ * `running`, `failed`, `sign_in` (it wants one) or `untrusted` (the project's, which
+ * waits for the user's trust).
+ */
+state: string, why: string | null, signed_in: boolean, 
+/**
+ * What the server says about using it.
+ */
+instructions: string | null, tools: Array<McpToolInfo>, prompts: Array<McpPromptInfo>, };
+
+export type McpToolInfo = { 
+/**
+ * The name the model calls it by: `mcp__<server>__<tool>`.
+ */
+name: string, description: string, };
+
+export type McpPromptInfo = { 
+/**
+ * The name the user runs it by, after `/`.
+ */
+name: string, description: string, arguments: Array<McpPromptArgument>, };
+
+export type McpPromptArgument = { name: string, required: boolean, };
+
+export type ProjectRef = { project: string, };
+
+export type McpConfig = { files: Array<McpConfigFile>, };
+
+export type McpConfigFile = { 
+/**
+ * `user` (`~/.ognivo/mcp.json`), `project` (`.mcp.json`) or `claude` (Claude Code's
+ * `~/.claude.json`, which ognivo reads and does not write).
+ */
+scope: string, path: string, servers: Array<McpEntry>, 
+/**
+ * Why the file could not be read.
+ */
+problem: string | null, };
+
+export type McpEntry = { name: string, 
+/**
+ * The entry as the file holds it: `command`, `args`, `env`, or `type`, `url`,
+ * `headers`, `oauth`.
+ */
+value: Record<string, unknown>, };
+
+export type McpConfigSet = { project: string, scope: string, name: string, value: Record<string, unknown> | null, };
+
+export type McpServerRef = { project: string, server: string, };
 
 export type HooksTrustAsked = { project: string, hooks: Array<HookShown>, };
 
@@ -583,6 +687,11 @@ export type Cancel = { id: number, };
 /** The core's methods. */
 export type Methods = {
   "server/detect": { params: Server; result: Detected };
+  "mcp/servers": { params: ThreadRef; result: McpServers };
+  "mcp/config": { params: ProjectRef; result: McpConfig };
+  "mcp/config/set": { params: McpConfigSet; result: Done };
+  "mcp/login": { params: McpServerRef; result: Done };
+  "mcp/logout": { params: McpServerRef; result: Done };
   "initialize": { params: Initialize; result: Initialized };
   "thread/list": { params: ListThreads; result: Threads };
   "thread/start": { params: StartThread; result: Opened };

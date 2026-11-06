@@ -32,7 +32,9 @@
   },
   "context": {
    "working_max": 65536,
-   "compact_at": 0.65
+   "compact_at": 0.65,
+   "max_tokens": 16384,
+   "ceiling": 262144
   },
   "reasoning": {
    "levels": [
@@ -40,7 +42,8 @@
     "off"
    ],
    "default": "on"
-  }
+  },
+  "native": false
  },
  "gpt-oss-20b": {
   "tokens": {
@@ -72,7 +75,9 @@
   },
   "context": {
    "working_max": 98304,
-   "compact_at": 0.7
+   "compact_at": 0.7,
+   "max_tokens": 16384,
+   "ceiling": 131072
   },
   "reasoning": {
    "levels": [
@@ -81,7 +86,8 @@
     "high"
    ],
    "default": "high"
-  }
+  },
+  "native": true
  },
  "qwen3.6-35b-a3b": {
   "tokens": {
@@ -125,7 +131,9 @@
   },
   "context": {
    "working_max": 131072,
-   "compact_at": 0.85
+   "compact_at": 0.85,
+   "max_tokens": 32768,
+   "ceiling": 262144
   },
   "reasoning": {
    "levels": [
@@ -133,7 +141,8 @@
     "off"
    ],
    "default": "on"
-  }
+  },
+  "native": true
  },
  "qwen3.8-27b": {
   "tokens": {
@@ -177,7 +186,9 @@
   },
   "context": {
    "working_max": 98304,
-   "compact_at": 0.9
+   "compact_at": 0.9,
+   "max_tokens": 20480,
+   "ceiling": 114688
   },
   "reasoning": {
    "levels": [
@@ -187,6 +198,7 @@
     "off"
    ],
    "default": "medium"
-  }
+  },
+  "native": true
  }
 }

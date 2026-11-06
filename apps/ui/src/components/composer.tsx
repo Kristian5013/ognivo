@@ -1,12 +1,13 @@
 import { Command } from "cmdk";
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
-import { estimateTokens, mentionAt, sessionFiles } from "../context.ts";
+import { type Budget, estimateTokens, mentionAt, sessionFiles } from "../context.ts";
 import { count } from "../format.ts";
 import profiles from "../profiles.json";
+import type * as P from "../protocol.ts";
 import type { ThreadStore } from "../store.ts";
 
-const BUDGETS = profiles as Record<string, { context: { working_max: number; compact_at: number } }>;
+const BUDGETS: Record<string, { context: Budget } | undefined> = profiles;
 
 /** What a composer on the core does: sends the message (Enter; Shift+Enter is a new
  * line), and stops the running turn. */
@@ -20,8 +21,19 @@ export interface Sending {
 
 /** Where the user writes, with `@` for the files of the session and what the message
  * would cost: its tokens, the files it names, and where the conversation would stand
- * against the profile's budget. Without a core it sends nothing. */
-export function Composer({ store, draft = "", sending }: { store: ThreadStore; draft?: string; sending?: Sending }) {
+ * against the thread's context (`context`, as the core opened it) or else the profile's
+ * budget. Without a core it sends nothing. */
+export function Composer({
+  store,
+  draft = "",
+  sending,
+  context,
+}: {
+  store: ThreadStore;
+  draft?: string;
+  sending?: Sending;
+  context?: P.Context;
+}) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   // the list version stands for the items: they are read again when rows come
   const version = useSyncExternalStore(subscribe, () => store.listVersion);
@@ -72,8 +84,12 @@ export function Composer({ store, draft = "", sending }: { store: ThreadStore; d
   const last = store.generations.at(-1);
   const now = last ? last.prompt + last.completion : 0;
   const after = now + own + known;
-  const budget = BUDGETS[store.info.profile]?.context;
-  const share = budget ? after / budget.working_max : 0;
+  const profile = BUDGETS[store.info.profile]?.context;
+  const budget = context
+    ? { working: context.working, compactsAt: context.compacts_at }
+    : profile && { working: profile.working_max, compactsAt: Math.floor(profile.working_max * profile.compact_at) };
+  const share = budget ? after / budget.working : 0;
+  const over = budget !== undefined && after > budget.compactsAt;
 
   return (
     <div className="relative border-t border-border px-6 py-3">
@@ -146,9 +162,9 @@ export function Composer({ store, draft = "", sending }: { store: ThreadStore; d
             {unread.length ? ` + ${unread.length === 1 ? "a file" : `${unread.length} files`} not read yet` : ""}
           </span>
           {budget && (
-            <span className={share > budget.compact_at ? "text-warn" : undefined}>
-              after it ≈ {count(after)} of {count(budget.working_max)} ({Math.round(share * 100)}%)
-              {share > budget.compact_at ? `: over ${Math.round(budget.compact_at * 100)}%, the conversation compacts` : ""}
+            <span className={over ? "text-warn" : undefined}>
+              after it ≈ {count(after)} of {count(budget.working)} ({Math.round(share * 100)}%)
+              {over ? `: past ${count(budget.compactsAt)}, the conversation compacts` : ` · compacts near ${count(budget.compactsAt)}`}
             </span>
           )}
           {error && <span className="text-err">{error}</span>}

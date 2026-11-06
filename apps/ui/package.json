@@ -10,7 +10,8 @@
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "fixtures": "node scripts/fixtures.mjs"
+    "fixtures": "node scripts/fixtures.mjs",
+    "profiles": "node scripts/profiles.mjs"
   },
   "dependencies": {
     "@pierre/diffs": "1.5.2",

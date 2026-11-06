@@ -10,7 +10,6 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
-use ognivo_core::compact;
 use ognivo_core::journal::Reverted;
 use ognivo_core::protocol::Projector;
 use ognivo_models::{AnswerNow, DriverError};
@@ -24,7 +23,7 @@ use super::hub::{Hub, lock};
 use super::{Reply, RpcError, reply};
 use crate::chat::declined;
 use crate::session::{self, Connected, Failure, MAX_STEPS, SessionArgs};
-use crate::view::{counts, given, kilo, not_read, printable};
+use crate::view::{counts, given, not_read, printable};
 
 /// What the model reads after a turn the user stopped, as in `chat`.
 const STOPPED: &str = "The user stopped the last turn.";
@@ -36,6 +35,10 @@ pub struct ThreadHandle {
     running: Arc<AtomicBool>,
     /// On the Native path, which can end the reasoning.
     answer_now: bool,
+    /// The context it works with.
+    context: rpc::Context,
+    /// Its MCP servers as it started them.
+    pub mcp: super::mcp::McpView,
 }
 
 impl ThreadHandle {
@@ -147,6 +150,7 @@ pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
                 open: open.is_some(),
                 running: open.is_some_and(|h| h.running.load(Ordering::SeqCst)),
                 answer_now: open.is_some_and(|h| h.answer_now),
+                context: open.map(|h| h.context),
             }
         })
         .collect();
@@ -236,6 +240,7 @@ fn args(hub: &Hub, server: &rpc::Server, cwd: Option<PathBuf>) -> SessionArgs {
         max_steps: MAX_STEPS,
         seed: None,
         level: None,
+        context: None,
         slot: None,
         model: server.model.clone(),
         data_dir: Some(hub.data_dir.clone()),
@@ -248,7 +253,7 @@ fn args(hub: &Hub, server: &rpc::Server, cwd: Option<PathBuf>) -> SessionArgs {
 
 pub async fn start(hub: &Arc<Hub>, a: rpc::StartThread) -> Reply {
     let mut args = args(hub, &a.server, Some(PathBuf::from(&a.project)));
-    (args.profile, args.level) = (a.profile, a.level);
+    (args.profile, args.level, args.context) = (a.profile, a.level, a.context);
     (args.native, args.priors, args.subagents) = (a.native, a.priors, a.subagents);
     let root = args.root().map_err(not_started)?;
     let connected = args
@@ -282,6 +287,7 @@ pub async fn resume(hub: &Arc<Hub>, a: rpc::ResumeThread) -> Reply {
     });
     let mut args = args(hub, &server, None);
     (args.native, args.priors, args.subagents) = (a.native, a.priors, a.subagents);
+    args.context = a.context;
     let root = args.root_of(&row).map_err(not_started)?;
     let connected = args
         .connect(root.clone(), Some(&row))
@@ -466,10 +472,19 @@ async fn open(
             .collect();
     }
     notes.extend(started);
-    let (limit, planned) = (
-        compact::limit(&s.opts.context, s.opts.n_ctx),
-        compact::limit(&s.opts.context, None),
-    );
+    let mcp_view = super::mcp::McpView {
+        gateway: s.opts.mcp.clone(),
+        servers: s.mcp.servers.clone(),
+        untrusted: s.mcp.pending.clone(),
+        problems: s.mcp.problems.clone(),
+        signed: s.mcp_signed().map(std::path::Path::to_path_buf),
+    };
+    let (context_note, context_warning) = s.context_notes();
+    let context = rpc::Context {
+        working: s.opts.context.working_max,
+        compacts_at: s.compacts_at(),
+        window: s.opts.n_ctx,
+    };
     let answer_now = s.answer_now.take();
     let rule_files = std::mem::take(&mut s.rule_files);
     let rule_problems = std::mem::take(&mut s.rule_problems);
@@ -535,13 +550,8 @@ async fn open(
     for problem in &rule_problems {
         notes.push(format!("not a rule: {}", printable(problem)));
     }
-    if limit < planned {
-        notes.push(format!(
-            "the server's context leaves about {} tokens for the conversation where the profile plans for {}: expect frequent compaction",
-            kilo(limit),
-            kilo(planned)
-        ));
-    }
+    notes.push(context_note);
+    notes.extend(context_warning);
     let first = instructions(&agent);
     if let Some(AgentEvent::Instructions { files, skipped }) = &first {
         if !files.is_empty() {
@@ -559,6 +569,8 @@ async fn open(
             commands,
             running: running.clone(),
             answer_now: can_answer_now,
+            context,
+            mcp: mcp_view,
         },
     );
     let actor = Actor {
@@ -578,6 +590,7 @@ async fn open(
         info,
         notes,
         answer_now: can_answer_now,
+        context,
     })
 }
 

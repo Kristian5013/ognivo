@@ -386,7 +386,7 @@ pub fn profile_by_name<'p>(
 /// Picks the profile whose probe text is a single token with the expected id. Within a
 /// family the longest name hint found in the GGUF file name wins; the bool says whether a
 /// hint matched at all.
-async fn detect_profile<'p>(
+pub async fn detect_profile<'p>(
     server: &LlamaServer,
     props: &Props,
     profiles: &'p [ModelProfile],

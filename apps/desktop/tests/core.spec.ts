@@ -111,10 +111,21 @@ test("a session on the core: a turn, a question in the thread, a revert, the set
     answer("Done: new.txt and made.txt are there."),
   ]);
   try {
+    // the form offers what each model has: Gemma 4 has no Native path yet, gpt-oss has one
+    const native = page.getByRole("checkbox", { name: /Native path/ });
+    await page.locator("#profile").selectOption("gemma-4-26b-a4b");
+    await expect(native).toBeDisabled();
+    await expect(page.getByText("not for gemma-4-26b-a4b yet")).toBeVisible();
+    await page.locator("#profile").selectOption("gpt-oss-20b");
+    await expect(native).toBeEnabled();
+    // the fake server's window of 4096 is too small to compact in: the profile's context
+    await expect(page.getByText("96K of working context: the conversation compacts near 68.8k")).toBeVisible();
     await page.getByRole("button", { name: "Start" }).click();
     const composer = page.locator("textarea");
     await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
     await expect(page.getByText("not a clean git tree")).toBeVisible();
+    await expect(page.getByText("context 96K (the profile's: the server's window of 4K leaves too little to compact in), compaction near 68.8K")).toBeVisible();
+    await expect(page.getByText("compacts near 68.8k")).toBeVisible();
     await composer.fill("make a file");
     await composer.press("Enter");
 
@@ -282,6 +293,24 @@ test("the project's MCP server: trusted, its tool asks and answers", async () =>
     await card.click();
     await expect(page.getByText("hello from mcp").last()).toBeVisible();
     await page.screenshot({ path: "test-results/core-mcp.png" });
+
+    // the MCP panel: the thread's server with its tools and prompt, and the config files
+    await page.getByRole("button", { name: "MCP", exact: true }).first().click();
+    const panel = page.getByLabel("MCP", { exact: true });
+    await expect(panel.getByText("3 tools, 1 prompt")).toBeVisible({ timeout: 10_000 });
+    await panel.getByRole("button", { name: /repo/ }).first().click();
+    await expect(panel.getByText("mcp__repo__echo")).toBeVisible();
+    await expect(panel.getByText("/mcp__repo__review <file> [focus]")).toBeVisible();
+    await expect(panel.getByText("~/proj/.mcp.json")).toBeVisible();
+    // a server of the user's own, added and removed through the form
+    const form = panel.getByRole("form", { name: "Add an MCP server" });
+    await form.getByLabel("Name").fill("local-echo");
+    await form.getByLabel("Command").fill(`python3 -I ${echo}`);
+    await form.getByRole("button", { name: "Add" }).click();
+    await expect(panel.getByText("local-echo", { exact: true })).toBeVisible({ timeout: 10_000 });
+    await page.screenshot({ path: "test-results/core-mcp-panel.png" });
+    await panel.getByRole("listitem").filter({ hasText: /^local-echo/ }).getByRole("button", { name: "Remove" }).click();
+    await expect(panel.getByText("local-echo", { exact: true })).toHaveCount(0, { timeout: 10_000 });
   } finally {
     await close();
   }

@@ -17,7 +17,6 @@ use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
-use ognivo_core::compact;
 use ognivo_core::instructions::Load;
 use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::rules::Pending;
@@ -92,10 +91,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     };
     let mut store = store;
     let n_ctx = s.opts.n_ctx;
-    let (limit, planned) = (
-        compact::limit(&s.opts.context, n_ctx),
-        compact::limit(&s.opts.context, None),
-    );
+    let (context_note, context_warning) = s.context_notes();
     let screen = Screen::new(Style::detect());
     let terminal = tcgetattr(std::io::stdin()).ok();
     let input = Input::spawn(s.opts.data_dir.join("chat_history"));
@@ -120,6 +116,10 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         ),
         Paint::Plain,
     );
+    screen.line(&format!("· {context_note}"), Paint::Dim);
+    if let Some(w) = &context_warning {
+        screen.line(&format!("· {w}"), Paint::Yellow);
+    }
     let answer_now = s.answer_now.take();
     let rule_files = std::mem::take(&mut s.rule_files);
     let rule_problems = std::mem::take(&mut s.rule_problems);
@@ -315,16 +315,6 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         screen.line(
             "· the project's MCP servers do not start: you did not trust them (they are asked about again when .mcp.json changes)",
             Paint::Dim,
-        );
-    }
-    if limit < planned {
-        screen.line(
-            &format!(
-                "· the server's context leaves about {} tokens for the conversation where the profile plans for {}: expect frequent compaction",
-                kilo(limit),
-                kilo(planned)
-            ),
-            Paint::Yellow,
         );
     }
     screen.line(

@@ -41,6 +41,7 @@ history = "preserve"            # preserve_thinking=true (llama.cpp default); A/
 working_max = 65536             # MRCR v2 128K is only 44.1%
 compact_at = 0.65
 max_tokens = 16384              # cuts 0 of 236 M0 steps; M0 step records, runs/20261030T055501Z
+ceiling = 262144                # the model card: a context of 256K
 
 [template]
 dir = "profiles/templates/gemma-4-26B-A4B-it"

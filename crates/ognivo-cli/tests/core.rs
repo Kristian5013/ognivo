@@ -685,6 +685,56 @@ async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
         "{opened}"
     );
     assert!(dir.path().join(".ognivo/mcp-auth/docs.json").exists());
+
+    // the panel: the thread's servers, the config files, a sign-out and a sign-in again
+    let servers = a
+        .ok("mcp/servers", json!({"thread": opened["thread"]}))
+        .await;
+    let docs = &servers["servers"][0];
+    assert_eq!(
+        (
+            &docs["name"],
+            &docs["state"],
+            &docs["remote"],
+            &docs["signed_in"]
+        ),
+        (
+            &json!("docs"),
+            &json!("running"),
+            &json!(true),
+            &json!(true)
+        ),
+        "{servers}"
+    );
+    assert_eq!(docs["tools"][0]["name"], "mcp__docs__whoami", "{servers}");
+    let project = json!({"project": root});
+    let files = a.ok("mcp/config", project.clone()).await;
+    assert_eq!(files["files"][0]["scope"], "user", "{files}");
+    assert_eq!(files["files"][0]["path"], "~/.ognivo/mcp.json", "{files}");
+    assert_eq!(files["files"][0]["servers"][0]["name"], "docs", "{files}");
+    assert_eq!(files["files"][1]["scope"], "project", "{files}");
+    let echo = json!({"command": "python3", "args": ["-I", "echo.py"]});
+    let set =
+        |value: Value| json!({"project": root, "scope": "project", "name": "echo", "value": value});
+    a.ok("mcp/config/set", set(echo.clone())).await;
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(".mcp.json")).unwrap()).unwrap();
+    assert_eq!(written["mcpServers"]["echo"], echo);
+    let refused = a
+        .call("mcp/config/set", set(json!({"args": ["no command"]})))
+        .await
+        .unwrap_err();
+    assert_eq!(refused["code"], -32602, "{refused}");
+    a.ok("mcp/config/set", set(Value::Null)).await;
+    assert_eq!(
+        a.ok("mcp/config", project.clone()).await["files"][1]["servers"],
+        json!([])
+    );
+    let docs = json!({"project": root, "server": "docs"});
+    a.ok("mcp/logout", docs.clone()).await;
+    assert!(!dir.path().join(".ognivo/mcp-auth/docs.json").exists());
+    a.ok("mcp/login", docs.clone()).await;
+    assert!(dir.path().join(".ognivo/mcp-auth/docs.json").exists());
     child.kill().unwrap();
     child.wait().unwrap();
     mcp.kill().unwrap();

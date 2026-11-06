@@ -549,6 +549,15 @@ pub fn compacted(replaced: usize, kept: usize, summary: Option<&str>) -> (String
     }
 }
 
+/// `256K`, `96K`: a context size as llama-server's `-c` is given it; `kilo` off the grid.
+pub fn size(n: u32) -> String {
+    if n >= 1024 && n.is_multiple_of(1024) {
+        format!("{}K", n / 1024)
+    } else {
+        kilo(n.into())
+    }
+}
+
 /// `999`, `98.3K`.
 pub fn kilo(n: u64) -> String {
     if n >= 1000 {
@@ -808,6 +817,9 @@ mod tests {
     fn sizes() {
         assert_eq!(kilo(999), "999");
         assert_eq!(kilo(98_304), "98.3K");
+        assert_eq!(size(262_144), "256K");
+        assert_eq!(size(98_304), "96K");
+        assert_eq!(size(100_000), "100.0K");
     }
 
     #[test]

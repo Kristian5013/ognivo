@@ -1,7 +1,5 @@
 // Copies recorded sessions (ATIF traces of T2-mini nights) into fixtures/, the sessions
-// the UI kit is built and measured on, and what the UI needs of the profiles into
-// src/profiles.json: their control tokens, which the Inspector marks, and their context
-// budgets, which the composer counts against.
+// the UI kit is built and measured on, and writes src/profiles.json (scripts/profiles.mjs).
 //
 //   npm run fixtures            from ~/.local/share/ognivo/night, or OGNIVO_NIGHT_DIR
 //
@@ -118,35 +116,5 @@ for (const [name, rel] of Object.entries(SESSIONS)) {
   console.log(`${name}: ${rel}, ${requests}`);
 }
 
-// Each profile's control tokens (framing ones frame the model's own messages and calls,
-// §5.3), context budget and reasoning levels, by profile id
-const profiles = join(here, "../../../profiles");
-/** @type {Record<string, { tokens: { framing: string[]; other: string[] }; context: { working_max: number; compact_at: number }; reasoning: { levels: string[]; default: string } }>} */
-const table = {};
-for (const file of readdirSync(profiles).filter((f) => f.endsWith(".toml"))) {
-  const toml = readFileSync(join(profiles, file), "utf8");
-  const id = /^id = "([^"]+)"/m.exec(toml)?.[1];
-  const section = /^\[tokens\]\n([\s\S]*?)(?=^\[)/m.exec(toml)?.[1] ?? "";
-  const list = (key) => {
-    const body = new RegExp(`^${key} = \\[([\\s\\S]*?)\\]`, "m").exec(section)?.[1] ?? "";
-    return [...body.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'/g)].map((m) =>
-      m[1] !== undefined ? JSON.parse(`"${m[1]}"`) : m[2],
-    );
-  };
-  if (!id) continue;
-  const framing = list("framing");
-  const other = [...new Set([...list("structural"), ...list("specials")])].filter(
-    (t) => !framing.includes(t),
-  );
-  const context = /^\[context\]\n([\s\S]*?)(?=^\[)/m.exec(toml)?.[1] ?? "";
-  const number = (key) => Number(new RegExp(`^${key} = ([0-9.]+)`, "m").exec(context)?.[1]);
-  const reasoning = /^\[reasoning\]\n([\s\S]*?)(?=^\[)/m.exec(toml)?.[1] ?? "";
-  const levels = [...(/^levels = \[([^\]]*)\]/m.exec(reasoning)?.[1] ?? "").matchAll(/"([^"]*)"/g)].map((m) => m[1]);
-  table[id] = {
-    tokens: { framing, other },
-    context: { working_max: number("working_max"), compact_at: number("compact_at") },
-    reasoning: { levels, default: /^default = "([^"]*)"/m.exec(reasoning)?.[1] ?? "" },
-  };
-}
-writeFileSync(join(here, "../src/profiles.json"), `${safe(table, 1)}\n`);
-console.log(`profiles: ${Object.keys(table).join(", ")}`);
+// and the profiles' part, which the UI also needs
+await import("./profiles.mjs");

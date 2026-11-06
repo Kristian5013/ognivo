@@ -18,6 +18,11 @@ use crate::{Event, Hunk, ItemId, ThreadId, ThreadInfo};
 pub const INITIALIZE: &str = "initialize";
 pub const THREAD_LIST: &str = "thread/list";
 pub const SERVER_DETECT: &str = "server/detect";
+pub const MCP_SERVERS: &str = "mcp/servers";
+pub const MCP_CONFIG: &str = "mcp/config";
+pub const MCP_CONFIG_SET: &str = "mcp/config/set";
+pub const MCP_LOGIN: &str = "mcp/login";
+pub const MCP_LOGOUT: &str = "mcp/logout";
 pub const THREAD_START: &str = "thread/start";
 pub const THREAD_RESUME: &str = "thread/resume";
 pub const THREAD_READ: &str = "thread/read";
@@ -117,6 +122,21 @@ pub struct ThreadSummary {
     pub running: bool,
     /// Open on the Native path: `turn/answer_now` ends the model's reasoning.
     pub answer_now: bool,
+    /// Open: the context it works with.
+    pub context: Option<Context>,
+}
+
+/// The context a thread works with, in tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Context {
+    /// Its working context: what the user chose, or else the server's window, or else the
+    /// profile's; never past what the model works with.
+    pub working: u32,
+    /// What the conversation may hold before it is compacted.
+    #[ts(type = "number")]
+    pub compacts_at: u64,
+    /// The context of the server's slot, as `/props` says it.
+    pub window: Option<u32>,
 }
 
 /// How a thread reaches its model.
@@ -139,6 +159,10 @@ pub struct Detected {
     /// The profile's levels, and the one a thread gets without a level of its own.
     pub levels: Vec<String>,
     pub default_level: Option<String>,
+    /// Whether the Native path reads the model's format.
+    pub native: bool,
+    /// The context of the server's slot, as `/props` says it.
+    pub window: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -156,6 +180,9 @@ pub struct StartThread {
     pub priors: bool,
     /// The agent may hand tasks to subagents.
     pub subagents: bool,
+    /// Tokens of working context; the server's window when `None`.
+    #[serde(default)]
+    pub context: Option<u32>,
 }
 
 /// A stored thread, picked up where it ended, with its profile, level and seed.
@@ -167,6 +194,9 @@ pub struct ResumeThread {
     pub native: bool,
     pub priors: bool,
     pub subagents: bool,
+    /// Tokens of working context; the server's window when `None`.
+    #[serde(default)]
+    pub context: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -178,6 +208,7 @@ pub struct Opened {
     pub notes: Vec<String>,
     /// On the Native path: `turn/answer_now` ends the model's reasoning.
     pub answer_now: bool,
+    pub context: Context,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -387,6 +418,108 @@ pub struct HookShown {
     pub hook: String,
     /// The settings file it comes from.
     pub source: String,
+}
+
+/// `mcp/servers`: the MCP servers of a thread as it started them, with their tools and
+/// prompts; params are a `ThreadRef`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpServers {
+    pub servers: Vec<McpServerState>,
+    /// Servers and files of the config that could not be used, with why.
+    pub problems: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpServerState {
+    pub name: String,
+    /// The config file it comes from.
+    pub source: String,
+    /// What starts it: the command line, or the URL.
+    pub command: String,
+    /// A server over HTTP, which may want a sign-in.
+    pub remote: bool,
+    /// `running`, `failed`, `sign_in` (it wants one) or `untrusted` (the project's, which
+    /// waits for the user's trust).
+    pub state: String,
+    pub why: Option<String>,
+    pub signed_in: bool,
+    /// What the server says about using it.
+    pub instructions: Option<String>,
+    pub tools: Vec<McpToolInfo>,
+    pub prompts: Vec<McpPromptInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpToolInfo {
+    /// The name the model calls it by: `mcp__<server>__<tool>`.
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpPromptInfo {
+    /// The name the user runs it by, after `/`.
+    pub name: String,
+    pub description: String,
+    pub arguments: Vec<McpPromptArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpPromptArgument {
+    pub name: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProjectRef {
+    pub project: String,
+}
+
+/// `mcp/config`: the files that configure a project's MCP servers, with their servers as
+/// written; params are a `ProjectRef`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct McpConfig {
+    pub files: Vec<McpConfigFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct McpConfigFile {
+    /// `user` (`~/.ognivo/mcp.json`), `project` (`.mcp.json`) or `claude` (Claude Code's
+    /// `~/.claude.json`, which ognivo reads and does not write).
+    pub scope: String,
+    pub path: String,
+    pub servers: Vec<McpEntry>,
+    /// Why the file could not be read.
+    pub problem: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct McpEntry {
+    pub name: String,
+    /// The entry as the file holds it: `command`, `args`, `env`, or `type`, `url`,
+    /// `headers`, `oauth`.
+    #[ts(type = "Record<string, unknown>")]
+    pub value: serde_json::Value,
+}
+
+/// `mcp/config/set`: the server `name` of the `user` or `project` file set to `value`, or
+/// removed when it is null. A thread that starts after it gets it. The answer is `Done`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct McpConfigSet {
+    pub project: String,
+    pub scope: String,
+    pub name: String,
+    #[ts(type = "Record<string, unknown> | null")]
+    pub value: Option<serde_json::Value>,
+}
+
+/// `mcp/login` (in the user's browser, as `ognivo mcp login`) and `mcp/logout`: a remote
+/// server of the project's config; the answer is `Done`. A thread that starts after it uses
+/// the sign-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpServerRef {
+    pub project: String,
+    pub server: String,
 }
 
 /// `$/cancelRequest`: the core's request `id` no longer waits for an answer.

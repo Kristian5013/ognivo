@@ -51,10 +51,24 @@ At most 400 words.";
 /// Tokens the prompt may hold before the history is compacted.
 pub fn limit(budget: &ContextBudget, n_ctx: Option<u32>) -> u64 {
     let working = (f64::from(budget.working_max) * f64::from(budget.compact_at)) as u64;
-    let room = n_ctx
-        .map(|n| u64::from(n).saturating_sub(u64::from(budget.max_tokens) + SUMMARY_PROMPT))
-        .filter(|&room| room >= MIN_ROOM);
-    room.map_or(working, |room| room.min(working))
+    n_ctx
+        .and_then(|n| room(budget, n))
+        .map_or(working, |room| room.min(working))
+}
+
+/// What a slot of `n_ctx` leaves the prompt beside a step's `max_tokens` and a summary
+/// request; `None` when that is too little for compaction to help.
+fn room(budget: &ContextBudget, n_ctx: u32) -> Option<u64> {
+    Some(u64::from(n_ctx).saturating_sub(u64::from(budget.max_tokens) + SUMMARY_PROMPT))
+        .filter(|&room| room >= MIN_ROOM)
+}
+
+/// The budget of a session ([`ContextBudget::working`]): its working context is `chosen`,
+/// or else the slot's window, or else the profile's. A window that leaves compaction too
+/// little room is no working context, and the profile's stands.
+pub fn session(budget: ContextBudget, chosen: Option<u32>, n_ctx: Option<u32>) -> ContextBudget {
+    let window = n_ctx.filter(|&n| room(&budget, n).is_some());
+    budget.working(chosen, window)
 }
 
 /// Estimated tokens of messages.
@@ -223,7 +237,23 @@ mod tests {
             working_max,
             compact_at,
             max_tokens,
+            ceiling: working_max,
         }
+    }
+
+    #[test]
+    fn a_session_works_with_the_window_that_leaves_room() {
+        let mut b = budget(65_536, 0.65, 16_384);
+        b.ceiling = 262_144;
+        // the window, and its share
+        let s = session(b, None, Some(262_144));
+        assert_eq!(s.working_max, 262_144);
+        assert_eq!(limit(&s, Some(262_144)), 170_393);
+        // the user's choice, within the window
+        assert_eq!(session(b, Some(32_768), Some(262_144)).working_max, 32_768);
+        // a window too small to compact in is no working context
+        assert_eq!(session(b, None, Some(4096)).working_max, 65_536);
+        assert_eq!(session(b, None, None).working_max, 65_536);
     }
 
     fn step(id: &str, result: &str) -> [ChatMessage; 2] {

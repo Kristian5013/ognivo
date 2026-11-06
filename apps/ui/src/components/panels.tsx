@@ -1,3 +1,4 @@
+import { McpPanel } from "./mcp.tsx";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { type Ask, type Core, CoreError } from "../core.ts";
@@ -9,7 +10,7 @@ import { EditDiff } from "./diff.tsx";
 import { Inspector } from "./inspector.tsx";
 import { Resizer, useWidth } from "./resizer.tsx";
 
-export type Panel = "changes" | "approvals" | "inspector";
+export type Panel = "changes" | "approvals" | "inspector" | "mcp";
 
 /** The side panel's first width. */
 const PANEL = 440;
@@ -22,6 +23,8 @@ export type ApprovalAsk = Extract<Ask, { method: "approval/ask" }>;
 export interface LiveThread {
   core: Core;
   thread: number;
+  /** The thread's project root. */
+  project: string;
   open: boolean;
   /** Changes when the thread may have changed files: a turn's end, a call's. */
   version: number;
@@ -470,6 +473,7 @@ export function SidePanel({
           {tab("changes", "Changes", files.length)}
           {tab("approvals", "Approvals", live ? live.asks.length : refused.length)}
           {tab("inspector", "Inspector")}
+          {live?.open && tab("mcp", "MCP")}
         </div>
         {panel === "changes" ? (
           live?.open ? (
@@ -479,6 +483,8 @@ export function SidePanel({
           )
         ) : panel === "approvals" ? (
           <Approvals calls={refused} live={live} />
+        ) : panel === "mcp" && live?.open ? (
+          <McpPanel core={live.core} thread={live.thread} project={live.project} />
         ) : (
           <Inspector store={store} generation={generation} onGeneration={onGeneration} />
         )}

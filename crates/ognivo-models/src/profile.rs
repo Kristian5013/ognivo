@@ -144,12 +144,29 @@ pub enum ReasoningHistory {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextBudget {
-    /// Tokens of working context the profile aims to stay under.
+    /// Tokens of working context. The profile's is what it was measured at, and a session's
+    /// when the server does not say its window; a session works with the window, or with
+    /// what the user chose ([`ContextBudget::working`]).
     pub working_max: u32,
     /// Fraction of `working_max` at which compaction starts.
     pub compact_at: f32,
     /// `max_tokens` of a main step: fixed, never the window remainder.
     pub max_tokens: u32,
+    /// The most the model works with: the window it was trained for, or less where it
+    /// breaks. A session's working context stays under it, whatever the server's window.
+    pub ceiling: u32,
+}
+
+impl ContextBudget {
+    /// The budget of a session: its working context is `chosen`, or else the server slot's
+    /// window `n_ctx`, or else the profile's own, and never past the ceiling.
+    pub fn working(mut self, chosen: Option<u32>, n_ctx: Option<u32>) -> Self {
+        self.working_max = chosen
+            .or(n_ctx)
+            .unwrap_or(self.working_max)
+            .min(self.ceiling);
+        self
+    }
 }
 
 /// The vetted chat template for the Generic path (docs/research/2026-10-29/templates.md).
@@ -282,6 +299,11 @@ mod tests {
                 p.id
             );
             assert!(
+                p.context.working_max <= p.context.ceiling,
+                "{}: measured past its ceiling",
+                p.id
+            );
+            assert!(
                 p.reasoning.levels.contains(&p.reasoning.default),
                 "{}: default level",
                 p.id
@@ -294,6 +316,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_session_works_with_its_choice_or_the_window_under_the_ceiling() {
+        let b = ContextBudget {
+            working_max: 65_536,
+            compact_at: 0.65,
+            max_tokens: 16_384,
+            ceiling: 262_144,
+        };
+        assert_eq!(b.working(None, None).working_max, 65_536);
+        assert_eq!(b.working(None, Some(262_144)).working_max, 262_144);
+        assert_eq!(b.working(Some(32_768), Some(262_144)).working_max, 32_768);
+        assert_eq!(b.working(None, Some(1_048_576)).working_max, 262_144);
+        assert_eq!(b.working(Some(500_000), None).working_max, 262_144);
     }
 
     #[test]

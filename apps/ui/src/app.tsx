@@ -42,6 +42,7 @@ export function Hud({
   panel,
   onPanel,
   waiting = 0,
+  live = false,
 }: {
   store: ThreadStore;
   replay?: ReplayControls;
@@ -49,6 +50,8 @@ export function Hud({
   onPanel: (panel?: Panel) => void;
   /** Questions that wait for the user. */
   waiting?: number;
+  /** A thread the core has open: it has panels of its running servers too. */
+  live?: boolean;
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   useSyncExternalStore(subscribe, () => store.listVersion);
@@ -101,7 +104,7 @@ export function Hud({
               </button>
             </>
           )}
-          {(["changes", "approvals", "inspector"] as const).map((p) => (
+          {(live ? (["changes", "approvals", "inspector", "mcp"] as const) : (["changes", "approvals", "inspector"] as const)).map((p) => (
             <button
               key={p}
               type="button"
@@ -109,7 +112,7 @@ export function Hud({
               onClick={() => onPanel(panel === p ? undefined : p)}
               className={`rounded border px-2 py-0.5 hover:bg-raised ${panel === p ? "border-spark/60 text-foreground" : "border-border"}`}
             >
-              {p === "changes" ? "Changes" : p === "approvals" ? "Approvals" : "Inspector"}
+              {p === "changes" ? "Changes" : p === "approvals" ? "Approvals" : p === "inspector" ? "Inspector" : "MCP"}
               {p === "approvals" && waiting > 0 && <span className="ml-1 text-spark">{waiting}</span>}
             </button>
           ))}

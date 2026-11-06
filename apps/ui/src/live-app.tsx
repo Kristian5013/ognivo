@@ -13,18 +13,23 @@ import { Resizer, useWidth } from "./components/resizer.tsx";
 import { SettingsButton } from "./components/settings.tsx";
 import { ThreadNavContext } from "./components/subagent.tsx";
 import { ThreadView } from "./components/thread.tsx";
+import { type Budget, compaction, contextChoices, contextSize, windowChoice } from "./context.ts";
 import { type Ask, type Core, CoreError } from "./core.ts";
-import { ending } from "./format.ts";
+import { count, ending } from "./format.ts";
 import profiles from "./profiles.json";
 import * as P from "./protocol.ts";
 import type { ThreadStore } from "./store.ts";
 import type { Threads } from "./threads.ts";
 
 const PROFILES = Object.keys(profiles);
-/** Each profile's reasoning levels, and the one a thread gets without a level of its own. */
-const REASONING: Record<string, { levels: string[]; default: string } | undefined> = Object.fromEntries(
-  Object.entries(profiles).map(([id, p]) => [id, (p as { reasoning?: { levels: string[]; default: string } }).reasoning]),
-);
+/** What the form needs of each profile: its reasoning levels and the one a thread gets
+ * without a level of its own, its context budget, and whether the Native path reads its
+ * format. */
+const PROFILE: Record<string, { reasoning: { levels: string[]; default: string }; context: Budget; native: boolean } | undefined> =
+  profiles;
+const REASONING = (id: string) => PROFILE[id]?.reasoning;
+/** Whether the Native path reads the profile's format; `undefined` for a profile unknown. */
+const nativeOf = (id: string): boolean | undefined => PROFILE[id]?.native;
 const SETTINGS = "ognivo.settings";
 
 /** What the form for a new thread starts with: what it was last time. */
@@ -34,12 +39,22 @@ interface Settings {
   level: string;
   native: boolean;
   subagents: boolean;
+  /** Tokens of working context; 0: the server's window. */
+  context: number;
   /** Projects started last, the newest first. */
   projects: string[];
 }
 
 // the owner's llama-server; the nights' runs on 8090
-const DEFAULTS: Settings = { url: "http://127.0.0.1:8080", profile: "", level: "", native: false, subagents: false, projects: [] };
+const DEFAULTS: Settings = {
+  url: "http://127.0.0.1:8080",
+  profile: "",
+  level: "",
+  native: false,
+  subagents: false,
+  context: 0,
+  projects: [],
+};
 
 function loadSettings(): Settings {
   try {
@@ -212,10 +227,11 @@ function NewThread({
 }) {
   const [form, setForm] = useState(settings);
   const [detected, setDetected] = useState<P.Detected>();
-  // without a profile chosen, the server's model: its levels are the ones to choose from
+  // the server's model and its window: without a profile chosen, the model's levels are
+  // the ones to choose from
   useEffect(() => {
     const url = form.url.trim();
-    if (form.profile || !url) return;
+    if (!url) return;
     let live = true;
     const t = setTimeout(() => {
       detect(url).then(
@@ -227,12 +243,21 @@ function NewThread({
       live = false;
       clearTimeout(t);
     };
-  }, [form.url, form.profile, detect]);
+  }, [form.url, detect]);
   const reasoning = form.profile
-    ? REASONING[form.profile]
+    ? REASONING(form.profile)
     : detected?.profile
       ? { levels: detected.levels, default: detected.default_level ?? "" }
       : undefined;
+  const model = form.profile || detected?.profile || "";
+  // a model whose format the Native path does not read starts on the Generic path
+  const native = form.profile ? nativeOf(form.profile) : detected?.profile ? detected.native : undefined;
+  const budget = PROFILE[model]?.context;
+  const window = detected?.window ?? undefined;
+  const choices = contextChoices(budget, window);
+  // a context the model or the server does not hold is not offered: the window is
+  const context = choices.includes(form.context) ? form.context : 0;
+  const reckoned = budget && compaction(budget, context || undefined, window);
   const levels = reasoning?.levels ?? [];
   // a level the model does not have is not sent: the model's default is
   const level = levels.includes(form.level) ? form.level : "";
@@ -248,7 +273,7 @@ function NewThread({
         e.preventDefault();
         setBusy(true);
         setError(undefined);
-        onStart({ ...form, level }, project.trim())
+        onStart({ ...form, level, context, native: form.native && native !== false }, project.trim())
           .catch((e: unknown) => setError(message(e)))
           .finally(() => setBusy(false));
       }}
@@ -329,9 +354,40 @@ function NewThread({
           </select>
         </div>
       </div>
-      <label className="flex items-center gap-2 text-[13px]">
-        <input type="checkbox" checked={form.native} onChange={(e) => setForm({ ...form, native: e.target.checked })} />
-        Native path: ognivo renders the model's format itself (gpt-oss, Qwen)
+      <div>
+        <label className={label} htmlFor="context">
+          Context
+        </label>
+        <select
+          id="context"
+          value={context}
+          onChange={(e) => setForm({ ...form, context: Number(e.target.value) })}
+          className={field}
+        >
+          <option value={0}>{windowChoice(budget, window)}</option>
+          {choices.map((n) => (
+            <option key={n} value={n}>
+              {contextSize(n)}
+              {n === budget?.working_max ? ": what the profile was measured at" : ""}
+              {n === budget?.ceiling && n !== budget.working_max ? ": the most the model works with" : ""}
+            </option>
+          ))}
+        </select>
+        {reckoned && (
+          <p className="mt-1 text-[11px] text-muted-foreground">
+            {contextSize(reckoned.working)} of working context: the conversation compacts near {count(reckoned.compactsAt)}
+          </p>
+        )}
+      </div>
+      <label className={`flex items-center gap-2 text-[13px] ${native === false ? "text-muted-foreground" : ""}`}>
+        <input
+          type="checkbox"
+          disabled={native === false}
+          checked={form.native && native !== false}
+          onChange={(e) => setForm({ ...form, native: e.target.checked })}
+        />
+        Native path: ognivo renders the model's format itself
+        {native === false ? ` · not for ${model} yet: it runs on the Generic path` : " (gpt-oss, Qwen)"}
       </label>
       <label className="flex items-center gap-2 text-[13px]">
         <input
@@ -493,6 +549,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const [open, setOpen] = useState(new Set<number>());
   /** Threads on the Native path, which can end the model's reasoning. */
   const [native, setNative] = useState(new Set<number>());
+  /** The context each thread opened here works with. */
+  const [contexts, setContexts] = useState(new Map<number, P.Context>());
   const [panel, setPanel] = useState<Panel>();
   const [generation, setGeneration] = useState<number>();
   const [error, setError] = useState<string>();
@@ -527,6 +585,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
 
   const opened = (o: P.Opened) => {
     setNotes((n) => new Map(n).set(o.thread, o.notes));
+    setContexts((c) => new Map(c).set(o.thread, o.context));
     setOpen((s) => new Set(s).add(o.thread));
     if (o.answer_now) setNative((s) => new Set(s).add(o.thread));
   };
@@ -556,6 +615,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       native: form.native,
       priors: false,
       subagents: form.subagents,
+      context: form.context || null,
     });
     const next = { ...form, projects: [project, ...form.projects.filter((p) => p !== project)].slice(0, 12) };
     setSettings(next);
@@ -579,13 +639,16 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       await call();
     } catch (e) {
       if (!(e instanceof CoreError) || e.code !== P.ERRORS.noThread) throw e;
+      const profile = list.find((t) => t.thread === thread)?.profile ?? "";
       opened(
         await core.call("thread/resume", {
           thread,
           server: null,
-          native: settings.native,
+          // the Native path where it reads the thread's model
+          native: settings.native && nativeOf(profile) !== false,
           priors: false,
           subagents: settings.subagents,
+          context: settings.context || null,
         }),
       );
       await call();
@@ -660,7 +723,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
           <NewThread key={settings.projects[0] ?? ""} settings={settings} onStart={start} detect={detect} />
         ) : store ? (
           <>
-            <Hud store={store} panel={panel} onPanel={setPanel} waiting={here.length} />
+            <Hud store={store} panel={panel} onPanel={setPanel} waiting={here.length} live={isOpen} />
             {parent && (
               <div className="flex items-center gap-3 border-b border-border bg-panel px-6 py-1.5 text-[12px]">
                 <span className="text-muted-foreground">A subagent's thread: it works on one task of the session.</span>
@@ -728,7 +791,12 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
                 A subagent ends with its task; talk to the session that started it.
               </p>
             ) : (
-              <Composer key={store.info.id} store={store} sending={sending} />
+              <Composer
+                key={store.info.id}
+                store={store}
+                sending={sending}
+                context={(selected === undefined ? undefined : contexts.get(selected)) ?? summary?.context ?? undefined}
+              />
             )}
           </>
         ) : (
@@ -742,7 +810,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
           onPanel={setPanel}
           generation={generation}
           onGeneration={setGeneration}
-          live={{ core, thread: selected, open: isOpen, version: threadsVersion, asks: here }}
+          live={{ core, thread: selected, project: summary?.project ?? "", open: isOpen, version: threadsVersion, asks: here }}
         />
       )}
       {trust ? (

@@ -371,10 +371,142 @@ pub fn user_file(home: &Path) -> PathBuf {
     home.join(".ognivo/mcp.json")
 }
 
+/// The servers of a config file as it holds them, by name; nothing when there is no file.
+pub fn entries(path: &Path) -> Result<Vec<(String, Value)>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(v.get("mcpServers")
+        .or_else(|| v.get("servers"))
+        .and_then(Value::as_object)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default())
+}
+
+/// The servers Claude Code keeps in `~/.claude.json` for the project at `root` (its local
+/// scope), then its user's, as the file holds them.
+pub fn claude_entries(claude_json: &Path, root: &Path) -> Result<Vec<(String, Value)>, String> {
+    let text = match std::fs::read_to_string(claude_json) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let of = |c: Option<&Value>| -> Vec<(String, Value)> {
+        c.and_then(|c| c.get("mcpServers"))
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    };
+    let mut all = of(v
+        .get("projects")
+        .and_then(|p| p.get(root.to_string_lossy().as_ref())));
+    all.extend(of(Some(&v)));
+    Ok(all)
+}
+
+/// Whether `entry` is a server `load` can start, its variables aside: they are read at the
+/// start.
+pub fn check(name: &str, entry: &Value) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Err(format!(
+            "the name {name:?} may hold only letters, digits and - _ ."
+        ));
+    }
+    server(name, entry, "", &|_: &str| Some(String::new())).map(|_| ())
+}
+
+/// Sets the server `name` of the config file at `path` to `entry`, or removes it with
+/// `None`; the rest of the file stays as it was. The file is written whole, then moved over
+/// the old one, so that a failed write leaves the old one.
+pub fn set(path: &Path, name: &str, entry: Option<&Value>) -> Result<(), String> {
+    if let Some(e) = entry {
+        check(name, e)?;
+    }
+    let mut config: Value = match std::fs::read_to_string(path) {
+        Ok(t) => serde_json::from_str(&t).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(Default::default()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let Some(top) = config.as_object_mut() else {
+        return Err(format!("{}: not a JSON object", path.display()));
+    };
+    let key = if top.contains_key("mcpServers") || !top.contains_key("servers") {
+        "mcpServers"
+    } else {
+        "servers"
+    };
+    let servers = top
+        .entry(key)
+        .or_insert_with(|| Value::Object(Default::default()));
+    let Some(servers) = servers.as_object_mut() else {
+        return Err(format!("{}: `{key}` is not an object", path.display()));
+    };
+    match entry {
+        Some(e) => {
+            servers.insert(name.to_owned(), e.clone());
+        }
+        None => {
+            if servers.remove(name).is_none() {
+                return Err(format!("{} has no server {name}", path.display()));
+            }
+        }
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let mut text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    text.push('\n');
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::{Map, json};
+
+    #[test]
+    fn a_config_file_gets_and_loses_a_server_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".ognivo/mcp.json");
+        let echo = json!({"command": "python3", "args": ["echo.py"], "env": {"K": "${K:-v}"}});
+        set(&path, "echo", Some(&echo)).unwrap();
+        assert_eq!(entries(&path).unwrap(), [("echo".to_owned(), echo.clone())]);
+        // another key of the file and its key for the servers stay
+        std::fs::write(
+            &path,
+            r#"{"inputs": [1], "servers": {"a": {"command": "a"}}}"#,
+        )
+        .unwrap();
+        let docs = json!({"type": "http", "url": "https://example.com/mcp"});
+        set(&path, "docs", Some(&docs)).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["inputs"], json!([1]));
+        assert_eq!(v["servers"]["docs"], docs);
+        set(&path, "a", None).unwrap();
+        assert_eq!(entries(&path).unwrap(), [("docs".to_owned(), docs)]);
+        assert!(
+            set(&path, "a", None)
+                .unwrap_err()
+                .contains("has no server a")
+        );
+        assert!(
+            set(&path, "bad name", Some(&echo))
+                .unwrap_err()
+                .contains("may hold only")
+        );
+        assert!(set(&path, "x", Some(&json!({"args": ["no command"]}))).is_err());
+        assert!(!dir.path().join(".ognivo/mcp.json.tmp").exists());
+    }
 
     /// The config objects of `servers`, as the files hold them.
     fn json(servers: &[(&str, Value)]) -> Value {

@@ -48,6 +48,7 @@ history = "preserve"            # preserve_thinking: trained to use past reasoni
 working_max = 131072            # the card: keep at least 128K so that thinking keeps its room
 compact_at = 0.85
 max_tokens = 32768              # the card's output length for most queries
+ceiling = 262144                # the card: 262,144 natively
 
 [template]
 dir = "profiles/templates/Qwen3.6-35B-A3B"

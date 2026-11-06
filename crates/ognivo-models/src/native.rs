@@ -46,6 +46,15 @@ use crate::profile::{ModelProfile, ReasoningControl};
 use crate::qwen;
 use crate::repeat::{Loop, Repeats};
 
+/// Whether the Native path reads the family's format: gpt-oss's and Qwen's so far, and
+/// Gemma 4 goes on the Generic path.
+pub fn reads(family: Family) -> bool {
+    match family {
+        Family::Harmony | Family::QwenXml => true,
+        Family::Gemma4 => false,
+    }
+}
+
 /// Seconds since the Unix epoch.
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -145,7 +154,7 @@ impl NativeDriver {
             }),
             Family::Gemma4 => {
                 return Err(DriverError::InvalidRequest(format!(
-                    "{}: the Native path reads gpt-oss's and Qwen's formats so far",
+                    "{}: the Native path reads gpt-oss's and Qwen's formats so far, not Gemma 4's: start it on the Generic path (without --native)",
                     profile.id
                 )));
             }
@@ -1788,6 +1797,53 @@ mod tests {
             }
         });
         (url, prompts, bodies, warm)
+    }
+
+    /// The UI's profiles.json (apps/ui/scripts/profiles.mjs) says what the profiles say: the
+    /// form of a new thread offers the Native path, the levels and the contexts by it.
+    #[test]
+    fn the_uis_profiles_say_what_the_profiles_do() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let text = std::fs::read_to_string(repo.join("apps/ui/src/profiles.json")).unwrap();
+        let ui: Value = serde_json::from_str(&text).unwrap();
+        for p in profile::builtin().unwrap() {
+            let u = &ui[&p.id];
+            let again = "write it again: npm run profiles (apps/ui)";
+            assert_eq!(u["native"], json!(reads(p.family)), "{}: {again}", p.id);
+            assert_eq!(
+                u["reasoning"],
+                json!({"levels": p.reasoning.levels, "default": p.reasoning.default}),
+                "{}: {again}",
+                p.id
+            );
+            let c = &u["context"];
+            assert_eq!(
+                [&c["working_max"], &c["max_tokens"], &c["ceiling"]],
+                [
+                    &json!(p.context.working_max),
+                    &json!(p.context.max_tokens),
+                    &json!(p.context.ceiling)
+                ],
+                "{}: {again}",
+                p.id
+            );
+        }
+    }
+
+    #[test]
+    fn reads_says_which_profiles_start_on_the_native_path() {
+        for p in profile::builtin().unwrap() {
+            let level = p.reasoning.default.clone();
+            let family = p.family;
+            let started = NativeDriver::new(
+                LlamaServer::new("http://127.0.0.1:9", None).unwrap(),
+                p,
+                Some(&level),
+                None,
+                "2026-11-06",
+            );
+            assert_eq!(started.is_ok(), reads(family), "{family:?}");
+        }
     }
 
     fn driver(url: &str) -> NativeDriver {

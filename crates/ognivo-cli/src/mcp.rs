@@ -4,6 +4,8 @@
 //!
 //! `ognivo mcp login NAME` signs in to a remote server in the browser (OAuth), and
 //! `ognivo mcp logout NAME` forgets that; the sign-ins are kept in `~/.ognivo/mcp-auth`.
+//! `ognivo mcp call NAME TOOL [JSON]` starts the one server and calls a tool of it as a
+//! session would, to see whether it answers and how soon.
 //!
 //! Exit codes: 0 every server that may start did (signed in, signed out); 1 one did not;
 //! 2 bad usage.
@@ -44,6 +46,19 @@ enum Action {
         /// The server, as its config names it
         name: String,
     },
+    /// Start one server and call a tool of it, as a session would
+    Call {
+        /// The server, as its config names it
+        name: String,
+        /// The tool, as the server names it
+        tool: String,
+        /// Its arguments, a JSON object
+        #[arg(default_value = "{}")]
+        arguments: String,
+        /// How long the call may take, in seconds
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+    },
 }
 
 pub async fn mcp(a: McpArgs) -> anyhow::Result<ExitCode> {
@@ -75,6 +90,22 @@ pub async fn mcp(a: McpArgs) -> anyhow::Result<ExitCode> {
         None => list(&root, &loaded, untrusted, signed.as_deref()).await,
         Some(Action::Login { name }) => login(&loaded, &name, signed.as_deref()).await,
         Some(Action::Logout { name }) => logout(&loaded, &name, signed.as_deref()),
+        Some(Action::Call {
+            name,
+            tool,
+            arguments,
+            timeout,
+        }) => {
+            call(
+                &loaded,
+                &name,
+                &tool,
+                &arguments,
+                Duration::from_secs(timeout),
+                signed.as_deref(),
+            )
+            .await
+        }
     }
 }
 
@@ -269,6 +300,65 @@ async fn login(loaded: &Loaded, name: &str, signed: Option<&Path>) -> anyhow::Re
             Ok(ExitCode::FAILURE)
         }
         None => Ok(ExitCode::FAILURE),
+    }
+}
+
+/// Starts `name` alone and calls its tool `tool` with `arguments`.
+async fn call(
+    loaded: &Loaded,
+    name: &str,
+    tool: &str,
+    arguments: &str,
+    timeout: Duration,
+    signed: Option<&Path>,
+) -> anyhow::Result<ExitCode> {
+    let s = match server(loaded, name) {
+        Ok(s) => s,
+        Err(why) => {
+            eprintln!("ognivo mcp call: {why}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let started = std::time::Instant::now();
+    let gateway = Gateway::start(std::slice::from_ref(s), START, signed).await;
+    let up = started.elapsed();
+    if let Some(Err(why)) = gateway.started().first().map(|st| st.outcome.clone()) {
+        eprintln!("ognivo mcp call: {name} did not start: {why}");
+        gateway.shutdown().await;
+        return Ok(ExitCode::FAILURE);
+    }
+    let Some(t) = gateway
+        .tools()
+        .iter()
+        .find(|t| t.server == s.name && t.tool == tool)
+        .map(|t| t.name.clone())
+    else {
+        let tools: Vec<&str> = gateway.tools().iter().map(|t| t.tool.as_str()).collect();
+        eprintln!(
+            "ognivo mcp call: {name} has no tool {tool}; its tools: {}",
+            tools.join(", ")
+        );
+        gateway.shutdown().await;
+        return Ok(ExitCode::from(2));
+    };
+    let called = std::time::Instant::now();
+    let result = gateway.call(&t, arguments, timeout).await;
+    let took = called.elapsed();
+    gateway.shutdown().await;
+    eprintln!(
+        "· {name} started in {:.1} s; {tool} answered in {:.1} s",
+        up.as_secs_f64(),
+        took.as_secs_f64()
+    );
+    match result {
+        Ok(text) => {
+            println!("{text}");
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(why) => {
+            eprintln!("ognivo mcp call: {why}");
+            Ok(ExitCode::FAILURE)
+        }
     }
 }
 

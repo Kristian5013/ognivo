@@ -11,16 +11,20 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use ognivo_core::agent::{Agent, AgentOptions, Approver, Layout, SameModel, Subagents, Toolset};
 use ognivo_core::approval::WorkspaceState;
+use ognivo_core::compact;
 use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_core::skills::{self, Scope, Skills};
 use ognivo_models::llama::{LlamaServer, RouterModel};
+use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
     AnswerNow, ChatDriver, Endpoint, Family, ModelDriver, ModelProfile, NativeDriver, Priority,
     Router, Scheduled, doctor, native, profile,
 };
 use ognivo_store::{NewSession, SessionRow, Store};
+
+use crate::view::{kilo, size};
 
 /// The session store, in the data directory.
 const STORE_FILE: &str = "ognivo.db";
@@ -57,6 +61,11 @@ pub struct SessionArgs {
     /// Reasoning level from the profile (e.g. low/medium/high for gpt-oss)
     #[arg(long)]
     pub level: Option<String>,
+    /// Tokens of working context, e.g. 64k or 131072: compaction starts at the profile's
+    /// share of it (65% for Gemma 4). The server's window by default, and never past what
+    /// the model works with
+    #[arg(long, env = "OGNIVO_CONTEXT", value_parser = tokens)]
+    pub context: Option<u32>,
     /// Server slot to pin every request to; without it the server places them, and its
     /// prompt cache keeps each conversation's KV (a pinned slot loses it with --kv-unified)
     #[arg(long)]
@@ -69,7 +78,7 @@ pub struct SessionArgs {
     #[arg(long)]
     pub data_dir: Option<PathBuf>,
     /// The Native path: ognivo renders the model's format itself, and the server only
-    /// tokenizes and generates (gpt-oss and Qwen3.8 so far)
+    /// tokenizes and generates (gpt-oss and Qwen so far, not Gemma 4)
     #[arg(long)]
     pub native: bool,
     /// With --native: gpt-oss gets the tools of its training, container.exec and
@@ -85,6 +94,32 @@ pub struct SessionArgs {
     /// (40, about 6K tokens)
     #[arg(long, default_value = "auto", value_name = "auto|declare|search")]
     pub mcp_tools: ognivo_mcp::Listing,
+}
+
+/// The least working context a session may choose: less leaves no room beside the system
+/// message and the tools.
+const MIN_CONTEXT: u64 = 4096;
+
+/// `65536`, `64k`, `1M`: tokens, with K and M as 1024 and 1024².
+pub fn tokens(text: &str) -> Result<u32, String> {
+    let t = text.trim();
+    let (digits, unit) = match t.chars().last() {
+        Some('k' | 'K') => (&t[..t.len() - 1], 1024),
+        Some('m' | 'M') => (&t[..t.len() - 1], 1024 * 1024),
+        _ => (t, 1),
+    };
+    let n = digits
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .ok_or_else(|| format!("{text}: not a number of tokens (e.g. 65536 or 64k)"))?;
+    if n < MIN_CONTEXT {
+        return Err(format!(
+            "{text}: a context of at least {MIN_CONTEXT} tokens"
+        ));
+    }
+    u32::try_from(n).map_err(|_| format!("{text}: too many tokens"))
 }
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
@@ -138,10 +173,70 @@ pub struct Connected {
     mcp_tools: ognivo_mcp::Listing,
     /// Where the sign-ins to remote servers are kept, when there is a home.
     mcp_signed: Option<PathBuf>,
+    /// The profile's own context budget, which it was measured at; `opts.context` is the
+    /// session's ([`compact::session`]).
+    pub measured: ContextBudget,
+    /// The working context the user chose.
+    pub chosen: Option<u32>,
     pub opts: AgentOptions,
 }
 
 impl Connected {
+    /// Tokens the conversation may hold before it is compacted.
+    pub fn compacts_at(&self) -> u64 {
+        compact::limit(&self.opts.context, self.opts.n_ctx)
+    }
+
+    /// The session's context as `chat` says it under its banner: its working context, where
+    /// it came from and where the conversation compacts; and, when the server's window
+    /// leaves less than the profile plans for, a warning.
+    pub fn context_notes(&self) -> (String, Option<String>) {
+        let (working, ceiling) = (self.opts.context.working_max, self.opts.context.ceiling);
+        let n_ctx = self.opts.n_ctx;
+        let source = match (self.chosen, n_ctx) {
+            (Some(c), _) if c > working => format!(
+                "you chose {}; {} works with at most {}",
+                size(c),
+                self.profile,
+                size(ceiling)
+            ),
+            (Some(_), _) => "your choice".into(),
+            (None, Some(n)) if n == working => "the server's window".into(),
+            (None, Some(n)) if n > working && working == ceiling => format!(
+                "of the server's {}: {} works with at most {}",
+                size(n),
+                self.profile,
+                size(ceiling)
+            ),
+            (None, Some(n)) => format!(
+                "the profile's: the server's window of {} leaves too little to compact in",
+                size(n)
+            ),
+            (None, None) => "the profile's: the server does not say its window".into(),
+        };
+        let limit = self.compacts_at();
+        let info = format!(
+            "context {} ({source}), compaction near {}",
+            size(working),
+            kilo(limit)
+        );
+        let planned = compact::limit(&self.measured, None);
+        let smaller = self.chosen.is_some_and(|c| c < self.measured.working_max);
+        let warning = (limit < planned && !smaller).then(|| {
+            format!(
+                "the server's context leaves about {} tokens for the conversation where the profile plans for {}: expect frequent compaction",
+                kilo(limit),
+                kilo(planned)
+            )
+        });
+        (info, warning)
+    }
+
+    /// Where the sign-ins to remote MCP servers are kept, when there is a home.
+    pub fn mcp_signed(&self) -> Option<&Path> {
+        self.mcp_signed.as_deref()
+    }
+
     /// The key under which the user's trust in the project's hooks is kept.
     pub fn hooks_key(&self) -> String {
         self.hooks.pending_key()
@@ -413,13 +508,14 @@ impl SessionArgs {
             .level
             .clone()
             .or_else(|| stored.and_then(|r| r.level.clone()));
-        let (family, id, context) = (profile.family, profile.id.clone(), profile.context);
-        // the slot's context bounds when the history is compacted
+        let (family, id, measured) = (profile.family, profile.id.clone(), profile.context);
+        // the slot's context is the session's, and bounds when the history is compacted
         let props = tokio::time::timeout(PROPS_TIMEOUT, server.props())
             .await
             .ok()
             .and_then(Result::ok);
         let n_ctx = props.as_ref().and_then(|p| p.n_ctx);
+        let context = compact::session(measured, self.context, n_ctx);
         // the server's slots, which the session's agents and other sessions take turns at
         let router = Router::new(
             vec![Endpoint {
@@ -525,6 +621,8 @@ impl SessionArgs {
             mcp,
             mcp_tools: self.mcp_tools,
             mcp_signed,
+            measured,
+            chosen: self.context,
             changed,
             pending: loaded.pending,
             rule_files: loaded.files,
@@ -745,4 +843,20 @@ pub fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
         .filter(|d| !d.is_empty())
         .map(PathBuf::from);
     (home, claude)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokens_are_written_as_llama_servers_are() {
+        assert_eq!(tokens("65536"), Ok(65_536));
+        assert_eq!(tokens("64k"), Ok(65_536));
+        assert_eq!(tokens(" 256K "), Ok(262_144));
+        assert_eq!(tokens("1M"), Ok(1_048_576));
+        assert!(tokens("2k").unwrap_err().contains("at least 4096"));
+        assert!(tokens("lots").unwrap_err().contains("not a number"));
+        assert!(tokens("9000000M").unwrap_err().contains("too many"));
+    }
 }

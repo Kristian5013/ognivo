@@ -3747,6 +3747,7 @@ mod tests {
                 working_max: 98_304,
                 compact_at: 0.70,
                 max_tokens: 16384,
+                ceiling: 131_072,
             },
             n_ctx: None,
             seed: 1,
