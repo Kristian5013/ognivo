@@ -24,7 +24,7 @@
 
 mod delegate;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -448,8 +448,6 @@ pub struct Agent {
     prompt_instructions: Load,
     /// The skills, and which of those of subdirectories the conversation has heard of.
     skills: Skills,
-    /// The skills the conversation has loaded, with the text each gave.
-    loaded_skills: HashMap<String, String>,
     /// What the PreToolUse hooks decided about the running call, and whether it edits.
     hook_permission: Option<(Permission, bool)>,
     /// The SessionStart and SessionEnd hooks due before the next turn: their source and
@@ -632,11 +630,29 @@ fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset, by_name: bool
             if opts.agents.get("general-purpose").is_none() {
                 names.push(json!("general-purpose"));
             }
-            d.parameters["properties"]["tasks"]["items"]["properties"]["agent"] = json!({
-                "type": "string",
-                "enum": names,
-                "description": "The subagent to give it to, by what it is for; general-purpose when none fits.",
-            });
+            // T2, 2026-11-06: with `agent` optional, gpt-oss named the template in the title and
+            // left `agent` out; required, right after the title, it is a choice to make
+            let items = &mut d.parameters["properties"]["tasks"]["items"];
+            let mut properties = serde_json::Map::new();
+            if let Some(Value::Object(old)) = items.get("properties") {
+                for (k, v) in old {
+                    properties.insert(k.clone(), v.clone());
+                    if k == "title" {
+                        properties.insert(
+                            "agent".into(),
+                            json!({
+                                "type": "string",
+                                "enum": names,
+                                "description": "The subagent the task goes to: the one of the list below whose description fits it, or general-purpose.",
+                            }),
+                        );
+                    }
+                }
+            }
+            items["properties"] = Value::Object(properties);
+            if let Some(Value::Array(required)) = items.get_mut("required") {
+                required.insert(1, json!("agent"));
+            }
             let list: Vec<String> = opts
                 .agents
                 .all
@@ -647,7 +663,7 @@ fn tools_of(family: Family, opts: &AgentOptions, toolset: Toolset, by_name: bool
                 })
                 .collect();
             d.description.push_str(&format!(
-                "\nThe subagents of the project and the user, for `agent`:\n{}",
+                "\nThe subagents of the project and the user, for `agent` (general-purpose when none of them fits):\n{}",
                 list.join("\n")
             ));
         }
@@ -1025,7 +1041,6 @@ impl Agent {
             instructions,
             prompt_instructions,
             skills: opts.skills.clone(),
-            loaded_skills: HashMap::new(),
             hook_permission: None,
             session_start: Some("startup"),
             session_end: None,
@@ -1277,7 +1292,6 @@ impl Agent {
         self.prompt_instructions = self.instructions.start();
         self.stopped = None;
         self.skills.forget();
-        self.loaded_skills.clear();
         self.session_end = Some("clear");
         self.session_start = Some("clear");
         self.messages = vec![
@@ -1319,7 +1333,6 @@ impl Agent {
     pub fn rewind(&mut self, at: usize) {
         let dropped = self.turn_starts().iter().filter(|&&i| i >= at).count();
         self.messages.truncate(at.max(self.head()));
-        self.loaded_skills.clear();
         self.requests
             .truncate(self.requests.len().saturating_sub(dropped));
         let files: Vec<String> = self.changes().into_iter().map(|c| c.shown).collect();
@@ -1666,7 +1679,6 @@ impl Agent {
         // its memory of results is gone with them
         self.repeats = Repeats::default();
         self.instructions.forget_near();
-        self.loaded_skills.clear();
         self.stats.compactions += 1;
         // a new cache epoch: the session's next conversation
         let notes = self.notes();
@@ -1807,7 +1819,6 @@ impl Agent {
         let mut user = match command {
             Some((skill, arguments)) => match self.render_skill(&skill, &arguments).await {
                 Ok(body) => {
-                    self.loaded_skills.insert(skill.name.clone(), body.clone());
                     format!(
                         "{request}\n\n[ognivo] The user ran /{}, {} {}, which says:\n\n{}{body}",
                         skill.name,
@@ -2944,17 +2955,13 @@ impl Agent {
                 "[error] the skill {name} is the user's to run, as /{name}; do not do what it does another way."
             );
         }
-        let body = match self.render_skill(&skill, arguments).await {
-            Ok(body) => body,
-            Err(why) => return format!("[error] the skill {name} did not load: {why}"),
-        };
-        if self.loaded_skills.get(name) == Some(&body) {
-            return format!(
-                "[ognivo] The skill {name} is loaded above already, with this same text: follow it there."
-            );
+        // loaded again, it comes again: T2, 2026-11-06, gpt-oss loaded it once more to check
+        // its format, and a note that it was above left the format unchecked; a call that
+        // repeats with nothing changed is the repeat detector's
+        match self.render_skill(&skill, arguments).await {
+            Ok(body) => format!("{}{body}", base_line(&skill)),
+            Err(why) => format!("[error] the skill {name} did not load: {why}"),
         }
-        self.loaded_skills.insert(name.to_owned(), body.clone());
-        format!("{}{body}", base_line(&skill))
     }
 
     /// A skill's body rendered: its placeholders filled and the output of its commands in
@@ -5933,11 +5940,13 @@ mod tests {
             delegate.parameters["properties"]["tasks"]["items"]["properties"]["agent"]["enum"],
             json!(["reviewer", "general-purpose"])
         );
-        assert!(
-            delegate
-                .description
-                .ends_with("for `agent`:\n- reviewer: Reviews code.")
-        );
+        assert!(delegate.description.ends_with(
+            "for `agent` (general-purpose when none of them fits):\n- reviewer: Reviews code."
+        ));
+        let task = &delegate.parameters["properties"]["tasks"]["items"];
+        let keys: Vec<&String> = task["properties"].as_object().unwrap().keys().collect();
+        assert_eq!(keys[..2], ["title", "agent"]);
+        assert_eq!(task["required"], json!(["title", "agent", "goal", "mode"]));
         let results = tool_results(&agent);
         assert_eq!(
             results[0],

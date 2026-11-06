@@ -146,6 +146,7 @@ fn the_scenarios_with_a_duplicate_on_purpose_are_ambiguous() {
         t2::ambiguous(&all),
         BTreeSet::from(
             [
+                "claude-command-fix-issue",
                 "edit-fix-operator",
                 "edit-python-indent",
                 "recovery-ambiguous-line"

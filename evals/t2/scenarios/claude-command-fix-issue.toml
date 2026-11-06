@@ -2,6 +2,8 @@
 # issues are.
 category = "claude"
 prompt = "/fix-issue 7"
+# `return a - b` is in add and in sub: only add's may change
+ambiguous = true
 
 [files]
 ".claude/commands/fix-issue.md" = '''
