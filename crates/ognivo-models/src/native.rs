@@ -18,16 +18,19 @@
 //!   tokens in text even then (§5.3), and a content id among the control tokens fails the
 //!   step. Texts once tokenized are kept, since the history repeats every step.
 //!
-//! The server streams ids from `/completion`. Their bytes come from its vocabulary, asked for
-//! as new ids turn up, and the reader ([`parse`]) makes reasoning, text and the call of them.
+//! The server streams ids from `/completion`. Their bytes come from its vocabulary, learnt
+//! whole while the first step's prompt is read and shared by the drivers on that server and
+//! model: a stream waits on no request for the bytes of an id, which costs a round trip to a
+//! server far away. The reader ([`parse`]) makes reasoning, text and the call of them.
 //! A stream that lost ids (fewer than `predicted_n`) fails the step: this path needs a server
 //! of class A (§5.4).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 
 use crate::Family;
@@ -98,6 +101,8 @@ pub struct NativeDriver {
     /// The profile's guarded strings, cut in every content text (§5.3).
     guarded: Arc<Vec<String>>,
     learnt: Arc<Mutex<Learnt>>,
+    /// The server's vocabulary, which the drivers on that server and model share.
+    vocabulary: Arc<SharedVocabulary>,
     answer_now: AnswerNow,
     /// The session's first step sent its system message ahead ([`NativeDriver::warm`]).
     warmed: Arc<AtomicBool>,
@@ -111,6 +116,117 @@ const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 struct Learnt {
     pieces: HashMap<TokenId, Vec<u8>>,
     texts: HashMap<String, Vec<TokenId>>,
+}
+
+/// The ids one request asks the pieces of while a vocabulary is learnt, and how many of
+/// those requests run at once.
+const VOCABULARY_PART: usize = 16_384;
+const VOCABULARY_REQUESTS: usize = 8;
+/// After an attempt to learn a vocabulary failed, steps ask for the ids they meet, and the
+/// next attempt waits this long.
+const VOCABULARY_RETRY: Duration = Duration::from_secs(60);
+
+/// The bytes of the ids below the control tokens, as the server's vocabulary has them.
+struct Vocabulary {
+    bytes: Vec<u8>,
+    /// Where the piece of each id ends in `bytes`.
+    ends: Vec<u32>,
+}
+
+impl std::fmt::Debug for Vocabulary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Vocabulary({} ids)", self.ends.len())
+    }
+}
+
+impl Vocabulary {
+    fn new(pieces: &[Vec<u8>]) -> Option<Self> {
+        let mut v = Self {
+            bytes: Vec::new(),
+            ends: Vec::with_capacity(pieces.len()),
+        };
+        for piece in pieces {
+            v.bytes.extend_from_slice(piece);
+            v.ends.push(u32::try_from(v.bytes.len()).ok()?);
+        }
+        Some(v)
+    }
+
+    fn piece(&self, id: TokenId) -> Option<&[u8]> {
+        let i = usize::try_from(id).ok()?;
+        let end = *self.ends.get(i)? as usize;
+        let start = i
+            .checked_sub(1)
+            .map_or(0, |before| self.ends[before] as usize);
+        Some(&self.bytes[start..end])
+    }
+}
+
+/// The vocabulary of one server and model, which the sessions and subagents of a process on
+/// them learn once.
+#[derive(Debug, Default)]
+struct SharedVocabulary {
+    known: OnceLock<Arc<Vocabulary>>,
+    /// One attempt at a time, and when the last one failed.
+    failed: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl SharedVocabulary {
+    /// The vocabulary, learnt now unless an attempt failed within [`VOCABULARY_RETRY`];
+    /// while it is learnt, the other callers wait for it.
+    async fn get(&self, server: &LlamaServer, control: TokenId) -> Option<Arc<Vocabulary>> {
+        if let Some(v) = self.known.get() {
+            return Some(v.clone());
+        }
+        let mut failed = self.failed.lock().await;
+        if let Some(v) = self.known.get() {
+            return Some(v.clone());
+        }
+        if failed.is_some_and(|at| at.elapsed() < VOCABULARY_RETRY) {
+            return None;
+        }
+        match learn_vocabulary(server, control).await {
+            Some(v) => Some(self.known.get_or_init(|| Arc::new(v)).clone()),
+            None => {
+                *failed = Some(Instant::now());
+                None
+            }
+        }
+    }
+}
+
+/// The vocabulary of `server`'s model, under `profile`, as this process shares it.
+fn vocabulary_of(server: &LlamaServer, profile: &str) -> Arc<SharedVocabulary> {
+    type Key = (String, Option<String>, String);
+    static ALL: LazyLock<Mutex<HashMap<Key, Arc<SharedVocabulary>>>> =
+        LazyLock::new(Mutex::default);
+    let key = (
+        server.base_url().to_owned(),
+        server.model().map(str::to_owned),
+        profile.to_owned(),
+    );
+    ALL.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(key)
+        .or_default()
+        .clone()
+}
+
+/// The pieces of the ids below `control`, asked for in parts, a few at once; `None` when the
+/// server would not give them all.
+async fn learn_vocabulary(server: &LlamaServer, control: TokenId) -> Option<Vocabulary> {
+    let ids: Vec<TokenId> = (0..control).collect();
+    let parts: Vec<Vec<TokenId>> = ids.chunks(VOCABULARY_PART).map(<[_]>::to_vec).collect();
+    let parts: Vec<Vec<Vec<u8>>> = stream::iter(parts)
+        .map(|part| {
+            let server = server.clone();
+            async move { server.pieces(&part).await }
+        })
+        .buffered(VOCABULARY_REQUESTS)
+        .try_collect()
+        .await
+        .ok()?;
+    Vocabulary::new(&parts.concat())
 }
 
 impl NativeDriver {
@@ -160,6 +276,7 @@ impl NativeDriver {
             }
         };
         Ok(Self {
+            vocabulary: vocabulary_of(&server, &profile.id),
             server,
             format,
             slot,
@@ -169,6 +286,25 @@ impl NativeDriver {
             answer_now: AnswerNow::default(),
             warmed: Arc::default(),
         })
+    }
+
+    /// The vocabulary is learnt while the step's prompt is read and processed, and its
+    /// tokens wait on no request for their bytes.
+    fn learn_ahead(&self) {
+        if self.vocabulary.known.get().is_some() {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let (vocabulary, server, control) = (
+            self.vocabulary.clone(),
+            self.server.clone(),
+            self.format.control(),
+        );
+        runtime.spawn(async move {
+            vocabulary.get(&server, control).await;
+        });
     }
 
     /// The first step of a new session sends its system message alone ahead, so that
@@ -223,9 +359,20 @@ impl NativeDriver {
         self.learnt.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// The bytes of `ids`; the server is asked for those not known yet. Control tokens are
-    /// read by their ids and need none.
+    /// The bytes of `ids`, from the server's vocabulary; while it cannot be learnt, the
+    /// server is asked for those not known yet. Control tokens are read by their ids and
+    /// need none.
     async fn pieces(&self, ids: &[TokenId]) -> Result<Vec<Vec<u8>>, EngineError> {
+        if let Some(v) = self
+            .vocabulary
+            .get(&self.server, self.format.control())
+            .await
+        {
+            return Ok(ids
+                .iter()
+                .map(|id| v.piece(*id).map(<[u8]>::to_vec).unwrap_or_default())
+                .collect());
+        }
         let mut missing: Vec<TokenId> = {
             let l = self.learnt();
             ids.iter()
@@ -547,6 +694,7 @@ impl NativeDriver {
         self,
         req: StepRequest,
     ) -> Result<BoxStream<'static, Result<DriverEvent, DriverError>>, DriverError> {
+        self.learn_ahead();
         let prompt = self.prompt(&req).await?;
         let ids = self.ids(&prompt).await?;
         self.warm(&req, &ids).await;
@@ -1683,6 +1831,21 @@ mod tests {
         Arc<Mutex<Vec<Value>>>,
         Arc<Mutex<Vec<Value>>>,
     ) {
+        let (url, prompts, bodies, warm, _) = fake_server_all(completions).await;
+        (url, prompts, bodies, warm)
+    }
+
+    /// The same, and how many ids each request for pieces asked about.
+    #[allow(clippy::type_complexity)]
+    async fn fake_server_all(
+        completions: Vec<Completion>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Vec<TokenId>>>>,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<Mutex<Vec<usize>>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let prompts = Arc::new(Mutex::new(Vec::new()));
@@ -1691,6 +1854,8 @@ mod tests {
         let kept = bodies.clone();
         let warm = Arc::new(Mutex::new(Vec::new()));
         let ahead = warm.clone();
+        let pieces = Arc::new(Mutex::new(Vec::new()));
+        let asked = pieces.clone();
         let queue = Arc::new(Mutex::new(completions.into_iter()));
         tokio::spawn(async move {
             loop {
@@ -1698,6 +1863,7 @@ mod tests {
                 let seen = seen.clone();
                 let kept = kept.clone();
                 let ahead = ahead.clone();
+                let asked = asked.clone();
                 let queue = queue.clone();
                 tokio::spawn(async move {
                     let mut buf = Vec::new();
@@ -1727,6 +1893,7 @@ mod tests {
                     let response = if head.starts_with("POST /tokenize") {
                         let content = body["content"].as_array().unwrap();
                         let tokens: Vec<Value> = if body["with_pieces"] == json!(true) {
+                            asked.lock().unwrap().push(content.len());
                             content
                                 .iter()
                                 .map(|id| {
@@ -1796,7 +1963,7 @@ mod tests {
                 });
             }
         });
-        (url, prompts, bodies, warm)
+        (url, prompts, bodies, warm, pieces)
     }
 
     /// The UI's profiles.json (apps/ui/scripts/profiles.mjs) says what the profiles say: the
@@ -1920,6 +2087,28 @@ mod tests {
         // a leap day, and the year after it
         assert_eq!(utc_date(951_782_400), "2000-02-29");
         assert_eq!(utc_date(978_307_200), "2001-01-01");
+    }
+
+    #[tokio::test]
+    async fn a_stream_waits_on_no_request_for_the_bytes_of_its_ids() {
+        // an answer of many ids, each of them new: the vocabulary learnt ahead has them all
+        let text: String = (0x20u8..0x7f).map(char::from).collect::<String>().repeat(2);
+        let long = format!("«channel»final«message»{text}«return»");
+        let (url, _, _, _, asked) = fake_server_all(vec![answer(&long), answer(&long)]).await;
+        let start = vec![ChatMessage::User("Say it.".into())];
+        let f = finished(&run(&driver(&url), request(start.clone(), 7)).await);
+        assert_eq!(f.content, text);
+        // the vocabulary in parts, and not one request for the ids of the stream
+        let parts = (CONTROL as usize).div_ceil(VOCABULARY_PART);
+        {
+            let asked = asked.lock().unwrap();
+            assert_eq!(asked.len(), parts, "{asked:?}");
+            assert_eq!(asked.iter().sum::<usize>(), CONTROL as usize);
+        }
+        // a second session on the server and model learns it no more
+        let f = finished(&run(&driver(&url), request(start, 8)).await);
+        assert_eq!(f.content, text);
+        assert_eq!(asked.lock().unwrap().len(), parts);
     }
 
     #[tokio::test]
