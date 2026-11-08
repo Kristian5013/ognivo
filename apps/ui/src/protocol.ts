@@ -597,9 +597,33 @@ levels: Array<string>, default_level: string | null,
  */
 native: boolean, 
 /**
- * The context of the server's slot, as `/props` says it.
+ * The context of the server's slot, as `/props` says it; `None` for a router's model
+ * that is not loaded.
  */
-window: number | null, };
+window: number | null, 
+/**
+ * llama-server's router: its models; empty for a server of one model.
+ */
+models: Array<RoutedModel>, 
+/**
+ * The router's model the rest is of; `None` when the router runs several, or none,
+ * and the params name none of its models.
+ */
+model: string | null, };
+
+export type RoutedModel = { 
+/**
+ * Its id, as a `Server` names it.
+ */
+id: string, 
+/**
+ * `loaded`, `loading`, `unloaded`, ...: a thread has the router start one not loaded.
+ */
+status: string, 
+/**
+ * The profile its names pick, if one does.
+ */
+profile: string | null, };
 
 export type McpServers = { servers: Array<McpServerState>, 
 /**

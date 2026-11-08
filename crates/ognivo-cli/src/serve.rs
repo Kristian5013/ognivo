@@ -357,19 +357,51 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
 const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The profile of the model `s` runs, found as a thread's start finds it, with its levels.
+/// Behind llama-server's router: its models, and the profile of the one `s` names, or else
+/// of the one loaded. One not loaded is known by its name, and has no window yet: detecting
+/// does not have the router start it.
 async fn detect(s: rpc::Server) -> Reply {
-    use ognivo_models::{doctor, llama::LlamaServer, profile};
+    use ognivo_models::{doctor, llama::LlamaServer, llama::RouterModel, profile};
     let base =
         LlamaServer::new(&s.url, s.api_key).map_err(|e| RpcError::new(-32602, e.to_string()))?;
-    let server = match &s.model {
-        Some(m) => base.for_model(m),
-        None => base,
-    };
     let profiles = profile::builtin().map_err(|e| RpcError::new(-32603, e.to_string()))?;
     let found = tokio::time::timeout(DETECT_TIMEOUT, async {
-        let props = server.props().await?;
-        let found = doctor::detect_profile(&server, &props, &profiles).await?;
-        Ok::<_, ognivo_models::EngineError>((found, props.n_ctx))
+        let props = base.props().await?;
+        if props.role.as_deref() != Some("router") {
+            let found = doctor::detect_profile(&base, &props, &profiles).await?;
+            return Ok((found.map(|(p, _)| p), props.n_ctx, Vec::new(), None));
+        }
+        let models = base.models().await?;
+        let named = |m: &RouterModel| doctor::profile_by_name(&m.names(), &profiles);
+        let listed = models
+            .iter()
+            .map(|m| rpc::RoutedModel {
+                id: m.id.clone(),
+                status: m.status.clone(),
+                profile: named(m).map(|p| p.id.clone()),
+            })
+            .collect();
+        let asked = s.model.as_ref().and_then(|name| {
+            models
+                .iter()
+                .find(|m| &m.id == name || m.aliases.contains(name))
+        });
+        let loaded: Vec<&RouterModel> = models.iter().filter(|m| m.status == "loaded").collect();
+        let chosen = asked.or(match loaded.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        });
+        let (found, window) = match chosen {
+            Some(m) if m.status == "loaded" => {
+                let server = base.for_model(&m.id);
+                let props = server.props().await?;
+                let found = doctor::detect_profile(&server, &props, &profiles).await?;
+                (found.map(|(p, _)| p), props.n_ctx)
+            }
+            Some(m) => (named(m), None),
+            None => (None, None),
+        };
+        Ok::<_, ognivo_models::EngineError>((found, window, listed, chosen.map(|m| m.id.clone())))
     })
     .await
     .map_err(|_| {
@@ -383,14 +415,15 @@ async fn detect(s: rpc::Server) -> Reply {
         )
     })?
     .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
-    let (found, window) = found;
-    let p = found.map(|(p, _)| p);
+    let (p, window, models, model) = found;
     reply(rpc::Detected {
         profile: p.map(|p| p.id.clone()),
         levels: p.map(|p| p.reasoning.levels.clone()).unwrap_or_default(),
         default_level: p.map(|p| p.reasoning.default.clone()),
         native: p.is_some_and(|p| ognivo_models::native::reads(p.family)),
         window,
+        models,
+        model,
     })
 }
 

@@ -37,6 +37,14 @@ impl fmt::Debug for LlamaServer {
     }
 }
 
+/// The root of a server's URL: llama-server's own API (`/props`, `/tokenize`) is there, and
+/// ognivo adds `/v1/chat/completions` itself, so the OpenAI base URL other clients are
+/// given, `http://host:8080/v1`, names the same server.
+fn root(url: &str) -> &str {
+    let url = url.trim_end_matches('/');
+    url.strip_suffix("/v1").unwrap_or(url).trim_end_matches('/')
+}
+
 /// A model of llama-server in router mode, as its `/models` lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouterModel {
@@ -209,13 +217,14 @@ impl LlamaServer {
         }
         let http = builder.build().map_err(http_err)?;
         Ok(Self {
-            base: base_url.trim_end_matches('/').to_owned(),
+            base: root(base_url).to_owned(),
             http,
             api_key,
             model: None,
         })
     }
 
+    /// The server's root URL, without `/v1`.
     pub fn base_url(&self) -> &str {
         &self.base
     }
@@ -507,6 +516,20 @@ mod tests {
         let d = format!("{s:?}");
         assert!(!d.contains("secret") && d.contains("redacted"), "{d}");
         assert_eq!(s.base_url(), "http://127.0.0.1:8090");
+    }
+
+    #[test]
+    fn an_openai_base_url_names_the_servers_root() {
+        for (given, root) in [
+            ("http://127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080"),
+            ("http://127.0.0.1:8080/v1/", "http://127.0.0.1:8080"),
+            // a server behind a proxy keeps its path
+            ("https://example.com/llama/v1", "https://example.com/llama"),
+            ("https://example.com/v1beta", "https://example.com/v1beta"),
+        ] {
+            assert_eq!(LlamaServer::new(given, None).unwrap().base_url(), root);
+        }
     }
 
     #[test]

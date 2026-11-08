@@ -146,7 +146,9 @@ pub async fn diagnose(
         Ok((404, _)) => {
             report.note(
                 Level::Error,
-                format!("no llama-server API at {url} (/health returned 404); use the server root URL, without /v1"),
+                format!(
+                    "no llama-server API at {url} (/health returned 404); use the server root URL"
+                ),
             );
             return report;
         }
@@ -181,19 +183,13 @@ pub async fn diagnose(
             report.note(Level::Error, auth_failed(status));
             return report;
         }
-        Ok((404, _)) if url.trim_end_matches('/').ends_with("/v1") => {
-            // llama-server answers /v1/health too, so a /v1 base URL gets this far
-            report.note(
-                Level::Error,
-                "use the server root URL, without /v1 (/v1/props returned 404)",
-            );
-            return report;
-        }
         // without /props nothing about the server can be trusted: stop, guess nothing
         Ok((status, _)) => {
             report.note(
                 Level::Error,
-                format!("/props returned {status}: not a llama-server API (use the server root URL, without /v1)"),
+                format!(
+                    "/props returned {status}: not a llama-server API (use the server root URL)"
+                ),
             );
             return report;
         }

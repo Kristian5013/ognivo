@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{HANG, answer_stream, call_stream, fake_server};
+use common::{HANG, answer_stream, call_stream, fake_router, fake_server};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines};
 use tokio::net::UnixStream;
@@ -194,6 +194,50 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
         .await
         .unwrap_err();
     assert_eq!(none["code"], -32003, "{none}");
+
+    // behind a router, given its OpenAI base URL: its models with the profiles their names
+    // pick, and the one asked for, known by its name while it is not loaded
+    let models = json!([
+        {"id": "gemma-4-26b-a4b-q4", "aliases": [], "status": {"value": "unloaded", "args": []}},
+        {"id": "gemma-4-26b-a4b-q8", "aliases": [], "status": {"value": "unloaded", "args": []}},
+        {"id": "embeddings", "aliases": [], "status": {"value": "unloaded", "args": []}}
+    ]);
+    let (routed, posted, gets) = fake_router(models, vec![]).await;
+    let asked = a
+        .ok(
+            "server/detect",
+            json!({"url": format!("{routed}/v1"), "api_key": null, "model": "gemma-4-26b-a4b-q8"}),
+        )
+        .await;
+    assert_eq!(asked["model"], "gemma-4-26b-a4b-q8", "{asked}");
+    assert_eq!(asked["profile"], "gemma-4-26b-a4b", "{asked}");
+    assert_eq!(asked["window"], Value::Null, "{asked}");
+    assert_eq!(
+        asked["models"],
+        json!([
+            {"id": "gemma-4-26b-a4b-q4", "status": "unloaded", "profile": "gemma-4-26b-a4b"},
+            {"id": "gemma-4-26b-a4b-q8", "status": "unloaded", "profile": "gemma-4-26b-a4b"},
+            {"id": "embeddings", "status": "unloaded", "profile": null}
+        ])
+    );
+    // none loaded and none asked for: the user chooses
+    let open = a
+        .ok(
+            "server/detect",
+            json!({"url": routed, "api_key": null, "model": "a model of another server"}),
+        )
+        .await;
+    assert_eq!(
+        [&open["model"], &open["profile"]],
+        [&Value::Null, &Value::Null]
+    );
+    // and detecting has the router start nothing
+    assert!(posted.lock().unwrap().is_empty());
+    assert!(
+        gets.lock().unwrap().iter().all(|g| !g.contains("model=")),
+        "{:?}",
+        gets.lock().unwrap()
+    );
 
     let opened = a.ok("thread/start", start(&root, &url)).await;
     let thread = opened["thread"].clone();

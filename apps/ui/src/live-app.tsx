@@ -35,6 +35,8 @@ const SETTINGS = "ognivo.settings";
 /** What the form for a new thread starts with: what it was last time. */
 interface Settings {
   url: string;
+  /** The model behind llama-server's router, by its id; "": the one it runs. */
+  model: string;
   profile: string;
   level: string;
   native: boolean;
@@ -48,6 +50,7 @@ interface Settings {
 // the owner's llama-server; the nights' runs on 8090
 const DEFAULTS: Settings = {
   url: "http://127.0.0.1:8080",
+  model: "",
   profile: "",
   level: "",
   native: false,
@@ -222,8 +225,8 @@ function NewThread({
 }: {
   settings: Settings;
   onStart: (s: Settings, project: string) => Promise<void>;
-  /** The profile of the model a server runs, as the core finds it. */
-  detect: (url: string) => Promise<P.Detected>;
+  /** The profile of the model a server runs, as the core finds it; behind a router, of `model`. */
+  detect: (url: string, model: string | null) => Promise<P.Detected>;
 }) {
   const [form, setForm] = useState(settings);
   const [detected, setDetected] = useState<P.Detected>();
@@ -234,7 +237,7 @@ function NewThread({
     if (!url) return;
     let live = true;
     const t = setTimeout(() => {
-      detect(url).then(
+      detect(url, form.model || null).then(
         (d) => live && setDetected(d),
         () => live && setDetected(undefined),
       );
@@ -243,7 +246,11 @@ function NewThread({
       live = false;
       clearTimeout(t);
     };
-  }, [form.url, detect]);
+  }, [form.url, form.model, detect]);
+  // behind llama-server's router, the model of the thread: the one chosen, or else the one
+  // the router runs; a model of another server is not sent
+  const routed = detected?.models ?? [];
+  const routedModel = routed.some((m) => m.id === form.model) ? form.model : (detected?.model ?? "");
   const reasoning = form.profile
     ? REASONING(form.profile)
     : detected?.profile
@@ -273,7 +280,7 @@ function NewThread({
         e.preventDefault();
         setBusy(true);
         setError(undefined);
-        onStart({ ...form, level, context, native: form.native && native !== false }, project.trim())
+        onStart({ ...form, model: routedModel, level, context, native: form.native && native !== false }, project.trim())
           .catch((e: unknown) => setError(message(e)))
           .finally(() => setBusy(false));
       }}
@@ -316,6 +323,32 @@ function NewThread({
           className={`${field} font-mono`}
         />
       </div>
+      {routed.length > 0 && (
+        <div>
+          <label className={label} htmlFor="model">
+            Model: the server is llama-server's router
+          </label>
+          <select
+            id="model"
+            required
+            value={routedModel}
+            onChange={(e) => setForm({ ...form, model: e.target.value })}
+            className={`${field} font-mono`}
+          >
+            {!routedModel && (
+              <option value="" disabled>
+                choose one of its {routed.length} models
+              </option>
+            )}
+            {routed.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.id} · {m.status === "loaded" ? "loaded" : `${m.status}: the router starts it`}
+                {m.profile ? "" : " · no profile fits it"}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="flex gap-3">
         <div className="flex-1">
           <label className={label} htmlFor="profile">
@@ -603,13 +636,13 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   };
 
   const detect = useCallback(
-    (url: string) => core.call("server/detect", { url, api_key: null, model: null }),
+    (url: string, model: string | null) => core.call("server/detect", { url, api_key: null, model }),
     [core],
   );
   const start = async (form: Settings, project: string) => {
     const o = await core.call("thread/start", {
       project,
-      server: { url: form.url.trim(), api_key: null, model: null },
+      server: { url: form.url.trim(), api_key: null, model: form.model || null },
       profile: form.profile || null,
       level: form.level || null,
       native: form.native,

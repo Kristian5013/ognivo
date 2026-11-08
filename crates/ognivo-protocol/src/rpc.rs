@@ -151,7 +151,8 @@ pub struct Server {
 }
 
 /// `server/detect`: the profile of the model a server runs, as a thread there would find it,
-/// with its reasoning levels; params are a `Server`.
+/// with its reasoning levels; params are a `Server`. Behind llama-server's router it is of
+/// the model the params name, or else of the one model loaded.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Detected {
     /// `None`: no profile fits the server's model.
@@ -161,8 +162,25 @@ pub struct Detected {
     pub default_level: Option<String>,
     /// Whether the Native path reads the model's format.
     pub native: bool,
-    /// The context of the server's slot, as `/props` says it.
+    /// The context of the server's slot, as `/props` says it; `None` for a router's model
+    /// that is not loaded.
     pub window: Option<u32>,
+    /// llama-server's router: its models; empty for a server of one model.
+    pub models: Vec<RoutedModel>,
+    /// The router's model the rest is of; `None` when the router runs several, or none,
+    /// and the params name none of its models.
+    pub model: Option<String>,
+}
+
+/// A model of llama-server's router.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct RoutedModel {
+    /// Its id, as a `Server` names it.
+    pub id: String,
+    /// `loaded`, `loading`, `unloaded`, ...: a thread has the router start one not loaded.
+    pub status: String,
+    /// The profile its names pick, if one does.
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -76,6 +76,7 @@ fn typescript() -> String {
         McpSignInAsked::decl(&cfg),
         SignInAnswer::decl(&cfg),
         Detected::decl(&cfg),
+        RoutedModel::decl(&cfg),
         McpServers::decl(&cfg),
         McpServerState::decl(&cfg),
         McpToolInfo::decl(&cfg),
