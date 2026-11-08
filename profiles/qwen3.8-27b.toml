@@ -45,7 +45,7 @@ history = "preserve"            # official default: every past reasoning block s
 working_max = 98304             # instant EOS beyond ~130K (#27756); decode 46 -> 34 tok/s from 0 to 96K
 compact_at = 0.90               # compaction near 90K; the recurrent state cannot be rewound, so append-only
 max_tokens = 20480              # cuts 1 of 283 M0 steps (16384 would cut 3, each 433-547 s of decode); M0 step records
-ceiling = 114688                # instant EOS beyond ~130K (#27756): compaction near 103K, and a step's 20K of output stays under it
+ceiling = 262144                # the card: 262,144 natively. llama.cpp #27756 reports an instant EOS past ~130K; a session that meets it compacts under where it happened
 
 [template]
 dir = "profiles/templates/Qwen3.8-27B"

@@ -51,8 +51,11 @@ checked against.
 - **The edit journal:** every change is kept with what it replaced. `/changes`, `/accept`
   and `/revert` in `chat`, the Changes panel in the window.
 - **Context.** A session works with the server's window (llama-server's `-c`), up to what
-  its model works with: 256K for Gemma 4 and Qwen3.6, 128K for gpt-oss, 112K for
-  Qwen3.8. `--context 64k`, `OGNIVO_CONTEXT` or the window's Context field set another.
+  its model works with: 256K for Gemma 4, Qwen3.6 and Qwen3.8, 128K for gpt-oss. Where a
+  model writes nothing at all in a long context, as llama.cpp is reported to make Qwen3.8
+  do past about 130K ([#27756](https://github.com/ggml-org/llama.cpp/issues/27756)), the
+  conversation is compacted under that point from then on, and the step runs again.
+  `--context 64k`, `OGNIVO_CONTEXT` or the window's Context field set another.
   At the profile's share of it, 65–90%, the conversation is compacted in the middle of a
   turn: the model's summary, ognivo's facts and the last steps replace the rest.
 - **Guards** against special tokens in content, repeated output, repeated calls and calls

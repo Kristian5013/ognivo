@@ -70,8 +70,9 @@ describe("contextChoices", () => {
     const gemma = profiles["gemma-4-26b-a4b"].context;
     expect(contextChoices(gemma, 131_072).map(contextSize)).toEqual(["16K", "32K", "64K", "96K", "128K"]);
     expect(contextChoices(gemma, undefined).at(-1)).toBe(262_144);
-    // gpt-oss stops at its ceiling, 128K, whatever the server holds
+    // gpt-oss stops at its ceiling, 128K, whatever the server holds; Qwen3.8 goes to 256K
     expect(contextChoices(profiles["gpt-oss-20b"].context, 262_144).slice(-2).map(contextSize)).toEqual(["96K", "128K"]);
+    expect(contextChoices(profiles["qwen3.8-27b"].context, 262_144).at(-1)).toBe(262_144);
   });
 });
 
@@ -85,6 +86,7 @@ describe("windowChoice", () => {
     expect(windowChoice(gptOss, 262_144)).toBe("128K of the server's 256K: the most the model works with");
     expect(windowChoice(gptOss, 131_072)).toBe("the server's window: 128K");
     expect(windowChoice(gptOss, 65_536)).toBe("the server's window: 64K");
+    expect(windowChoice(profiles["qwen3.8-27b"].context, 262_144)).toBe("the server's window: 256K");
     expect(windowChoice(undefined, undefined)).toBe("the server's window");
   });
 });

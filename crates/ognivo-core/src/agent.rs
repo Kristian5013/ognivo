@@ -62,6 +62,9 @@ pub use delegate::{SameModel, Subagents};
 
 /// How many generations in a row may end without usable calls before the turn stops.
 const MAX_UNUSABLE_IN_A_ROW: u32 = 3;
+/// Past this context, an output with nothing in it, no reasoning either, is the context's
+/// doing: llama.cpp #27756 reports Qwen3.8 ending its answer at the first token past ~130K.
+const NOTHING_WRITTEN_PAST: u64 = 65_536;
 /// Calls executed from one generation; the rest get an error result.
 const MAX_CALLS_PER_STEP: usize = 8;
 /// Time a command leaves before the turn's limit, for the answer and the exit.
@@ -471,6 +474,9 @@ pub struct Agent {
     running: Option<String>,
     /// Tokens the server held after the last step.
     context: u64,
+    /// The least context at which the model wrote nothing ([`NOTHING_WRITTEN_PAST`]): the
+    /// history is compacted under it from then on.
+    broke_at: Option<u64>,
     /// Messages the server held then; those after came since.
     counted: usize,
     /// The user's requests of the conversation, oldest first, for a compaction.
@@ -1188,6 +1194,7 @@ impl Agent {
             stuck: None,
             running: None,
             context: 0,
+            broke_at: None,
             counted: 0,
             requests: Vec::new(),
             turn_start: 0,
@@ -1715,7 +1722,10 @@ impl Agent {
         on: &mut (dyn FnMut(AgentEvent) + Send),
         deadline: Option<Instant>,
     ) -> Result<Option<TurnEnd>, DriverError> {
-        let limit = compact::limit(&self.opts.context, self.opts.n_ctx);
+        let mut limit = compact::limit(&self.opts.context, self.opts.n_ctx);
+        if let Some(at) = self.broke_at {
+            limit = limit.min((at as f64 * f64::from(self.opts.context.compact_at)) as u64);
+        }
         let tokens = self.prompt_estimate();
         if tokens <= limit {
             return Ok(None);
@@ -2030,6 +2040,22 @@ impl Agent {
             }
             let reasoning = (!f.reasoning.is_empty()).then_some(f.reasoning);
             match f.outcome {
+                // the model wrote nothing in a long context: the history is compacted under
+                // where that happened, and the step runs again
+                Outcome::Answer
+                    if f.content.trim().is_empty()
+                        && reasoning.as_deref().is_none_or(|r| r.trim().is_empty())
+                        && self.context > NOTHING_WRITTEN_PAST
+                        && self.broke_at.is_none_or(|at| self.context < at) =>
+                {
+                    self.stats.empty_answers += 1;
+                    self.broke_at = Some(self.context);
+                    let text = format!(
+                        "[ognivo] The model ended its output before writing anything, with {} tokens of context (llama.cpp #27756 reports this of Qwen3.8 past about 130K): the history is compacted under that from now on, and the step runs again.",
+                        about_tokens(self.context)
+                    );
+                    self.emit(on, AgentEvent::Notice { text });
+                }
                 Outcome::Answer if f.content.trim().is_empty() => {
                     self.stats.empty_answers += 1;
                     unusable += 1;
@@ -5205,6 +5231,63 @@ mod tests {
             note.contains("There is no summary: writing it failed."),
             "{note}"
         );
+    }
+
+    #[tokio::test]
+    async fn nothing_written_in_a_long_context_compacts_under_it_and_runs_the_step_again() {
+        // llama.cpp #27756: Qwen3.8 ends its output at the first token past ~130K
+        let read = |path: &str, held: Option<u32>| {
+            let mut c = calls(
+                &[("read", serde_json::json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            );
+            c.usage.prompt_n = held;
+            c
+        };
+        let mut nothing = answer("");
+        nothing.usage.prompt_n = Some(70_100);
+        let mut r = agent(
+            vec![
+                read("big1.txt", None),
+                read("big2.txt", None),
+                read("lib.rs", Some(70_000)),
+                nothing,
+                answer("Task: fix it.\nNext: change lib.rs."),
+                answer("done"),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        let line = format!("{}\n", "x".repeat(59));
+        for name in ["big1.txt", "big2.txt"] {
+            std::fs::write(r.root.join(name), line.repeat(680)).unwrap();
+        }
+        // a window of 256K, whose own limit is near 183K
+        r.agent.opts.context.working_max = 262_144;
+        r.agent.opts.context.ceiling = 262_144;
+        r.agent.opts.n_ctx = Some(262_144);
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "done");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            AgentEvent::Notice { text } if text.contains("before writing anything, with 70.1K tokens of context")
+        )));
+        let limits: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Compacting { limit, .. } => Some(*limit),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(limits, [(70_100.0 * f64::from(0.70f32)) as u64]);
+        // the step ran again on the compacted history, and the model was told nothing
+        assert!(
+            notes(&r.agent)
+                .iter()
+                .all(|n| !n.contains("neither a tool call nor an answer")),
+            "{:?}",
+            notes(&r.agent)
+        );
+        assert_eq!(r.seen.lock().unwrap().len(), 6);
     }
 
     #[tokio::test]

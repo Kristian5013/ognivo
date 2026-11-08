@@ -320,16 +320,18 @@ fn note_class(
             report.note(Level::Info, "known build with complete token-id streaming (run with --probe to verify)")
         }
         (ServerClass::B, StreamIds::Lossy { received, predicted }) => report.note(
-            Level::Warn,
+            Level::Info,
             format!(
-                "{received} of {predicted} sampled token ids were streamed (lossy on incomplete UTF-8): ognivo will \
-                 re-tokenize; for your own server build llama.cpp with PR #31244 (scripts/llama/build-pinned.sh)"
+                "{received} of {predicted} sampled token ids were streamed: no id comes while a character is not \
+                 whole, and the Native path puts them back from the text that comes next and the vocabulary; \
+                 for your own server, llama.cpp with PR #31244 streams them all (scripts/llama/build-pinned.sh)"
             ),
         ),
         (ServerClass::B, _) => report.note(
-            Level::Warn,
-            "token ids are expected to be lossy on incomplete UTF-8 (not verified: run with --probe); for your own \
-             server build llama.cpp with PR #31244 (scripts/llama/build-pinned.sh)",
+            Level::Info,
+            "token ids are expected to be lost while a character is not whole (not verified: run with --probe), \
+             and the Native path puts them back from the text that comes next; for your own server, llama.cpp \
+             with PR #31244 streams them all (scripts/llama/build-pinned.sh)",
         ),
         (ServerClass::C, _) if *kind == ServerKind::IkLlama || stream == StreamIds::Missing => report.note(
             Level::Warn,

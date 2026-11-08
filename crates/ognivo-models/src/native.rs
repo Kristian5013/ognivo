@@ -22,8 +22,10 @@
 //! whole while the first step's prompt is read and shared by the drivers on that server and
 //! model: a stream waits on no request for the bytes of an id, which costs a round trip to a
 //! server far away. The reader ([`parse`]) makes reasoning, text and the call of them.
-//! A stream that lost ids (fewer than `predicted_n`) fails the step: this path needs a server
-//! of class A (§5.4).
+//! Upstream llama.cpp leaves out of the stream each id after which a character is not whole
+//! yet (class B, §5.4); the next chunk's text shows their bytes, and the vocabulary their ids
+//! (`put_back`). A stream that still lost ids (fewer than `predicted_n`) goes back as its
+//! text, mended from the server's; one whose text cannot show them fails the step.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -131,7 +133,19 @@ struct Vocabulary {
     bytes: Vec<u8>,
     /// Where the piece of each id ends in `bytes`.
     ends: Vec<u32>,
+    /// The ids by their pieces, made the first time a stream loses ids.
+    by_piece: OnceLock<ByPiece>,
 }
+
+/// The ids with a piece, in the order of their pieces' bytes, and the longest piece.
+struct ByPiece {
+    ids: Vec<TokenId>,
+    longest: usize,
+}
+
+/// Lost bytes past this are not a few ids the stream left out, and no ids are sought for
+/// them.
+const MOST_LOST_BYTES: usize = 256;
 
 impl std::fmt::Debug for Vocabulary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +158,7 @@ impl Vocabulary {
         let mut v = Self {
             bytes: Vec::new(),
             ends: Vec::with_capacity(pieces.len()),
+            by_piece: OnceLock::new(),
         };
         for piece in pieces {
             v.bytes.extend_from_slice(piece);
@@ -159,6 +174,60 @@ impl Vocabulary {
             .checked_sub(1)
             .map_or(0, |before| self.ends[before] as usize);
         Some(&self.bytes[start..end])
+    }
+
+    fn by_piece(&self) -> &ByPiece {
+        self.by_piece.get_or_init(|| {
+            let piece = |id: &TokenId| self.piece(*id).unwrap_or_default();
+            let mut ids: Vec<TokenId> = (0..)
+                .take(self.ends.len())
+                .filter(|id| !piece(id).is_empty())
+                .collect();
+            ids.sort_unstable_by(|a, b| piece(a).cmp(piece(b)));
+            let longest = ids.iter().map(|id| piece(id).len()).max().unwrap_or(0);
+            ByPiece { ids, longest }
+        })
+    }
+
+    /// The id whose piece `bytes` are.
+    fn id_of(&self, bytes: &[u8]) -> Option<TokenId> {
+        let ids = &self.by_piece().ids;
+        let at = ids
+            .binary_search_by(|id| self.piece(*id).unwrap_or_default().cmp(bytes))
+            .ok()?;
+        Some(ids[at])
+    }
+
+    /// The fewest ids whose pieces make `bytes`, longer pieces first where as few would do.
+    /// The model writes the tokens its tokenizer makes of a text, nearly always, and those
+    /// are long ones: what an id left out of a stream was, its bytes alone show.
+    fn ids_of(&self, bytes: &[u8]) -> Option<Vec<TokenId>> {
+        if bytes.is_empty() || bytes.len() > MOST_LOST_BYTES {
+            return None;
+        }
+        let longest = self.by_piece().longest;
+        // fewest[i]: the fewest ids that make bytes[..i]
+        let mut fewest: Vec<Option<Vec<TokenId>>> = vec![None; bytes.len() + 1];
+        fewest[0] = Some(Vec::new());
+        for i in 0..bytes.len() {
+            let Some(head) = fewest[i].clone() else {
+                continue;
+            };
+            for j in (i + 1..=bytes.len().min(i + longest)).rev() {
+                let Some(id) = self.id_of(&bytes[i..j]) else {
+                    continue;
+                };
+                if fewest[j]
+                    .as_ref()
+                    .is_none_or(|ids| ids.len() > head.len() + 1)
+                {
+                    let mut ids = head.clone();
+                    ids.push(id);
+                    fewest[j] = Some(ids);
+                }
+            }
+        }
+        fewest.pop().flatten()
     }
 }
 
@@ -729,6 +798,8 @@ impl NativeDriver {
             received: 0,
             released: String::new(),
             lost: false,
+            unshown: Vec::new(),
+            recovered: 0,
             seed: req.seed,
             call_id,
             prompt: ids,
@@ -821,7 +892,82 @@ impl NativeDriver {
             .map_err(failure)?;
         g.events = engine::terminated(payloads);
         g.received = 0;
+        g.recovered = 0;
+        g.unshown.clear();
         Ok(())
+    }
+
+    /// A chunk's ids, with the ids the stream left out before them put back where its text
+    /// shows them (§5.4). Upstream llama.cpp streams no id after which a character is not
+    /// whole yet, and the next chunk brings the text of both with its own id alone: what the
+    /// text has before the bytes of that id are the bytes of the ids left out, and the
+    /// vocabulary has their ids. Qwen3.8 on such a server, 2026-11-08: 1 to 19 ids of
+    /// 6 000–14 500 a step, on `λ`, `ρ`, `⊕`, `≡` and `✗` after a space, each step failed.
+    fn put_back(
+        &self,
+        g: &mut Generation,
+        mut ids: Vec<TokenId>,
+        mut pieces: Vec<Vec<u8>>,
+        text: &str,
+    ) -> (Vec<TokenId>, Vec<Vec<u8>>) {
+        let control = self.format.control();
+        // a control token's text may stand in the text or not
+        if ids.iter().any(|id| *id >= control) || pieces.iter().any(Vec::is_empty) {
+            g.unshown.clear();
+            return (ids, pieces);
+        }
+        match lay(&g.unshown, &pieces.concat(), text.as_bytes()) {
+            Laid::Whole | Laid::Apart => g.unshown.clear(),
+            Laid::Ahead(unshown) => g.unshown = unshown,
+            Laid::Lost(bytes) => {
+                g.unshown.clear();
+                let Some(v) = self.vocabulary.known.get() else {
+                    return (ids, pieces);
+                };
+                let Some(lost) = v.ids_of(&bytes) else {
+                    return (ids, pieces);
+                };
+                g.recovered += lost.len();
+                let lost_pieces = lost
+                    .iter()
+                    .map(|id| v.piece(*id).unwrap_or_default().to_vec());
+                pieces.splice(0..0, lost_pieces);
+                ids.splice(0..0, lost);
+            }
+        }
+        (ids, pieces)
+    }
+}
+
+/// How a chunk's text lies over the bytes of its ids, after the bytes of earlier ids the
+/// text has not shown yet.
+#[derive(Debug, PartialEq, Eq)]
+enum Laid {
+    /// The text is those bytes.
+    Whole,
+    /// It lags them: what it has not shown yet.
+    Ahead(Vec<u8>),
+    /// It has bytes no id brought between them: those of ids the stream left out.
+    Lost(Vec<u8>),
+    /// It does not lie over them.
+    Apart,
+}
+
+fn lay(unshown: &[u8], mine: &[u8], text: &[u8]) -> Laid {
+    let ids = unshown.len() + mine.len();
+    if text.len() <= ids {
+        let bytes = [unshown, mine].concat();
+        if text == bytes.as_slice() {
+            Laid::Whole
+        } else if bytes.starts_with(text) {
+            Laid::Ahead(bytes[text.len()..].to_vec())
+        } else {
+            Laid::Apart
+        }
+    } else if !mine.is_empty() && text.starts_with(unshown) && text.ends_with(mine) {
+        Laid::Lost(text[unshown.len()..text.len() - mine.len()].to_vec())
+    } else {
+        Laid::Apart
     }
 }
 
@@ -853,16 +999,18 @@ async fn advance(
     let mut batch = Vec::new();
     match g.events.next().await? {
         Ok(TokenEvent::Tokens { ids, text }) => {
-            g.received += ids.len();
             g.released.push_str(&text);
             if g.reader.stopped() {
                 // past the call or the answer: only the end of the stream is wanted
+                g.received += ids.len();
                 return Some((batch, Some((this, g))));
             }
             let pieces = match this.pieces(&ids).await {
                 Ok(p) => p,
                 Err(e) => return Some((vec![Err(failure(e))], None)),
             };
+            let (ids, pieces) = this.put_back(&mut g, ids, pieces, &text);
+            g.received += ids.len();
             for (id, piece) in ids.iter().zip(&pieces) {
                 for ev in g.reader.push(*id, piece) {
                     if let Some((channel, l)) = g.show(ev, &mut batch) {
@@ -903,20 +1051,24 @@ async fn advance(
             let predicted = usage.predicted_n.and_then(|n| usize::try_from(n).ok());
             match predicted {
                 // ids it did not generate cannot be read
-                Some(n) if n < g.received => {
+                Some(n) if n < g.received - g.recovered => {
                     let e = EngineError::Protocol(format!(
-                        "the server streamed {} token ids for {n} it generated (class A, §5.4)",
-                        g.received
+                        "the server streamed {} token ids for {n} it generated (§5.4)",
+                        g.received - g.recovered
                     ));
                     return Some((vec![Err(DriverError::Engine(e))], None));
                 }
-                // seen on the GPU with the pinned build: a few ids missing, as many as the
-                // characters the reader could not decode, while the text had them all
+                // the text's bytes are the server's, and the model wrote them in more ids
+                // than were put back: they do not go back as they came
+                Some(n) if n < g.received => g.lost = true,
+                // a few ids missing, which the text did not give back: upstream llama.cpp
+                // where a control token followed, or the pinned build on the GPU with as many
+                // missing as the characters the reader could not decode (2026-11-03)
                 Some(n) if n > g.received => {
                     g.lost = true;
                     if !g.mendable() {
                         let e = EngineError::Protocol(format!(
-                            "the server streamed {} of {n} token ids, and its text does not show what the rest were (class A, §5.4)",
+                            "the server streamed {} of {n} token ids, and its text does not show what the rest were (§5.4)",
                             g.received
                         ));
                         return Some((vec![Err(DriverError::Engine(e))], None));
@@ -998,6 +1150,11 @@ struct Generation {
     /// A request streamed fewer ids than it generated: the text is mended from `released`,
     /// and the ids do not go back as they came.
     lost: bool,
+    /// The bytes of the request's ids that its text has not shown yet: a server of class A
+    /// streams the id of a character that is not whole with no text.
+    unshown: Vec<u8>,
+    /// Ids the request's stream left out and its text gave back, counted in `received`.
+    recovered: usize,
     seed: u32,
     call_id: String,
     /// The step's prompt, which every request of the step continues.
@@ -1605,9 +1762,9 @@ fn mend(messages: &[parse::Message], released: &str) -> Vec<parse::Message> {
         .collect()
 }
 
-/// `decoded` with each run of U+FFFD replaced by the one character of more than one byte
-/// that `released` has there; as it is when its parts do not lie in `released` in order
-/// around one such character each.
+/// `decoded` with each run of U+FFFD replaced by what `released` has there: a character of
+/// more than one byte, and the few whole ones a lost id had before it ([`laid`]); as it is
+/// when its parts do not lie in `released` in order around such characters.
 pub(crate) fn mended(decoded: &str, released: &str) -> String {
     const LOST: char = '\u{FFFD}';
     if !decoded.contains(LOST) {
@@ -1636,19 +1793,27 @@ pub(crate) fn mended(decoded: &str, released: &str) -> String {
         .unwrap_or_else(|| decoded.to_owned())
 }
 
+/// The whole characters an id that ends inside one may have before it, which a stream that
+/// lost the id lost with it: ` λ` is one id of Qwen3.8's.
+const LOST_BEFORE: usize = 8;
+
 /// `parts` laid over `released` from `start`, with one character of more than one byte
-/// between each two.
+/// between each two, after at most [`LOST_BEFORE`] others: the fewest that let the next
+/// part follow.
 fn laid(parts: &[&str], released: &str, start: usize) -> Option<String> {
     let mut at = start;
     let mut out = String::new();
     for (i, part) in parts.iter().enumerate() {
         if i > 0 {
-            let ch = released.get(at..)?.chars().next()?;
-            if ch.len_utf8() < 2 {
-                return None;
-            }
-            out.push(ch);
-            at += ch.len_utf8();
+            let rest = released.get(at..)?;
+            let gap = rest
+                .char_indices()
+                .take(LOST_BEFORE + 1)
+                .map(|(j, ch)| (j + ch.len_utf8(), ch.len_utf8()))
+                .find(|(end, len)| *len > 1 && rest[*end..].starts_with(part))?
+                .0;
+            out.push_str(&rest[..gap]);
+            at += gap;
         }
         if !released.get(at..)?.starts_with(part) {
             return None;
@@ -1735,31 +1900,45 @@ mod tests {
         out
     }
 
-    fn piece(id: TokenId) -> Value {
+    /// The fake vocabulary's ids of more than one byte, which its tokenizer never makes:
+    /// ` \xCE`, a space and the first byte of a Greek letter, is one id of Qwen3.8's, and the
+    /// model writes ` λ` with it.
+    const SPACE_GREEK: TokenId = 3000;
+
+    fn bytes_of(id: TokenId) -> Vec<u8> {
         match special_text(id) {
-            Some(t) => json!(t),
-            None if (1000..1256).contains(&id) => {
-                let b = (id - 1000) as u8;
-                if b < 0x80 {
-                    json!((b as char).to_string())
-                } else {
-                    json!([b])
-                }
-            }
-            None => json!(""),
+            Some(t) => t.into_bytes(),
+            None if (1000..1256).contains(&id) => vec![(id - 1000) as u8],
+            None if id == SPACE_GREEK => b" \xCE".to_vec(),
+            None => Vec::new(),
+        }
+    }
+
+    fn piece(id: TokenId) -> Value {
+        let bytes = bytes_of(id);
+        match String::from_utf8(bytes) {
+            Ok(t) => json!(t),
+            Err(e) => json!(e.into_bytes()),
         }
     }
 
     /// Text from the fake vocabulary's ids, control tokens written out.
     fn text(ids: &[TokenId]) -> String {
-        let mut bytes = Vec::new();
+        String::from_utf8(ids.iter().flat_map(|id| bytes_of(*id)).collect()).unwrap()
+    }
+
+    /// `ids` with each space before a Greek letter's first byte as one id, the model's way.
+    fn merged(ids: &[TokenId]) -> Vec<TokenId> {
+        let mut out = Vec::new();
         for id in ids {
-            match special_text(*id) {
-                Some(t) => bytes.extend_from_slice(t.as_bytes()),
-                None => bytes.push((*id - 1000) as u8),
+            if *id == 1000 + 0xCE && out.last() == Some(&(1000 + u32::from(b' '))) {
+                out.pop();
+                out.push(SPACE_GREEK);
+            } else {
+                out.push(*id);
             }
         }
-        String::from_utf8(bytes).unwrap()
+        out
     }
 
     /// A generation from a fixture where «name» is a control token.
@@ -1788,15 +1967,22 @@ mod tests {
         predicted: usize,
         /// Places of ids the stream leaves out; their text still comes, with the next id's.
         lost: Vec<usize>,
+        /// The stream leaves out each id after which a character is not whole yet, as
+        /// upstream llama.cpp does (class B); else it streams it with no text (class A).
+        upstream: bool,
     }
 
     fn answer(fixture: &str) -> Completion {
-        let ids = generation(fixture);
+        completion(generation(fixture))
+    }
+
+    fn completion(ids: Vec<TokenId>) -> Completion {
         Completion {
             predicted: ids.len(),
             ids,
             stop: "eos",
             lost: Vec::new(),
+            upstream: false,
         }
     }
 
@@ -1839,6 +2025,28 @@ mod tests {
     #[allow(clippy::type_complexity)]
     async fn fake_server_all(
         completions: Vec<Completion>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<Vec<TokenId>>>>,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<Mutex<Vec<usize>>>,
+    ) {
+        fake_server_with(completions, true).await
+    }
+
+    /// A fake server that gives the pieces of a few ids at a time, never its vocabulary.
+    async fn fake_server_without_vocabulary(
+        completions: Vec<Completion>,
+    ) -> (String, Arc<Mutex<Vec<Vec<TokenId>>>>) {
+        let (url, prompts, ..) = fake_server_with(completions, false).await;
+        (url, prompts)
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn fake_server_with(
+        completions: Vec<Completion>,
+        vocabulary: bool,
     ) -> (
         String,
         Arc<Mutex<Vec<Vec<TokenId>>>>,
@@ -1890,7 +2098,18 @@ mod tests {
                         }
                     };
                     let body: Value = serde_json::from_slice(&body).unwrap();
-                    let response = if head.starts_with("POST /tokenize") {
+                    let whole = body["content"].as_array().is_some_and(|c| c.len() > 1000);
+                    let response = if head.starts_with("POST /tokenize")
+                        && body["with_pieces"] == json!(true)
+                        && whole
+                        && !vocabulary
+                    {
+                        let body = json!({"error": {"code": 500, "message": "busy"}}).to_string();
+                        format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    } else if head.starts_with("POST /tokenize") {
                         let content = body["content"].as_array().unwrap();
                         let tokens: Vec<Value> = if body["with_pieces"] == json!(true) {
                             asked.lock().unwrap().push(content.len());
@@ -1937,15 +2156,13 @@ mod tests {
                         let (mut events, mut held, mut text) =
                             (String::new(), Vec::new(), String::new());
                         for (i, id) in c.ids.iter().enumerate() {
-                            match special_text(*id) {
-                                Some(t) => held.extend_from_slice(t.as_bytes()),
-                                None => held.push((*id - 1000) as u8),
-                            }
+                            held.extend_from_slice(&bytes_of(*id));
                             if let Ok(t) = std::str::from_utf8(&held) {
                                 text.push_str(t);
                                 held.clear();
                             }
-                            if !c.lost.contains(&i) {
+                            let held_back = c.upstream && !held.is_empty();
+                            if !c.lost.contains(&i) && !held_back {
                                 let chunk =
                                     json!({"content": std::mem::take(&mut text), "tokens": [id]});
                                 events.push_str(&format!("data: {chunk}\n\n"));
@@ -2390,7 +2607,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_stream_that_lost_ids_goes_back_as_text_mended_from_the_servers() {
+    async fn ids_upstream_left_out_come_back_from_the_text() {
+        // Qwen3.8 on upstream llama.cpp, 2026-11-08: ` λ` is one id that ends inside the
+        // letter, the server streamed no id for it, and every step of a session failed
+        let fixture = "n = λ/4, where λ is the level.\n«/think»\n\nn = λ/4.«im_end»";
+        let ids = merged(&generation(fixture));
+        assert_eq!(ids.iter().filter(|id| **id == SPACE_GREEK).count(), 3);
+        let (url, prompts) = fake_server(vec![
+            Completion {
+                upstream: true,
+                ..completion(ids.clone())
+            },
+            answer("Ok.\n«/think»\n\nOk.«im_end»"),
+        ])
+        .await;
+        let d = qwen_driver(&url, None);
+        let user = ChatMessage::User("What is n?".into());
+        let f = finished(&run(&d, request(vec![user.clone()], 1)).await);
+        assert_eq!(f.content, "n = λ/4.");
+        assert_eq!(f.reasoning, "n = λ/4, where λ is the level.");
+        // every id is there: they go back as they came, and the next prompt holds them
+        assert_eq!(f.tokens.as_deref(), Some(ids.as_slice()));
+        let history = vec![
+            user,
+            ChatMessage::Assistant {
+                content: f.content.clone(),
+                reasoning: Some(f.reasoning.clone()),
+                tool_calls: Vec::new(),
+                tokens: f.tokens.clone(),
+            },
+            ChatMessage::User("And λ?".into()),
+        ];
+        run(&d, request(history, 2)).await;
+        let sent = prompts.lock().unwrap()[1].clone();
+        assert!(
+            sent.windows(ids.len()).any(|w| w == ids.as_slice()),
+            "{}",
+            text(&sent)
+        );
+    }
+
+    #[tokio::test]
+    async fn ids_the_pinned_build_lost_come_back_from_the_text() {
         // gpt-oss on the GPU, 2026-11-03: 5 of 902 ids missing, and the answer read by its
         // ids had as many U+FFFD; the server's text had every character
         let fixture =
@@ -2431,14 +2689,14 @@ mod tests {
             f.content,
             "Sizes: 4\u{202F}M and 12\u{202F}GB, model\u{2011}spec."
         );
-        // its ids are not all there: it goes back as text
-        assert_eq!(f.tokens, None);
+        // the next chunk's text had the lost byte: every id is there again
+        assert_eq!(f.tokens.as_deref(), Some(ids.as_slice()));
         let f = finished(&run(&d, request(vec![user.clone()], 2)).await);
         let Outcome::Calls(calls) = &f.outcome else {
             panic!("{:?}", f.outcome)
         };
         assert_eq!(calls.calls()[0].arguments, "{\"path\":\"d\u{2011}x.rs\"}");
-        assert_eq!(f.tokens, None);
+        assert!(f.tokens.is_some());
         let history = vec![
             user,
             ChatMessage::Assistant {
@@ -2458,13 +2716,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_lost_id_whose_text_came_with_a_control_tokens_goes_back_as_mended_text() {
+        // a control token's text may stand in the server's text or not: no id is sought
+        let fixture = "«channel»final«message»It costs 5\u{20AC}«return»";
+        let at = generation(fixture)
+            .iter()
+            .position(|id| *id == 1000 + 0xAC)
+            .unwrap();
+        let (url, _) = fake_server(vec![Completion {
+            lost: vec![at],
+            ..answer(fixture)
+        }])
+        .await;
+        let user = ChatMessage::User("Price?".into());
+        let f = finished(&run(&driver(&url), request(vec![user], 1)).await);
+        assert_eq!(f.content, "It costs 5\u{20AC}");
+        assert_eq!(f.tokens, None);
+    }
+
+    #[tokio::test]
     async fn a_lost_id_the_text_cannot_show_fails_the_step() {
+        // with no vocabulary, the bytes the text has are no ids
         let fixture = "«channel»final«message»Sizes: 4 MB.«return»";
         let at = generation(fixture)
             .iter()
             .position(|id| *id == 1000 + u32::from(b'4'))
             .unwrap();
-        let (url, _) = fake_server(vec![Completion {
+        let (url, _) = fake_server_without_vocabulary(vec![Completion {
             lost: vec![at],
             ..answer(fixture)
         }])
@@ -2514,6 +2792,55 @@ mod tests {
         assert_eq!(mended("5\u{FFFD}M", server), "5\u{FFFD}M");
         // only a character of more than one byte can have lost one
         assert_eq!(mended("is\u{FFFD}the", server), "is\u{FFFD}the");
+        // ` λ` is one id of Qwen3.8's: the space went with the letter's first byte
+        let server = "qmax = 2^(w · λ / 8) where λ = log2(q)";
+        assert_eq!(
+            mended("where\u{FFFD} = log2(q)", server),
+            "where λ = log2(q)"
+        );
+        assert_eq!(
+            mended("(w ·\u{FFFD} / 8) where\u{FFFD} =", server),
+            "(w · λ / 8) where λ ="
+        );
+        // more whole characters than an id ending inside one has are not its
+        assert_eq!(mended("a\u{FFFD}b", "a123456789λb"), "a\u{FFFD}b");
+    }
+
+    #[test]
+    fn a_chunks_text_lies_over_the_bytes_of_its_ids() {
+        assert_eq!(lay(b"", b"ab", b"ab"), Laid::Whole);
+        // a server of class A streams the ids of a character before its text
+        assert_eq!(lay(b"", b" \xCE", b""), Laid::Ahead(b" \xCE".to_vec()));
+        assert_eq!(lay(b" \xCE", b"\xBB", " λ".as_bytes()), Laid::Whole);
+        // upstream streams no id for ` \xCE`, and the letter's text comes with the next one
+        assert_eq!(
+            lay(b"", b"\xBB", " λ".as_bytes()),
+            Laid::Lost(b" \xCE".to_vec())
+        );
+        // the pinned build lost a character's last id, after the others had come
+        assert_eq!(
+            lay(b"\xE2\x80", b"M", "\u{202F}M".as_bytes()),
+            Laid::Lost(b"\xAF".to_vec())
+        );
+        assert_eq!(lay(b"q", b"ab", b"xab"), Laid::Apart);
+        assert_eq!(lay(b"", b"ab", b"xy"), Laid::Apart);
+        // text with no id lies over none
+        assert_eq!(lay(b"", b"", b"hi"), Laid::Apart);
+    }
+
+    #[test]
+    fn lost_bytes_are_the_fewest_ids_whose_pieces_make_them() {
+        let pieces: Vec<Vec<u8>> = [&b"a"[..], b"b", b"ab", b" \xCE", b" ", b"\xCE"]
+            .iter()
+            .map(|p| p.to_vec())
+            .collect();
+        let v = Vocabulary::new(&pieces).unwrap();
+        assert_eq!(v.ids_of(b" \xCE"), Some(vec![3]));
+        assert_eq!(v.ids_of(b"ab"), Some(vec![2]));
+        assert_eq!(v.ids_of(b"aab"), Some(vec![0, 2]));
+        assert_eq!(v.ids_of(b"abb"), Some(vec![2, 1]));
+        assert_eq!(v.ids_of(b"c"), None);
+        assert_eq!(v.ids_of(b""), None);
     }
 
     #[tokio::test]

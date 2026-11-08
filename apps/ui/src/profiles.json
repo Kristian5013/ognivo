@@ -188,7 +188,7 @@
    "working_max": 98304,
    "compact_at": 0.9,
    "max_tokens": 20480,
-   "ceiling": 114688
+   "ceiling": 262144
   },
   "reasoning": {
    "levels": [
