@@ -618,6 +618,19 @@ fn check_context_and_sampling(props: &Props, profile: &ModelProfile, report: &mu
             ),
         );
     }
+    // said, so that a session's context is not read as the server's window cut short
+    if let Some(n_ctx) = props.n_ctx
+        && n_ctx > profile.context.ceiling
+    {
+        report.note(
+            Level::Info,
+            format!(
+                "n_ctx per slot is {n_ctx}, past the most {} works with: a session works with at most {} \
+                 and compacts under it",
+                profile.id, profile.context.ceiling
+            ),
+        );
+    }
     let d = props.default_sampling;
     let want = profile.sampling.main;
     let differs = |server: Option<f64>, ours: f64| server.is_some_and(|s| (s - ours).abs() > 1e-3);
@@ -652,5 +665,44 @@ fn num(v: Option<f64>) -> String {
             s.trim_end_matches('0').trim_end_matches('.').to_owned()
         }
         None => "?".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::builtin;
+
+    fn notes(n_ctx: u32, id: &str) -> Vec<String> {
+        let profile = builtin().unwrap().into_iter().find(|p| p.id == id).unwrap();
+        let props = Props {
+            n_ctx: Some(n_ctx),
+            ..Props::default()
+        };
+        let mut report = DoctorReport::new("http://127.0.0.1:8080");
+        check_context_and_sampling(&props, &profile, &mut report);
+        report.findings.into_iter().map(|f| f.message).collect()
+    }
+
+    #[test]
+    fn a_window_past_the_ceiling_is_said_with_what_a_session_works_with() {
+        let past = notes(262_144, "gpt-oss-20b");
+        assert!(
+            past.iter().any(|m| m.contains(
+                "past the most gpt-oss-20b works with: a session works with at most 131072"
+            )),
+            "{past:?}"
+        );
+        // under it, and at it, nothing is said
+        assert!(
+            notes(131_072, "gpt-oss-20b")
+                .iter()
+                .all(|m| !m.contains("past the most"))
+        );
+        assert!(
+            notes(262_144, "gemma-4-26b-a4b")
+                .iter()
+                .all(|m| !m.contains("past the most"))
+        );
     }
 }

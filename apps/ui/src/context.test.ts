@@ -58,8 +58,8 @@ describe("compaction", () => {
     expect(compaction(gemma, undefined, undefined).working).toBe(65_536);
   });
   it("never goes past what the model works with, nor so near the window that a step cannot generate", () => {
-    const qwen = profiles["qwen3.8-27b"].context;
-    expect(compaction(qwen, undefined, 262_144).working).toBe(qwen.ceiling);
+    const gptOss = profiles["gpt-oss-20b"].context;
+    expect(compaction(gptOss, undefined, 262_144).working).toBe(gptOss.ceiling);
     // 32K: 16,384 of output and the summary request leave 15,872
     expect(compaction(gemma, undefined, 32_768)).toEqual({ working: 32_768, compactsAt: 15_872 });
   });
@@ -70,17 +70,21 @@ describe("contextChoices", () => {
     const gemma = profiles["gemma-4-26b-a4b"].context;
     expect(contextChoices(gemma, 131_072).map(contextSize)).toEqual(["16K", "32K", "64K", "96K", "128K"]);
     expect(contextChoices(gemma, undefined).at(-1)).toBe(262_144);
-    // Qwen3.8 stops at its ceiling, 112K, whatever the server holds
-    expect(contextChoices(profiles["qwen3.8-27b"].context, 262_144).slice(-2).map(contextSize)).toEqual(["96K", "112K"]);
+    // gpt-oss stops at its ceiling, 128K, whatever the server holds
+    expect(contextChoices(profiles["gpt-oss-20b"].context, 262_144).slice(-2).map(contextSize)).toEqual(["96K", "128K"]);
   });
 });
 
 describe("windowChoice", () => {
-  it("names the window, or the profile's context where the window is too small", () => {
+  it("names the window, the model's ceiling under a larger one, or the profile's context where the window is too small", () => {
     const gemma = profiles["gemma-4-26b-a4b"].context;
     expect(windowChoice(gemma, 262_144)).toBe("the server's window: 256K");
     expect(windowChoice(gemma, 4096)).toBe("the profile's 64K: the server's 4K is too small to compact in");
-    expect(windowChoice(profiles["qwen3.8-27b"].context, 262_144)).toBe("the server's window: 112K");
+    // gpt-oss stops at 128K: the server's 256K is said, not named by what it is cut to
+    const gptOss = profiles["gpt-oss-20b"].context;
+    expect(windowChoice(gptOss, 262_144)).toBe("128K of the server's 256K: the most the model works with");
+    expect(windowChoice(gptOss, 131_072)).toBe("the server's window: 128K");
+    expect(windowChoice(gptOss, 65_536)).toBe("the server's window: 64K");
     expect(windowChoice(undefined, undefined)).toBe("the server's window");
   });
 });

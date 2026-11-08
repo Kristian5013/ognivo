@@ -77,15 +77,18 @@ export function contextChoices(budget: Budget | undefined, window: number | unde
   return [...all].sort((a, b) => a - b);
 }
 
-/** What the form's first context choice stands for: the server's window, or the profile's
- * context where the window is too small to compact in. */
+/** What the form's first context choice stands for: the server's window; the model's
+ * ceiling where the window is larger, so the window is not named by the size it is cut to;
+ * or the profile's context where the window is too small to compact in. */
 export function windowChoice(budget: Budget | undefined, window: number | undefined): string {
   if (window === undefined) return "the server's window";
   if (!budget) return `the server's window: ${contextSize(window)}`;
   const { working } = compaction(budget, undefined, window);
-  return working === Math.min(window, budget.ceiling)
-    ? `the server's window: ${contextSize(working)}`
-    : `the profile's ${contextSize(working)}: the server's ${contextSize(window)} is too small to compact in`;
+  if (working === window) return `the server's window: ${contextSize(window)}`;
+  if (working === budget.ceiling && window > working) {
+    return `${contextSize(working)} of the server's ${contextSize(window)}: the most the model works with`;
+  }
+  return `the profile's ${contextSize(working)}: the server's ${contextSize(window)} is too small to compact in`;
 }
 
 /** `64K`, `256K`: a context size as servers are given it; `98.3k` for one off the grid. */
