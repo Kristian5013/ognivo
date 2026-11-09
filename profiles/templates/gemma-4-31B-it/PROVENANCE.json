@@ -20,18 +20,128 @@
   },
   "generation_config_json": {
    "bos_token_id": 2,
-   "eos_token_id": [1, 106, 50],
+   "eos_token_id": [
+    1,
+    106,
+    50
+   ],
    "temperature": 1.0,
    "top_k": 64,
    "top_p": 0.95
   },
   "saved_as": "canonical.jinja"
  },
+ "upstream_history": [
+  {
+   "commit": "419b2efe421994fdfd3394e621983d4cc511cd4f",
+   "date": "2026-04-02T10:52:51.000Z",
+   "title": "Preparing for release!",
+   "chat_template_sha256": "2dfbfc7d538912f4ea11d29d85b4e25d7bc26386e53f57529f1d707c28b5828c",
+   "the_26b_a4b_repo": "47b6801b (2026-04-02)"
+  },
+  {
+   "commit": "e51e7dcdb6febd74c182fe0cb41c236363ae2ac5",
+   "date": "2026-04-10T02:02:10.000Z",
+   "title": "fix: prefix-preserving tool calls + dialog compliance (#56)",
+   "chat_template_sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+   "the_26b_a4b_repo": "1db3cff1 (2026-04-10)"
+  },
+  {
+   "commit": "145dc2508c480a64b47242f160d286cff94a2343",
+   "date": "2026-04-28T17:33:42.000Z",
+   "title": "fix(chat_template): update SI and tool call handling (#86)",
+   "chat_template_sha256": "94899c0f917d93f6fe81c95744d1e8ddab2d21d39228d2e4aec1fb2a25bff413",
+   "the_26b_a4b_repo": "4c55b528 (2026-04-28)"
+  },
+  {
+   "commit": "fcf2302760ae9c6e528a8dbba9dd636e56848237",
+   "date": "2026-05-18T16:25:18.000Z",
+   "title": "fix(chat_template): Emit multimodal placeholders in tool response content-parts (#94)",
+   "chat_template_sha256": "36e3a42e5cf14cd0020e72d92e1fdd9970f59b82170e421f0cbe1bb42bead3f0",
+   "the_26b_a4b_repo": "b2a81a03 (2026-05-18)"
+  },
+  {
+   "commit": "68abe48010cbe15293462fa11e901a60639a44e5",
+   "date": "2026-07-15T16:35:25.000Z",
+   "title": "fix: chat template — null handling, reasoning preservation, turn-tag balance, input validation (#118)",
+   "chat_template_sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+   "the_26b_a4b_repo": "35b4173c (2026-07-15)"
+  }
+ ],
+ "upstream_history_note": "the commits of google/gemma-4-31B-it that changed chat_template.jinja (13 commits checked); each version is the 26B A4B repo's of the same name, byte for byte",
  "gguf_embedded": {
-  "gguf": "gemma-4-31B_q4_0-it.gguf (the owner's: Q4_0, 17651001568 bytes; general.base_model.0.repo_url google/gemma-4-31B-it, no quantizer named, general.name \"Hf\")",
+  "gguf_path": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-31B_q4_0-it.gguf",
+  "source_repo": "google/gemma-4-31B-it-qat-q4_0-gguf",
+  "downloaded_revision": "59dde24573e7e61570dba08b18a2e1fe246955ed",
+  "found_by": "the mount's .cache/huggingface/download/gemma-4-31B_q4_0-it.gguf.metadata (revision and etag); the repo's tree has the file at that size and LFS sha256",
+  "file": {
+   "size": 17651001568,
+   "lfs_sha256": "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b",
+   "sha256_on_disk_2026_11_09": "179cfb99212709597eae5929112cfca677e1bbf566178b479ae1da0c4772874b",
+   "last_commit": {
+    "id": "59dde24573e7e61570dba08b18a2e1fe246955ed",
+    "date": "2026-07-17T21:26:48.000Z",
+    "title": "Upload validated QAT GGUF checkpoint (280 sequence length, corrected vocabulary)"
+   }
+  },
+  "identical_to_repo_main_on_check_date": true,
+  "quantization": "Q4_0 from Google's quantization-aware training: the card claims quality similar to bfloat16. The repo also has gemma-4-31B-it-mmproj.gguf (vision, 1.2 GB), not downloaded",
+  "saved_as": "gguf-embedded.jinja",
   "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
-  "differs": "no: the canonical template byte for byte, so it is not saved again",
+  "author": "Google: the canonical template byte for byte, so canonical_vs_gguf-embedded.diff is empty",
   "vocabulary": "262144 tokens, those of Unsloth's 26B A4B GGUF byte for byte (sha256 of the tokens joined by newlines: 7af66a9004b0dd94832142c7cd1f4670c9249d38f101de44c4f435e643573a23); of their control and user-defined tokens only <eos> differs, a control token here",
-  "meta": "gguf-meta.json"
+  "metadata": "gguf-meta.json (general.name \"Hf\", no quantized_by: Google's conversion)"
+ },
+ "other_copies": [
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/google-gemma-4-31B-it.jinja",
+   "sha256": "85a08664d16d8f3be4416c92427b3ac10df1024ac566cc0b4bc3bab409393f98",
+   "equals": "upstream e51e7dcd (2026-04-10, #56) of this repo",
+   "llama_cpp_checkout": "18ab62a8e (2026-11-06); the file last changed in 3fc65063d (2026-04-10, #21704)"
+  },
+  {
+   "path": "/home/kristian/Рабочий стол/llama.cpp/models/templates/google-gemma-4-31B-it-interleaved.jinja",
+   "sha256": "65f93a25708c952457106a30e185ba7beffddd726121c8d7e3f3e08b23c16c67",
+   "equals": "llama.cpp-local variant of the 2026-04-02 release (test fixture only)"
+  }
+ ],
+ "kwargs_surface": {
+  "canonical": [
+   "messages",
+   "tools",
+   "add_generation_prompt",
+   "bos_token",
+   "enable_thinking",
+   "preserve_thinking"
+  ],
+  "globals": [
+   "raise_exception"
+  ]
+ },
+ "llama_cpp": "the template is the 26B A4B's file: its PROVENANCE has llama.cpp's detected format and caps for it (peg-gemma4)",
+ "pins": {
+  "generic_chat_template_file": {
+   "file": "canonical.jinja",
+   "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+   "source": "google/gemma-4-31B-it@842da379 (file commit 68abe480, 2026-07-15, #118)"
+  },
+  "oracle": {
+   "primary": "canonical.jinja ae53464b... under Jinja2 (transformers env)",
+   "parse_rules": "tokenizer_config.json response_template @842da379 sha256 9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633"
+  },
+  "kwargs": {
+   "enable_thinking": "from [reasoning], always sent (template default false)",
+   "preserve_thinking": "true: [reasoning] history = preserve, as the 26B A4B (template default false)",
+   "bos_token": "<bos> (llama.cpp strips it and adds the BOS token)"
+  }
+ },
+ "golden": {
+  "renderer": "Jinja2 configured as HF transformers' apply_chat_template (ImmutableSandboxedEnvironment, trim_blocks, lstrip_blocks, loopcontrols, tojson without ASCII escapes), with the special tokens of tokenizer_config.json",
+  "scenario": "evals/templates/scenarios/seq.json",
+  "files": {
+   "golden/seq.think-preserve.canonical.py-hf.txt": "enable_thinking=true, preserve_thinking=true",
+   "golden/seq.think-nopreserve.canonical.py-hf.txt": "enable_thinking=true, preserve_thinking=false"
+  },
+  "check": "the same renderer gives the 26B A4B's two goldens byte for byte, and the 31B's equal them"
  }
 }

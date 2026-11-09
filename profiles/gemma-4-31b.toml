@@ -2,8 +2,9 @@
 # KV heads of 256, and 10 global ones with 4 KV heads of 512, K=V), with the 26B A4B's tool-call
 # DSL (<|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>), tokens, template and sampling.
 # Sources: the model card, config.json and generation_config.json of google/gemma-4-31B-it at
-# 842da379 (2026-07-20); the owner's GGUF gemma-4-31B_q4_0-it.gguf, whose vocabulary and
-# embedded template are the 26B A4B's byte for byte; docs/research/2026-10-29/gemma4.md.
+# 842da379 (2026-07-20); the owner's GGUF, Google's QAT Q4_0 (google/gemma-4-31B-it-qat-q4_0-gguf
+# at 59dde245, gemma-4-31B_q4_0-it.gguf), whose vocabulary and embedded template are the 26B
+# A4B's byte for byte; docs/research/2026-10-29/gemma4.md.
 id = "gemma-4-31b"
 family = "gemma4"
 display_name = "Gemma 4 31B"
@@ -56,7 +57,7 @@ file_sha256 = "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
 # llama-server defaults to true/true.
 # sha256 of the served form, as /props reports it (template.rs: served_form)
 known = [
-    { sha256 = "6a1015c47ccfcfa67c3b772385bccee357a4d37c3cda37bd202e9047f391ab82", verdict = "canonical", note = "google/gemma-4-31B-it, 2026-07-15; gemma-4-31B_q4_0-it.gguf embeds it" },
+    { sha256 = "6a1015c47ccfcfa67c3b772385bccee357a4d37c3cda37bd202e9047f391ab82", verdict = "canonical", note = "google/gemma-4-31B-it, 2026-07-15; Google's QAT Q4_0 GGUF embeds it" },
     { sha256 = "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b", verdict = "ok", note = "Unsloth's Gemma 4 GGUF template (26B A4B, file 845f1ee4); renders byte-identically to canonical under llama.cpp" },
 ]
 
