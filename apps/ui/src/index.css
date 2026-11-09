@@ -183,6 +183,30 @@ body {
   }
 }
 
+/* a circle that turns while the model writes a call */
+.spinner {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  border: 2px solid color-mix(in oklab, var(--spark) 22%, transparent);
+  border-top-color: var(--spark);
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* a window on what the model writes now, its reasoning or a call's code: the newest line
+   at its foot, the oldest fading out at its head */
+.live-window {
+  mask-image: linear-gradient(to bottom, transparent, black 2.5rem);
+}
+
 /* a subagent at work */
 .lane-live {
   border-color: color-mix(in oklab, var(--spark) 45%, var(--border));

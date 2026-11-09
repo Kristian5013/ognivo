@@ -45,6 +45,12 @@ checked against.
   run on their own only while nothing the agent changed waits for your review; network
   access and everything else asks. An answer is `y`, `n` (with what to do instead) or `a`
   (that exact action again, for the rest of the session).
+- **Modes**, switched at any time, a running turn too (Shift+Tab in the window, `/mode` in
+  `chat`): *Manual* asks before every edit and every command that does more than read;
+  *Edit automatically*, the default, is the above; *Plan* reads and plans, refuses every
+  change without asking, and offers to carry the plan out; *Auto* asks for nothing but
+  edits of protected files or outside the project, and what your rules ask for. Rules hold
+  in every mode.
 - **Rules** in Claude Code's syntax, deny > ask > allow: `~/.ognivo/config.toml`
   (`[permissions]`) and `~/.claude/settings.json`, the project's `.ognivo/config.toml`
   and `.claude/settings*.json`. A project's allow rules count once you trust them: a
@@ -146,6 +152,8 @@ socket only that user can open (`$XDG_RUNTIME_DIR/ognivo/core.sock`), and the wi
 starts it when none runs. The window lists the sessions of every project and starts new
 ones (server, model, reasoning level, context, Native path), streams turns, asks in the
 thread what needs approval, shows subagents as lanes, reviews and reverts what changed,
+shows the model's reasoning and each call's code in a window as the model writes them,
+switches a thread's mode,
 and shows a thread's MCP servers with their tools and prompts, signs in to remote ones
 and edits the files that configure them. A turn goes on when the window closes; the core
 quits a minute after its last client and turn.

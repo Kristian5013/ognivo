@@ -146,7 +146,11 @@ impl Hub {
         let clients = lock(&self.clients);
         for (thread, kind) in out {
             log.seq += 1;
-            let keep = !matches!(kind, p::EventKind::ItemDelta { .. });
+            // what streams is kept in the items it makes up
+            let keep = !matches!(
+                kind,
+                p::EventKind::ItemDelta { .. } | p::EventKind::CallDraft { .. }
+            );
             let event = p::Event {
                 seq: log.seq,
                 thread,

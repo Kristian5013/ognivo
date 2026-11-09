@@ -129,6 +129,11 @@ impl Projector {
         )]
     }
 
+    /// The user switched the thread's mode.
+    pub fn mode_changed(&self, mode: p::Mode) -> Out {
+        vec![(self.thread, p::EventKind::ModeChanged { mode })]
+    }
+
     /// The thread's start.
     pub fn started(&self) -> Out {
         vec![(
@@ -155,6 +160,24 @@ impl Projector {
             }
             AgentEvent::Reasoning { text } => self.stream(&mut out, text, true),
             AgentEvent::Text { text } => self.stream(&mut out, text, false),
+            // the generation that writes it is the next to end
+            AgentEvent::CallDraft {
+                index,
+                tool,
+                field,
+                text,
+            } => self.emit(
+                &mut out,
+                p::EventKind::CallDraft {
+                    draft: p::CallDraft {
+                        generation: self.generations + 1,
+                        index,
+                        tool,
+                        field,
+                        text,
+                    },
+                },
+            ),
             AgentEvent::Restarted { .. } => {
                 self.close(&mut out);
                 self.whole(
@@ -769,6 +792,15 @@ mod tests {
     }
 
     /// A turn with every kind of item.
+    fn draft(field: Option<&str>, text: &str) -> AgentEvent {
+        AgentEvent::CallDraft {
+            index: 0,
+            tool: Some("Edit".into()),
+            field: field.map(str::to_owned),
+            text: text.into(),
+        }
+    }
+
     fn turn() -> Vec<AgentEvent> {
         let brief = "Task from the main agent: Check the README\n\nGoal: What greeting does it show?\n\nThis is a read task: change no file, with commands neither.";
         vec![
@@ -805,6 +837,12 @@ mod tests {
                 "read",
                 "[read: main.rs — 3 of 3 lines, 33 bytes, ~10 tokens]\n1│fn main() {\n2│    println!(\"hi\");\n3│}",
             ),
+            // the edit as the model writes it, before its generation ends
+            draft(None, ""),
+            draft(Some("path"), "main.rs"),
+            draft(Some("old"), "\"hi\""),
+            draft(Some("new"), "\"hel"),
+            draft(Some("new"), "lo\""),
             generation("step", "calls", 2, Vec::new()),
             started(
                 "c2",
@@ -981,7 +1019,9 @@ mod tests {
     /// The stream as the clients get it, numbered, without the calls' times.
     fn stream(events: Vec<AgentEvent>) -> Vec<p::Event> {
         let mut projector = Projector::new(p::ThreadId(11), info());
+        // as the core opens a thread
         let mut out = projector.started();
+        out.extend(projector.mode_changed(p::Mode::EditAutomatically));
         for e in events {
             out.extend(projector.event(e));
         }

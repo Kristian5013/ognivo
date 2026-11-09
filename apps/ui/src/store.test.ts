@@ -74,6 +74,56 @@ describe("ThreadStore", () => {
   });
 });
 
+describe("calls being written", () => {
+  const info = { id: "t", title: "", project: "", profile: "", model: "", server: "", system: "", conversations: {}, tools: [] };
+  const draft = (generation: number, field: string | undefined, text: string, index = 0) =>
+    ({ type: "draft", generation, index, tool: "Write", field, text }) as const;
+  const generation = (index: number, outcome: string) =>
+    ({
+      type: "generation",
+      generation: { index, outcome, prompt: 0, cached: 0, completion: 0, promptMs: 0, generationMs: 0 },
+    }) as const;
+
+  it("end the reasoning before them, and grow field by field", () => {
+    const store = new ThreadStore(info, { schedule: (f) => f() });
+    store.apply({ type: "turn_started", index: 1, user: "go" });
+    store.apply({ type: "item_started", item: { kind: "reasoning", id: "r", generation: 1, text: "Hm." } });
+    expect(store.row(1)).toMatchObject({ live: true });
+    store.apply(draft(1, undefined, ""));
+    store.apply(draft(1, "path", "a.rs"));
+    store.apply(draft(1, "content", "fn a"));
+    store.apply(draft(1, "content", "() {}"));
+    expect(store.row(1)).toMatchObject({ kind: "item", live: false });
+    expect(store.row(2)).toMatchObject({
+      kind: "draft",
+      state: "writing",
+      draft: { fields: [["path", "a.rs"], ["content", "fn a() {}"]] },
+    });
+    // a second call of the generation has a row of its own
+    store.apply(draft(1, "path", "b.rs", 1));
+    expect(store.length).toBe(4);
+  });
+
+  it("that come to nothing stay as not run", () => {
+    const store = new ThreadStore(info, { schedule: (f) => f() });
+    store.apply({ type: "turn_started", index: 1, user: "go" });
+    store.apply(draft(1, "path", "a.rs"));
+    store.apply(generation(1, "malformed"));
+    expect(store.row(1)).toMatchObject({ kind: "draft", state: "void" });
+    // a step the server's format check restarted: what it wrote is void, the next try new
+    store.apply(draft(2, "path", "b.rs"));
+    store.apply({ type: "item_started", item: { kind: "void", id: "v", generation: 2, why: "restarted", calls: [] } });
+    expect(store.row(2)).toMatchObject({ kind: "draft", state: "void" });
+    store.apply(draft(2, "path", "c.rs"));
+    expect(store.row(4)).toMatchObject({ kind: "draft", state: "writing", draft: { fields: [["path", "c.rs"]] } });
+    // and what waits to run when the turn ends never runs
+    store.apply(generation(2, "calls"));
+    expect(store.row(4)).toMatchObject({ state: "written" });
+    store.apply({ type: "turn_completed", index: 1, end: "interrupted" });
+    expect(store.row(4)).toMatchObject({ state: "void" });
+  });
+});
+
 describe("the side panels' indexes", () => {
   it("know the files a session changed and the calls that waited for an approval", () => {
     const [, thread] = threads.find(([f]) => f === "gpt-oss.edit-refused.json")!;

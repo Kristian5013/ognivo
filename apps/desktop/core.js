@@ -40,6 +40,7 @@ const METHODS = new Set([
   "thread/clear",
   "thread/close",
   "thread/delete",
+  "thread/mode",
   "turn/start",
   "turn/interrupt",
   "turn/answer_now",
@@ -124,6 +125,24 @@ function allowed(data) {
   return typeof m.method === "string" ? METHODS.has(m.method) : "result" in m || "error" in m;
 }
 
+/** The answer to a call of the page's that does not go to the core: at once, so that the
+ * call does not wait for ever. */
+function refusal(data) {
+  try {
+    const m = JSON.parse(data);
+    if (m && typeof m === "object" && "id" in m && typeof m.method === "string") {
+      return JSON.stringify({
+        jsonrpc: "2.0",
+        id: m.id,
+        error: { code: -32601, message: `the window does not let the page call ${m.method}` },
+      });
+    }
+  } catch {
+    // not JSON: nothing to answer
+  }
+  return undefined;
+}
+
 /** Joins the page's `port` to the core, starting it if it must. */
 export async function bridge(port) {
   let socket;
@@ -154,7 +173,12 @@ export async function bridge(port) {
     port.close();
   });
   port.on("message", ({ data }) => {
-    if (allowed(data)) socket.write(`${data}\n`);
+    if (allowed(data)) {
+      socket.write(`${data}\n`);
+      return;
+    }
+    const answer = refusal(data);
+    if (answer) port.postMessage(answer);
   });
   port.on("close", () => socket.destroy());
   port.start();

@@ -23,7 +23,7 @@ answer: string | null,
 /**
  * What the facts of the turn say of the answer, e.g. `NOT verified: …`.
  */
-verification: string | null, });
+verification: string | null, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, });
 
 export type EventKind = { "event": "thread_started", info: ThreadInfo, } | { "event": "turn_started", turn: TurnId, 
 /**
@@ -41,7 +41,7 @@ answer: string | null,
 /**
  * What the facts of the turn say of the answer, e.g. `NOT verified: …`.
  */
-verification: string | null, };
+verification: string | null, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, };
 
 export type ThreadId = number;
 
@@ -290,6 +290,29 @@ export type Delta = { "type": "text", text: string, };
 
 export type TurnEnd = "answer" | "step_limit" | "stuck" | "time_limit" | "error" | "interrupted";
 
+export type Mode = "manual" | "edit_automatically" | "plan" | "auto";
+
+export type CallDraft = { 
+/**
+ * The generation that writes it, by its number in the thread, as its items have it.
+ */
+generation: number, 
+/**
+ * The call's place among the generation's calls, from 0: its items start in this
+ * order.
+ */
+index: number, 
+/**
+ * The tool by Claude Code's name (`Write`, `Edit`, `ApplyPatch`, `Bash`, ...), or by
+ * the model's for one ognivo does not know; `None` until the model named it.
+ */
+tool: string | null, 
+/**
+ * The argument `text` adds to, by ognivo's name for it (`path`, `content`, `old`,
+ * `new`, `patch`, `command`, ...); `None` with the first event of a call.
+ */
+field: string | null, text: string, };
+
 export type Initialize = { 
 /**
  * The client and its version, e.g. `ognivo-desktop 0.0.1`.
@@ -354,7 +377,11 @@ answer_now: boolean,
 /**
  * Open: the context it works with.
  */
-context: Context | null, };
+context: Context | null, 
+/**
+ * Open: its mode.
+ */
+mode: Mode | null, };
 
 export type Context = { 
 /**
@@ -413,7 +440,11 @@ subagents: boolean,
 /**
  * Tokens of working context; the server's window when `None`.
  */
-context: number | null, };
+context: number | null, 
+/**
+ * How far its agent goes without the user; `edit_automatically` when `None`.
+ */
+mode: Mode | null, };
 
 export type ResumeThread = { thread: ThreadId, 
 /**
@@ -423,7 +454,11 @@ server: Server | null, native: boolean, priors: boolean, subagents: boolean,
 /**
  * Tokens of working context; the server's window when `None`.
  */
-context: number | null, };
+context: number | null, 
+/**
+ * How far its agent goes without the user; `edit_automatically` when `None`.
+ */
+mode: Mode | null, };
 
 export type Opened = { thread: ThreadId, info: ThreadInfo, 
 /**
@@ -434,7 +469,9 @@ notes: Array<string>,
 /**
  * On the Native path: `turn/answer_now` ends the model's reasoning.
  */
-answer_now: boolean, context: Context, };
+answer_now: boolean, context: Context, mode: Mode, };
+
+export type SetMode = { thread: ThreadId, mode: Mode, };
 
 export type ThreadRef = { thread: ThreadId, };
 
@@ -729,6 +766,7 @@ export type Methods = {
   "turn/interrupt": { params: ThreadRef; result: Done };
   "turn/answer_now": { params: ThreadRef; result: Done };
   "turn/edit": { params: EditTurn; result: Done };
+  "thread/mode": { params: SetMode; result: Done };
   "changes/list": { params: ThreadRef; result: Changes };
   "changes/accept": { params: Accept; result: Accepted };
   "changes/revert": { params: Revert; result: Reverted };

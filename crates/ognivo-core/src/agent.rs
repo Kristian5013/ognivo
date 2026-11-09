@@ -47,7 +47,7 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use crate::agents::Templates;
-use crate::approval::{self, Decision, FileEdit, WorkspaceState};
+use crate::approval::{self, Decision, FileEdit, Mode, ModeSwitch, WorkspaceState};
 use crate::compact;
 use crate::hooks::{self, Event, Hooks, Permission};
 use crate::instructions::{Given, Instructions, Load, Skipped, UserInstructions};
@@ -247,6 +247,19 @@ pub enum AgentEvent {
         /// The calls of a generation that ran nothing, as the model wrote them.
         rejected: Vec<ToolCall>,
     },
+    /// More of a call the model is writing, for display only: `text` adds to `field` of
+    /// the running generation's call `index`. Not kept: the call starts as
+    /// [`AgentEvent::ToolStarted`] once the generation ended, if it runs at all.
+    CallDraft {
+        index: u32,
+        /// By Claude Code's name for the tool (`Write`, `Edit`, ...), or the model's for one
+        /// ognivo does not know; `None` until the model named it.
+        tool: Option<String>,
+        /// By ognivo's name for the argument (`path`, `content`, `new`, ...), or the
+        /// model's; `None` with the tool alone.
+        field: Option<String>,
+        text: String,
+    },
     /// A question to the user (`allowed` is `None`), then the answer.
     Approval {
         tool: String,
@@ -370,6 +383,9 @@ pub struct AgentOptions {
     pub agents: Templates,
     /// A subagent of a template: the only tools it has.
     pub only: Option<Vec<ToolId>>,
+    /// The thread's mode, which the user may switch while a turn runs: a subagent holds
+    /// its agent's.
+    pub mode: ModeSwitch,
 }
 
 /// The time limit of the running turn.
@@ -407,6 +423,73 @@ impl Clock {
         } else {
             None
         }
+    }
+}
+
+/// The calls of the running generation as the model writes them: each one's tool, and its
+/// arguments read as far as they came ([`AgentEvent::CallDraft`]).
+#[derive(Debug, Default)]
+struct Drafts {
+    calls: Vec<Draft>,
+}
+
+#[derive(Debug, Default)]
+struct Draft {
+    /// The tool by the model's name, once it came.
+    name: Option<String>,
+    shown: bool,
+    arguments: ognivo_models::draft::Arguments,
+}
+
+impl Drafts {
+    /// What one fragment of call `index` shows, by ognivo's names for its tool and
+    /// arguments where it has them.
+    fn push(
+        &mut self,
+        family: Family,
+        layout: Layout,
+        index: u32,
+        name: Option<String>,
+        text: &str,
+    ) -> Vec<AgentEvent> {
+        let at = index as usize;
+        if self.calls.len() <= at {
+            self.calls.resize_with(at + 1, Draft::default);
+        }
+        let draft = &mut self.calls[at];
+        if draft.name.is_none() {
+            draft.name = name.filter(|n| !n.is_empty());
+        }
+        let model = draft.name.clone();
+        let tool = model.as_deref().map(|n| {
+            projection::id_of(family, layout, n)
+                .map_or_else(|| n.to_owned(), |id| id.canonical_name())
+        });
+        let mut out = Vec::new();
+        if !draft.shown {
+            draft.shown = true;
+            out.push(AgentEvent::CallDraft {
+                index,
+                tool: tool.clone(),
+                field: None,
+                text: String::new(),
+            });
+        }
+        for piece in draft.arguments.push(text) {
+            let field = (!piece.name.is_empty()).then(|| {
+                model
+                    .as_deref()
+                    .and_then(|m| projection::field_of(family, layout, m, &piece.name))
+                    .map_or_else(|| piece.name.clone(), str::to_owned)
+            });
+            out.push(AgentEvent::CallDraft {
+                index,
+                tool: tool.clone(),
+                field,
+                text: piece.text,
+            });
+        }
+        out
     }
 }
 
@@ -493,6 +576,10 @@ pub struct Agent {
     session: Option<Session>,
     /// A turn is running: it began and has not ended.
     in_turn: bool,
+    /// Whether the model was last told that it plans ([`Mode::Plan`]).
+    told_plan: bool,
+    /// The calls the running generation writes, as far as they came.
+    drafts: Drafts,
     pub stats: Stats,
 }
 
@@ -509,6 +596,12 @@ impl std::fmt::Debug for Agent {
 
 /// How many steps of a turn are left when the model is told to finish.
 const STEPS_LEFT_NOTE: u32 = 2;
+
+/// What the model reads at a turn's start in plan mode, and when the user switches to it.
+const PLAN_NOTE: &str = "[ognivo] Plan mode: the user wants a plan before any change. Read and search as much as you need, but change no file and run no command that changes anything: such calls are refused. End with the plan as your final answer: what you found, the steps, the files and what changes in each, and how to check the result.";
+/// What it reads when the user leaves plan mode.
+const PLAN_OVER_NOTE: &str =
+    "[ognivo] Plan mode is over: you may change files and run commands again.";
 
 /// How long an MCP tool may take; a turn's time limit cuts it shorter.
 const MCP_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1203,6 +1296,8 @@ impl Agent {
             idle_compactions: 0,
             session: None,
             in_turn: false,
+            told_plan: false,
+            drafts: Drafts::default(),
             stats: Stats::default(),
             opts,
         }
@@ -1638,6 +1733,7 @@ impl Agent {
         let started = Instant::now();
         let mut events = self.driver.step(req);
         let mut finished = None;
+        self.drafts = Drafts::default();
         loop {
             let next = match deadline {
                 Some(d) => match tokio::time::timeout_at(d, events.next()).await {
@@ -1650,9 +1746,23 @@ impl Agent {
             let ev = match ev? {
                 DriverEvent::Reasoning(text) => AgentEvent::Reasoning { text },
                 DriverEvent::Text(text) => AgentEvent::Text { text },
-                DriverEvent::ToolCallDelta { .. } => continue,
+                DriverEvent::ToolCallDelta {
+                    index,
+                    name,
+                    arguments,
+                } => {
+                    if shown {
+                        let (family, layout) = (self.family, self.opts.layout);
+                        // shown, not kept: the session keeps the call once it runs
+                        for e in self.drafts.push(family, layout, index, name, &arguments) {
+                            on(e);
+                        }
+                    }
+                    continue;
+                }
                 DriverEvent::Restarted { reason, .. } => {
                     self.stats.restarts += 1;
+                    self.drafts = Drafts::default();
                     AgentEvent::Restarted { reason }
                 }
                 DriverEvent::Finished(f) => {
@@ -2008,6 +2118,15 @@ impl Agent {
         let mut unusable = 0;
         let mut stop_continues = 0;
         for step in 0..self.opts.max_steps {
+            if let Some(note) = self.mode_note(step == 0) {
+                self.emit(
+                    on,
+                    AgentEvent::Notice {
+                        text: note.to_owned(),
+                    },
+                );
+                self.append_to_last(note);
+            }
             if let Some(note) = self.clock.as_mut().and_then(Clock::note) {
                 self.emit(on, AgentEvent::Notice { text: note.clone() });
                 self.append_to_last(&note);
@@ -2426,7 +2545,10 @@ impl Agent {
                 limit,
             } => {
                 let p = files::resolve(&self.cwd, &path);
-                let ruling = self.opts.rules.read(&p, approval::decide_read(&p, &root));
+                let ruling = self
+                    .opts
+                    .rules
+                    .read(&p, self.mode().read(approval::decide_read(&p, &root)));
                 if let Some(refusal) = self
                     .permit(
                         tool,
@@ -2460,7 +2582,7 @@ impl Agent {
                 let ruling = self
                     .opts
                     .rules
-                    .read(&base, approval::decide_read(&base, &root));
+                    .read(&base, self.mode().read(approval::decide_read(&base, &root)));
                 if let Some(refusal) = self
                     .permit(
                         tool,
@@ -2483,7 +2605,7 @@ impl Agent {
                 let ruling = self
                     .opts
                     .rules
-                    .read(&base, approval::decide_read(&base, &root));
+                    .read(&base, self.mode().read(approval::decide_read(&base, &root)));
                 if let Some(refusal) = self
                     .permit(
                         tool,
@@ -2508,6 +2630,9 @@ impl Agent {
                 replace_all,
             } => {
                 let p = files::resolve(&self.cwd, &path);
+                if self.mode() == Mode::Plan {
+                    return self.planning(tool, &p.display().to_string(), on);
+                }
                 match files::plan_edit(
                     &Target::new(p.clone(), &root),
                     &old,
@@ -2523,21 +2648,21 @@ impl Agent {
                         if let Some(refusal) = self.outside_task(&[&p]) {
                             return refusal;
                         }
-                        let decision = approval::decide_edit(
+                        let (decision, reason) = self.edit_decision(approval::decide_edit(
                             &[FileEdit {
                                 path: &change.path,
                                 before: change.before.as_deref(),
                                 after: Some(&change.after),
                             }],
                             &root,
-                        );
+                        ));
                         let ruling = self.opts.rules.edit(&change.path, decision);
                         if let Some(refusal) = self
                             .permit(
                                 tool,
                                 ruling,
                                 &p.display().to_string(),
-                                "a protected path or outside the project",
+                                reason,
                                 Vec::new(),
                                 on,
                             )
@@ -2557,6 +2682,9 @@ impl Agent {
             }
             Call::Write { path, content } => {
                 let p = files::resolve(&self.cwd, &path);
+                if self.mode() == Mode::Plan {
+                    return self.planning(tool, &p.display().to_string(), on);
+                }
                 match files::plan_write(
                     &Target::new(p.clone(), &root),
                     &content,
@@ -2566,21 +2694,21 @@ impl Agent {
                         if let Some(refusal) = self.outside_task(&[&p]) {
                             return refusal;
                         }
-                        let decision = approval::decide_edit(
+                        let (decision, reason) = self.edit_decision(approval::decide_edit(
                             &[FileEdit {
                                 path: &change.path,
                                 before: change.before.as_deref(),
                                 after: Some(&change.after),
                             }],
                             &root,
-                        );
+                        ));
                         let ruling = self.opts.rules.edit(&change.path, decision);
                         if let Some(refusal) = self
                             .permit(
                                 tool,
                                 ruling,
                                 &p.display().to_string(),
-                                "a protected path or outside the project",
+                                reason,
                                 Vec::new(),
                                 on,
                             )
@@ -2593,7 +2721,14 @@ impl Agent {
                     Err(e) => error_text(&e),
                 }
             }
-            Call::Delegate { tasks } => self.delegate(tasks, on).await,
+            Call::Delegate { tasks } => {
+                if self.mode() == Mode::Plan
+                    && let Some(t) = tasks.iter().find(|t| t.write)
+                {
+                    return self.planning(tool, &format!("the write task \"{}\"", t.title), on);
+                }
+                self.delegate(tasks, on).await
+            }
             Call::Skill { name, arguments } => {
                 self.load_skill(&name, arguments.as_deref().unwrap_or(""), on)
                     .await
@@ -2620,7 +2755,7 @@ impl Agent {
                     return format!("[error] the server {server} has no tool {name}");
                 };
                 let tool = tool.as_str();
-                let ruling = self.opts.rules.mcp(&server, &name);
+                let ruling = self.opts.rules.mcp(&server, &name, self.mode().mcp());
                 // the question is the tool's: allowed for the session, it runs with any
                 // arguments
                 let mut shown: String = arguments.chars().take(300).collect();
@@ -2652,6 +2787,9 @@ impl Agent {
                 }
             }
             Call::Patch { patch } => {
+                if self.mode() == Mode::Plan {
+                    return self.planning(tool, "the patch", on);
+                }
                 let seen = &self.seen;
                 let planned =
                     files::plan_patch(&self.cwd, &root, &patch, |p| seen.contains(p), style);
@@ -2676,7 +2814,7 @@ impl Agent {
                         after: Some(&c.after),
                     })
                     .collect();
-                let decision = approval::decide_edit(&edits, &root);
+                let (decision, reason) = self.edit_decision(approval::decide_edit(&edits, &root));
                 // the strictest ruling of the files the patch changes rules the patch
                 let mut ruling = Ruling::Allow;
                 for c in &changes {
@@ -2695,14 +2833,7 @@ impl Agent {
                     .collect::<Vec<_>>()
                     .join(", ");
                 if let Some(refusal) = self
-                    .permit(
-                        tool,
-                        ruling,
-                        &action,
-                        "a protected path or outside the project",
-                        Vec::new(),
-                        on,
-                    )
+                    .permit(tool, ruling, &action, reason, Vec::new(), on)
                     .await
                 {
                     return refusal;
@@ -2739,7 +2870,18 @@ impl Agent {
                 if let Err(e) = self.room() {
                     return e;
                 }
-                let decision = approval::decide(effect, self.workspace());
+                let policy = approval::decide(effect, self.workspace());
+                let Some(decision) = self.mode().command(effect, policy) else {
+                    if checks {
+                        self.ledger.refused(&command);
+                    }
+                    return self.planning(tool, &command, on);
+                };
+                let reason = if decision == Decision::Ask && policy == Decision::Allow {
+                    "manual mode: every command that does more than read asks"
+                } else {
+                    reason
+                };
                 let ruling = self
                     .opts
                     .rules
@@ -2897,8 +3039,71 @@ impl Agent {
     /// Whether a build or test could run now: silently, or after a question someone can
     /// answer.
     fn can_run_project_code(&self) -> bool {
-        approval::decide(Effect::ExecutesProjectCode, self.workspace()) == Decision::Allow
-            || self.approver.can_ask()
+        let policy = approval::decide(Effect::ExecutesProjectCode, self.workspace());
+        match self.mode().command(Effect::ExecutesProjectCode, policy) {
+            Some(Decision::Allow) => true,
+            Some(Decision::Ask) => self.approver.can_ask(),
+            None => false,
+        }
+    }
+
+    /// The thread's mode now: the user may have switched it since the last call.
+    pub fn mode(&self) -> Mode {
+        self.opts.mode.get()
+    }
+
+    /// The mode from the next call on, the subagents' too.
+    pub fn set_mode(&self, mode: Mode) {
+        self.opts.mode.set(mode);
+    }
+
+    /// An edit's decision in the thread's mode, and why it asks when it does.
+    fn edit_decision(&self, policy: Decision) -> (Decision, &'static str) {
+        match self.mode().edit(policy) {
+            Some(Decision::Ask) if policy == Decision::Allow => {
+                (Decision::Ask, "manual mode: every edit asks")
+            }
+            Some(decision) => (decision, "a protected path or outside the project"),
+            // the user switched to plan mode while the call was on its way
+            None => (
+                Decision::Ask,
+                "plan mode: nothing changes before the user has the plan",
+            ),
+        }
+    }
+
+    /// What the model is told when plan mode starts or ends: at a turn's first step while
+    /// it plans, and at the first step after the user switched.
+    fn mode_note(&mut self, first: bool) -> Option<&'static str> {
+        let planning = self.mode() == Mode::Plan;
+        let switched = planning != self.told_plan;
+        self.told_plan = planning;
+        match (planning, first || switched) {
+            (true, true) => Some(PLAN_NOTE),
+            (false, _) if switched => Some(PLAN_OVER_NOTE),
+            _ => None,
+        }
+    }
+
+    /// The refusal of a change in plan mode, as the model reads it.
+    fn planning(
+        &mut self,
+        tool: &str,
+        action: &str,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> String {
+        self.stats.refused += 1;
+        let text = format!(
+            "Plan mode: {action} would change something, and nothing changes before the user has the plan. Read and search only, then give the plan as your final answer."
+        );
+        self.emit(
+            on,
+            AgentEvent::Refused {
+                tool: tool.to_owned(),
+                reason: text.clone(),
+            },
+        );
+        format!("[refused] {text}")
     }
 
     /// What `tool_search` gives the model: the tools that fit `query`, declared as its
@@ -3146,7 +3351,7 @@ impl Agent {
                 Ok(args) => args,
                 Err(why) => return format!("[error] {why}"),
             };
-            let ruling = self.opts.rules.mcp(&p.server, &p.prompt);
+            let ruling = self.opts.rules.mcp(&p.server, &p.prompt, self.mode().mcp());
             let reason = format!(
                 "a prompt of an MCP server, whose arguments go to it: {}",
                 Value::Object(args.clone())
@@ -3227,7 +3432,12 @@ impl Agent {
                 cwd: root.clone(),
             };
             let effect = classify_command(&command, &ctx);
-            let decision = approval::decide(effect, self.workspace());
+            let policy = approval::decide(effect, self.workspace());
+            let Some(decision) = self.mode().command(effect, policy) else {
+                return Err(format!(
+                    "Shell command permission check failed for pattern \"{pattern}\": it does more than read, and this is plan mode"
+                ));
+            };
             let ruling = self.opts.rules.command(&command, &root, decision, |part| {
                 classify_command(part, &ctx) == Effect::ReadOnly
             });
@@ -3790,6 +4000,7 @@ mod tests {
             hooks: Arc::default(),
             agents: Templates::default(),
             only: None,
+            mode: Default::default(),
         }
     }
 
@@ -4859,6 +5070,248 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
             "fn a() -> u32 {\n    2\n}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_mode_reads_and_refuses_changes_without_a_question() {
+        let steps = vec![
+            calls(
+                &[("read", serde_json::json!({"path": "lib.rs"}))],
+                FinishReason::ToolCalls,
+            ),
+            edit_lib(),
+            calls(
+                &[("shell", serde_json::json!({"command": "touch made"}))],
+                FinishReason::ToolCalls,
+            ),
+            calls(
+                &[("shell", serde_json::json!({"command": "ls"}))],
+                FinishReason::ToolCalls,
+            ),
+            answer("The plan: change lib.rs."),
+        ];
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut r = agent_with(steps, WorkspaceState::CLEAN, Box::new(Asked(asked.clone())));
+        r.agent.set_mode(Mode::Plan);
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "The plan: change lib.rs.");
+        assert!(asked.lock().unwrap().is_empty());
+        let results = tool_results(&r.agent);
+        assert!(results[0].starts_with("[read: "), "{}", results[0]);
+        for refused in &results[1..3] {
+            assert!(refused.starts_with("[refused] Plan mode: "), "{refused}");
+        }
+        // what only reads runs
+        assert!(!results[3].starts_with("[refused]"), "{}", results[3]);
+        assert_eq!(r.agent.stats.refused, 2);
+        assert!(!r.root.join("made").exists());
+        assert_eq!(
+            std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    1\n}\n"
+        );
+        // the model was told with the user's message, and so was the user
+        let seen = r.seen.lock().unwrap();
+        let Some(ChatMessage::User(first)) = seen[0].messages.last() else {
+            panic!()
+        };
+        assert!(
+            first.starts_with("fix it\n\n[ognivo] Plan mode: "),
+            "{first}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Notice { text } if text == PLAN_NOTE))
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_mode_asks_for_each_change_and_auto_mode_only_for_protected_paths() {
+        let shell = |command: &str| {
+            calls(
+                &[("shell", serde_json::json!({"command": command}))],
+                FinishReason::ToolCalls,
+            )
+        };
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut manual = agent_with(
+            vec![edit_lib(), shell("cargo test"), answer("done")],
+            WorkspaceState::CLEAN,
+            Box::new(Asked(asked.clone())),
+        );
+        manual.agent.set_mode(Mode::Manual);
+        turn(&mut manual).await;
+        {
+            let asked = asked.lock().unwrap();
+            let reasons: Vec<&str> = asked.iter().map(|a| a.reason.as_str()).collect();
+            assert_eq!(
+                reasons,
+                [
+                    "manual mode: every edit asks",
+                    "manual mode: every command that does more than read asks"
+                ],
+                "{asked:?}"
+            );
+        }
+
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let write = calls(
+            &[(
+                "write",
+                serde_json::json!({"path": "Makefile", "content": "all:\n"}),
+            )],
+            FinishReason::ToolCalls,
+        );
+        let mut auto = agent_with(
+            vec![edit_lib(), shell("touch made"), write, answer("done")],
+            WorkspaceState::DIRTY,
+            Box::new(Asked(asked.clone())),
+        );
+        auto.agent.set_mode(Mode::Auto);
+        turn(&mut auto).await;
+        let asked = asked.lock().unwrap();
+        // the edit and the command went ahead; the Makefile, which makes programs run, asked
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(asked[0].action.ends_with("Makefile"), "{asked:?}");
+        assert!(auto.root.join("made").exists());
+        assert_eq!(
+            std::fs::read_to_string(auto.root.join("lib.rs")).unwrap(),
+            "fn a() -> u32 {\n    2\n}\n"
+        );
+        assert!(!auto.root.join("Makefile").exists());
+    }
+
+    /// A driver that switches the thread's mode when step `at` is asked for.
+    #[derive(Debug)]
+    struct Switching {
+        script: Script,
+        switch: ModeSwitch,
+        at: usize,
+        to: Mode,
+        steps: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelDriver for Switching {
+        fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
+            let n = self.steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == self.at {
+                self.switch.set(self.to);
+            }
+            self.script.step(req)
+        }
+    }
+
+    #[tokio::test]
+    async fn leaving_plan_mode_mid_turn_lets_the_next_call_change_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
+        let steps = vec![edit_lib(), edit_lib(), answer("done")]
+            .into_iter()
+            .map(Step::from)
+            .collect();
+        let (script, seen) = played(steps);
+        let opts = options(&root, WorkspaceState::CLEAN, None);
+        opts.mode.set(Mode::Plan);
+        let driver = Switching {
+            script,
+            switch: opts.mode.clone(),
+            at: 1,
+            to: Mode::EditAutomatically,
+            steps: Default::default(),
+        };
+        let mut agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        agent.turn("fix it", &mut |_| {}).await.unwrap();
+        let results = tool_results(&agent);
+        assert!(
+            results[0].starts_with("[refused] Plan mode: "),
+            "{results:?}"
+        );
+        assert!(results[1].starts_with("[edit: applied"), "{results:?}");
+        // the step after the switch hears of it
+        let seen = seen.lock().unwrap();
+        let Some(ChatMessage::Tool { content, .. }) = seen[2].messages.last() else {
+            panic!("{:?}", seen[2].messages.last())
+        };
+        assert!(content.ends_with(PLAN_OVER_NOTE), "{content}");
+    }
+
+    /// A driver whose one step writes a call in fragments, then has it whole.
+    #[derive(Debug)]
+    struct Writing(Mutex<Vec<Vec<DriverEvent>>>);
+
+    impl ModelDriver for Writing {
+        fn step(&self, _: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
+            let events = self.0.lock().unwrap().remove(0);
+            stream::iter(events.into_iter().map(Ok)).boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_shows_as_the_model_writes_it_by_ognivos_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let whole = r#"{"file": "a.rs", "text": "fn a() {}\n"}"#;
+        let fragment = |name: Option<&str>, arguments: &str| DriverEvent::ToolCallDelta {
+            index: 0,
+            name: name.map(str::to_owned),
+            arguments: arguments.into(),
+        };
+        let finished = |c: ChatCompletion| match Step::from(c) {
+            Step::Done(f) => DriverEvent::Finished(f),
+            Step::Hang => unreachable!(),
+        };
+        let driver = Writing(Mutex::new(vec![
+            vec![
+                fragment(Some("write"), ""),
+                fragment(None, &whole[..31]),
+                fragment(None, &whole[31..]),
+                finished(calls(
+                    &[("write", serde_json::from_str(whole).unwrap())],
+                    FinishReason::ToolCalls,
+                )),
+            ],
+            vec![finished(answer("done"))],
+        ]));
+        let mut agent = Agent::new(
+            Box::new(driver),
+            Family::Gemma4,
+            Box::new(NoUser),
+            options(&root, WorkspaceState::CLEAN, None),
+        );
+        let mut events = Vec::new();
+        agent
+            .turn("make it", &mut |e| events.push(e))
+            .await
+            .unwrap();
+        let drafts: Vec<(u32, Option<&str>, Option<&str>, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::CallDraft {
+                    index,
+                    tool,
+                    field,
+                    text,
+                } => Some((*index, tool.as_deref(), field.as_deref(), text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            drafts,
+            [
+                (0, Some("Write"), None, ""),
+                (0, Some("Write"), Some("path"), "a.rs"),
+                (0, Some("Write"), Some("content"), "fn a("),
+                (0, Some("Write"), Some("content"), ") {}\n"),
+            ]
+        );
+        // and then it ran, as it always would
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.rs")).unwrap(),
+            "fn a() {}\n"
         );
     }
 

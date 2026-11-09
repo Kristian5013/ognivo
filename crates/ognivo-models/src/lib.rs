@@ -26,6 +26,7 @@
 
 pub mod caps;
 pub mod doctor;
+pub mod draft;
 pub mod driver;
 pub mod engine;
 pub mod family;

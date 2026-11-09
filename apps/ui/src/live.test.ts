@@ -81,6 +81,38 @@ describe("the core's stream", () => {
     expect(s.row(5)).toMatchObject({ kind: "rewound", from: 2, to: 2 });
   });
 
+  it("shows a call as the model writes it, and gives its row to the call's item", () => {
+    const s = new ThreadStore(
+      { id: "11", title: "", project: "", profile: "", model: "", server: "", system: "", conversations: {}, tools: [] },
+      { schedule: (flush) => flush() },
+    );
+    const own = stream.filter((e) => e.thread === 11);
+    const at = (pred: (e: Event) => boolean) => own.findIndex(pred);
+    const play = (from: number, to: number) => {
+      for (const e of own.slice(from, to)) for (const l of toLive(e)) s.apply(l);
+    };
+    const drafted = at((e) => e.event === "call_draft");
+    const ended = at((e) => e.event === "generation" && e.generation.index === 2);
+    const edit = at((e) => e.event === "item_started" && e.item.kind === "tool_call" && e.item.tool === "edit");
+    play(0, ended);
+    const row = s.length - 1;
+    expect(s.row(row)).toMatchObject({
+      kind: "draft",
+      state: "writing",
+      draft: { generation: 2, index: 0, tool: "Edit", fields: [["path", "main.rs"], ["old", '"hi"'], ["new", '"hello"']] },
+    });
+    const key = s.key(row);
+    play(ended, ended + 1);
+    expect(s.row(row)).toMatchObject({ kind: "draft", state: "written" });
+    play(ended + 1, edit + 1);
+    // the edit's item in the draft's place, under its key
+    expect(s.row(row)).toMatchObject({ kind: "item", item: { kind: "tool", call: { name: "Edit" } } });
+    expect(s.key(row)).toBe(key);
+    play(edit + 1, own.length);
+    expect(rows(s).filter((r) => r.kind === "draft")).toEqual([]);
+    expect(drafted).toBeLessThan(ended);
+  });
+
   it("gives a subagent a thread of its own", () => {
     const sub = stream.find((e) => e.event === "thread_started" && e.info.kind === "subagent");
     expect(sub?.event === "thread_started" && sub.info.parent).toMatchObject({ thread: 11 });

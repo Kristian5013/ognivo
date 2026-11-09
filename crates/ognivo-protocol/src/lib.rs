@@ -92,6 +92,52 @@ pub enum EventKind {
         /// What the facts of the turn say of the answer, e.g. `NOT verified: …`.
         verification: Option<String>,
     },
+    /// The user switched the thread's mode: it holds from its agent's next call on, its
+    /// subagents' too.
+    ModeChanged {
+        mode: Mode,
+    },
+    /// More of a call the model is writing, for display while it writes it. Not kept, as
+    /// deltas are not: the call's item starts once the generation ended, or a `void` item
+    /// says why nothing ran.
+    CallDraft {
+        draft: CallDraft,
+    },
+}
+
+/// How far a thread's agent goes without the user (docs/architecture.md §8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// Every edit, and every command that does more than read, asks first.
+    Manual,
+    /// The agent's edits inside the project apply at once and are reviewed in Changes;
+    /// commands ask as the policy says.
+    #[default]
+    EditAutomatically,
+    /// The agent reads and plans, and changes nothing: edits, and commands that do more
+    /// than read, are refused.
+    Plan,
+    /// What would ask goes ahead, except edits of protected paths and outside the project
+    /// and what a rule asks for or denies.
+    Auto,
+}
+
+/// What a call the model is writing adds ([`EventKind::CallDraft`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct CallDraft {
+    /// The generation that writes it, by its number in the thread, as its items have it.
+    pub generation: u32,
+    /// The call's place among the generation's calls, from 0: its items start in this
+    /// order.
+    pub index: u32,
+    /// The tool by Claude Code's name (`Write`, `Edit`, `ApplyPatch`, `Bash`, ...), or by
+    /// the model's for one ognivo does not know; `None` until the model named it.
+    pub tool: Option<String>,
+    /// The argument `text` adds to, by ognivo's name for it (`path`, `content`, `old`,
+    /// `new`, `patch`, `command`, ...); `None` with the first event of a call.
+    pub field: Option<String>,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

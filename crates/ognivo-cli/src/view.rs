@@ -79,6 +79,8 @@ impl View {
         }
         self.end_thinking();
         match e {
+            // a call shows once it runs
+            AgentEvent::CallDraft { .. } => {}
             AgentEvent::Text { text } => self.screen.write(&printable(&text), Paint::Plain),
             AgentEvent::ToolStarted {
                 tool,

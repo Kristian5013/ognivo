@@ -2,7 +2,9 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 
 import { body, header, summary } from "../format.ts";
 import type { ToolItem } from "../model.ts";
+import type { Draft, DraftState } from "../store.ts";
 import { EditDiff } from "./diff.tsx";
+import { Follow } from "./follow.tsx";
 
 function Status({ item }: { item: ToolItem }) {
   const r = item.result;
@@ -97,5 +99,121 @@ export function ToolCard({
         {open && <Body item={item} />}
       </Collapsible.Content>
     </Collapsible.Root>
+  );
+}
+
+/** How a call's tool is labelled on its line. */
+function label(tool: string): string {
+  if (tool === "ApplyPatch") return "Patch";
+  if (tool === "ToolSearch") return "Find";
+  if (tool.startsWith("mcp__") || tool === "mcp_call") return "MCP";
+  return tool;
+}
+
+/** A line of a call being written, with how it reads: added, removed, or a patch's own. */
+interface Line {
+  text: string;
+  tone?: "add" | "del" | "dim";
+}
+
+/** Lines shown of a long draft while it comes. */
+const DRAFT_LINES = 400;
+
+function lines(text: string, tone?: Line["tone"], mark = ""): Line[] {
+  return text
+    .replace(/\n$/, "")
+    .split("\n")
+    .map((t) => ({ text: `${mark}${t}`, tone }));
+}
+
+/** What a call being written shows below its line: the code it writes, the text it
+ * replaces and the text it puts in, the patch, the command. */
+function draftLines(d: Draft): Line[] {
+  const f = (name: string) => d.fields.find(([n]) => n === name)?.[1];
+  switch (d.tool) {
+    case "Write":
+      return lines(f("content") ?? "");
+    case "Edit":
+      return [...lines(f("old") ?? "", "del", "- "), ...lines(f("new") ?? "", "add", "+ ")].filter(
+        (l) => l.text !== "- " && l.text !== "+ ",
+      );
+    case "ApplyPatch":
+      return lines(f("patch") ?? "").map((l) => ({
+        ...l,
+        tone: l.text.startsWith("+")
+          ? "add"
+          : l.text.startsWith("-")
+            ? "del"
+            : l.text.startsWith("***") || l.text.startsWith("@@")
+              ? "dim"
+              : undefined,
+      }));
+    case "Bash": {
+      const command = f("command") ?? f("argv");
+      return command ? lines(command, undefined, "$ ") : [];
+    }
+    case "Read":
+    case "Grep":
+    case "Glob":
+      return [];
+    default:
+      return d.fields.filter(([n]) => n !== "path").map(([n, v]) => ({ text: `${n}: ${v}` }));
+  }
+}
+
+/** What the call works on, on its line: its file, its pattern, its command. */
+function draftSummary(d: Draft): string {
+  const f = (name: string) => d.fields.find(([n]) => n === name)?.[1];
+  const patched = f("patch")?.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/m)?.[1];
+  return (f("path") ?? patched ?? f("pattern") ?? f("query") ?? f("command") ?? f("argv") ?? "").split("\n")[0]!;
+}
+
+const TONE: Record<NonNullable<Line["tone"]>, string> = {
+  add: "text-ok",
+  del: "text-err",
+  dim: "text-muted-foreground",
+};
+
+/** A call the model is writing: its tool and file on a line with a circle that turns,
+ * and the code below as it comes. Its item takes the row once the generation ended. */
+export function DraftCard({ draft, state }: { draft: Draft; state: DraftState }) {
+  const shown = draftLines(draft);
+  const cut = Math.max(0, shown.length - DRAFT_LINES);
+  const size = draft.fields.reduce((n, [, v]) => n + v.length, 0);
+  return (
+    <div className={`rounded-md border border-border bg-panel ${state === "writing" ? "running" : ""}`}>
+      <div style={{ paddingBlock: "var(--line-py)" }} className="flex min-w-0 items-center gap-3 px-3">
+        <span className="w-11 shrink-0 font-mono text-[11px] tracking-wide text-spark uppercase">
+          {label(draft.tool ?? "Call")}
+        </span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[12px]">{draftSummary(draft)}</span>
+        {state === "writing" ? (
+          <>
+            <span className="hidden shrink-0 text-muted-foreground md:inline">writing…</span>
+            <span className="spinner" role="status" aria-label="The model writes this call" />
+          </>
+        ) : state === "written" ? (
+          <span className="shrink-0 text-muted-foreground">waiting to run</span>
+        ) : (
+          <span className="shrink-0 font-medium text-warn">not run</span>
+        )}
+      </div>
+      {state !== "void" && shown.length > 0 && (
+        <Follow
+          content={size}
+          label="The call as the model writes it"
+          className="max-h-64 border-t border-border px-3 py-2"
+        >
+          <pre className="font-mono text-[12px] leading-5 break-words whitespace-pre-wrap">
+            {cut > 0 && <span className="text-muted-foreground">{`… ${cut} lines above\n`}</span>}
+            {shown.slice(cut).map((l, i) => (
+              <span key={i + cut} className={l.tone ? TONE[l.tone] : undefined}>
+                {`${l.text}\n`}
+              </span>
+            ))}
+          </pre>
+        </Follow>
+      )}
+    </div>
   );
 }

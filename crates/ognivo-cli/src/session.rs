@@ -617,6 +617,7 @@ impl SessionArgs {
                 hooks: Arc::default(),
                 agents,
                 only: None,
+                mode: Default::default(),
             },
             mcp,
             mcp_tools: self.mcp_tools,

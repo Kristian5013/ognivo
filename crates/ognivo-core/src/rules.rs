@@ -484,8 +484,9 @@ impl Rules {
             .filter(move |r| r.kind == kind && r.action == action)
     }
 
-    /// A tool of an MCP server: what a rule says, or a question.
-    pub fn mcp(&self, server: &str, tool: &str) -> Ruling {
+    /// A tool of an MCP server: what a rule says, or else `policy` (a question, but in
+    /// auto mode).
+    pub fn mcp(&self, server: &str, tool: &str, policy: Decision) -> Ruling {
         let hit = |action| {
             self.of(Kind::Mcp, action).find(|r| match &r.pattern {
                 Pattern::Mcp { server: s, tool: t } => {
@@ -503,7 +504,10 @@ impl Rules {
         if hit(Action::Allow).is_some() {
             return Ruling::Allow;
         }
-        Ruling::Ask
+        match policy {
+            Decision::Allow => Ruling::Allow,
+            Decision::Ask => Ruling::Ask,
+        }
     }
 
     /// A shell command run in `cwd`, given the policy's decision on it. `read_only` says
@@ -773,15 +777,21 @@ mod tests {
             &["mcp__github__merge_pr"],
             &["mcp__github__delete_repo", "mcp__shell__*"],
         );
-        assert_eq!(r.mcp("github", "list_issues"), Ruling::Allow);
-        assert_eq!(r.mcp("github", "merge_pr"), Ruling::Ask);
+        let ask = Decision::Ask;
+        assert_eq!(r.mcp("github", "list_issues", ask), Ruling::Allow);
+        assert_eq!(r.mcp("github", "merge_pr", ask), Ruling::Ask);
         assert!(
-            matches!(r.mcp("github", "delete_repo"), Ruling::Deny(why) if why.starts_with("mcp__github__delete_repo"))
+            matches!(r.mcp("github", "delete_repo", ask), Ruling::Deny(why) if why.starts_with("mcp__github__delete_repo"))
         );
-        assert!(matches!(r.mcp("shell", "run"), Ruling::Deny(_)));
-        assert_eq!(r.mcp("docs", "search"), Ruling::Allow);
-        assert_eq!(r.mcp("docs", "fetch"), Ruling::Ask);
-        assert_eq!(r.mcp("other", "x"), Ruling::Ask);
+        assert!(matches!(r.mcp("shell", "run", ask), Ruling::Deny(_)));
+        assert_eq!(r.mcp("docs", "search", ask), Ruling::Allow);
+        assert_eq!(r.mcp("docs", "fetch", ask), Ruling::Ask);
+        assert_eq!(r.mcp("other", "x", ask), Ruling::Ask);
+        // auto mode: what no rule names goes ahead, a rule's question or refusal stays
+        let auto = Decision::Allow;
+        assert_eq!(r.mcp("other", "x", auto), Ruling::Allow);
+        assert_eq!(r.mcp("github", "merge_pr", auto), Ruling::Ask);
+        assert!(matches!(r.mcp("shell", "run", auto), Ruling::Deny(_)));
         let places = Places {
             root: PathBuf::from("/p"),
             home: None,

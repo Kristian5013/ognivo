@@ -6,8 +6,26 @@
 // The events mirror ognivo-protocol (an item starts, gets deltas, completes); the core's
 // come in through the same `apply` (live.ts). Generations go by their numbers, which
 // items name: a recorded thread numbers them from 0, the core from 1.
+//
+// A call the model is writing is a draft row until its item starts, which takes the
+// draft's place: the generation's calls start in the order they were written. A draft
+// whose generation ran nothing stays, as not run.
 
 import type { Generation, Item, Thread, ToolItem, ToolResult } from "./model.ts";
+
+/** A call the model is writing: its tool and each argument as far as it came, in the
+ * order they came, by ognivo's names (`path`, `content`, `old`, `new`, `patch`, ...). */
+export interface Draft {
+  generation: number;
+  index: number;
+  /** Claude Code's name for the tool, or the model's for one ognivo does not know. */
+  tool?: string;
+  fields: [string, string][];
+}
+
+/** `writing` while the model writes it, `written` once its generation ended and it waits
+ * to run, `void` when it will not run. */
+export type DraftState = "writing" | "written" | "void";
 
 export type LiveEvent =
   | { type: "turn_started"; index: number; user: string }
@@ -19,7 +37,9 @@ export type LiveEvent =
   | { type: "generation"; generation: Generation }
   | { type: "turn_completed"; index: number; end: string; why?: string }
   /** The turns from `turn` on were taken back: out of the conversation. */
-  | { type: "rewound"; turn: number };
+  | { type: "rewound"; turn: number }
+  /** More of call `index` of generation `generation` as the model writes it. */
+  | { type: "draft"; generation: number; index: number; tool?: string; field?: string; text: string };
 
 export type Row =
   | { kind: "user"; key: string; turn: number; text: string }
@@ -27,7 +47,9 @@ export type Row =
   | { kind: "item"; key: string; item: Item; open: boolean; live: boolean }
   | { kind: "end"; key: string; turn: number; end: string; why?: string }
   /** Where the user took turns `from` to `to` back. */
-  | { kind: "rewound"; key: string; from: number; to: number };
+  | { kind: "rewound"; key: string; from: number; to: number }
+  /** A call being written, until its item takes the row. */
+  | { kind: "draft"; key: string; draft: Draft; state: DraftState };
 
 export type Info = Omit<Thread, "turns" | "generations">;
 
@@ -63,6 +85,10 @@ export class ThreadStore {
   private indexListeners = new Set<() => void>();
   private indexChanged = false;
   private indexVersion = 0;
+  /** The drafts that may still become calls, by `generation:index`, and how many calls of
+   * each generation have started. */
+  private drafts = new Map<string, number>();
+  private started = new Map<number, number>();
 
   constructor(info: Info, opts: { openAll?: boolean; schedule?: Schedule } = {}) {
     this.info = info;
@@ -122,6 +148,8 @@ export class ThreadStore {
         this.add({ kind: "user", key: `u${e.index}`, turn: e.index, text: e.user });
         return;
       case "item_started":
+        if (this.takeDraft(e.item)) return;
+        if (e.item.kind === "void" && e.item.generation !== undefined) this.endDrafts(e.item.generation, false);
         this.at.set(e.item.id, this.rows.length);
         this.index(e.item);
         this.add({
@@ -156,10 +184,15 @@ export class ThreadStore {
       }
       case "generation":
         this.addGeneration(e.generation);
+        this.endDrafts(e.generation.index, e.generation.outcome === "calls");
         this.touchList();
         return;
       case "turn_completed":
+        for (const g of new Set([...this.drafts.keys()].map((k) => Number(k.split(":")[0])))) this.endDrafts(g, false);
         this.add({ kind: "end", key: `e${e.index}`, turn: e.index, end: e.end, why: e.why });
+        return;
+      case "draft":
+        this.draft(e);
         return;
       case "rewound": {
         const to = this.turn;
@@ -170,6 +203,75 @@ export class ThreadStore {
         });
         this.add({ kind: "rewound", key: `r${e.turn}-${to}`, from: e.turn, to });
         return;
+      }
+    }
+  }
+
+  /** More of a call being written: a draft row of its own, the first time. */
+  private draft(e: Extract<LiveEvent, { type: "draft" }>): void {
+    const key = `${e.generation}:${e.index}`;
+    const at = this.drafts.get(key);
+    const row = at === undefined ? undefined : this.rows[at];
+    if (at === undefined || row?.kind !== "draft") {
+      this.settle(e.generation);
+      this.drafts.set(key, this.rows.length);
+      const fields: [string, string][] = e.field ? [[e.field, e.text]] : [];
+      this.add({
+        kind: "draft",
+        key: `d${this.rows.length}`,
+        draft: { generation: e.generation, index: e.index, tool: e.tool, fields },
+        state: "writing",
+      });
+      return;
+    }
+    const fields = row.draft.fields;
+    const next = [...fields];
+    if (e.field && e.text) {
+      const i = fields.findIndex(([f]) => f === e.field);
+      if (i < 0) next.push([e.field, e.text]);
+      else next[i] = [e.field, fields[i]![1] + e.text];
+    }
+    this.rows[at] = { ...row, draft: { ...row.draft, tool: row.draft.tool ?? e.tool, fields: next } };
+    this.touch(at);
+  }
+
+  /** A call's item into the row of its draft, if it has one. */
+  private takeDraft(item: Item): boolean {
+    if (item.kind !== "tool" || item.generation === undefined) return false;
+    const n = this.started.get(item.generation) ?? 0;
+    this.started.set(item.generation, n + 1);
+    const key = `${item.generation}:${n}`;
+    const at = this.drafts.get(key);
+    const row = at === undefined ? undefined : this.rows[at];
+    if (at === undefined || row?.kind !== "draft") return false;
+    this.drafts.delete(key);
+    this.at.set(item.id, at);
+    this.index(item);
+    this.rows[at] = { kind: "item", key: row.key, item, open: this.opens(item), live: !item.result };
+    this.touch(at);
+    return true;
+  }
+
+  /** Generation `generation` ended: its drafts wait to run, or will not run. */
+  private endDrafts(generation: number, run: boolean): void {
+    for (const [key, at] of this.drafts) {
+      if (!key.startsWith(`${generation}:`)) continue;
+      const row = this.rows[at];
+      if (row?.kind !== "draft") continue;
+      if (!run) this.drafts.delete(key);
+      this.rows[at] = { ...row, state: run ? "written" : "void" };
+      this.touch(at);
+    }
+  }
+
+  /** What streamed of a generation before its first call ends where the call begins. */
+  private settle(generation: number): void {
+    for (let i = this.rows.length - 1; i >= 0; i--) {
+      const row = this.rows[i]!;
+      if (row.kind !== "item" || row.item.generation !== generation) return;
+      if (row.live && (row.item.kind === "reasoning" || row.item.kind === "message")) {
+        this.rows[i] = { ...row, live: false };
+        this.touch(i);
       }
     }
   }

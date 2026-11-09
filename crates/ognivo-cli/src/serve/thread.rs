@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::approval::{Mode, ModeSwitch};
 use ognivo_core::journal::Reverted;
 use ognivo_core::protocol::Projector;
 use ognivo_models::{AnswerNow, DriverError};
@@ -37,6 +38,8 @@ pub struct ThreadHandle {
     answer_now: bool,
     /// The context it works with.
     context: rpc::Context,
+    /// Its mode, which its agent and subagents read at each call.
+    mode: ModeSwitch,
     /// Its MCP servers as it started them.
     pub mcp: super::mcp::McpView,
 }
@@ -151,6 +154,7 @@ pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
                 running: open.is_some_and(|h| h.running.load(Ordering::SeqCst)),
                 answer_now: open.is_some_and(|h| h.answer_now),
                 context: open.map(|h| h.context),
+                mode: open.map(|h| wire_mode(h.mode.get())),
             }
         })
         .collect();
@@ -260,7 +264,15 @@ pub async fn start(hub: &Arc<Hub>, a: rpc::StartThread) -> Reply {
         .connect(root.clone(), None)
         .await
         .map_err(not_started)?;
-    open(hub, &args.url, connected, root, None).await
+    open(
+        hub,
+        &args.url,
+        connected,
+        root,
+        None,
+        a.mode.unwrap_or_default(),
+    )
+    .await
 }
 
 pub async fn resume(hub: &Arc<Hub>, a: rpc::ResumeThread) -> Reply {
@@ -293,7 +305,50 @@ pub async fn resume(hub: &Arc<Hub>, a: rpc::ResumeThread) -> Reply {
         .connect(root.clone(), Some(&row))
         .await
         .map_err(not_started)?;
-    open(hub, &args.url, connected, root, Some(row)).await
+    open(
+        hub,
+        &args.url,
+        connected,
+        root,
+        Some(row),
+        a.mode.unwrap_or_default(),
+    )
+    .await
+}
+
+/// `thread/mode`: the open thread's mode from its agent's next call on, and an event that
+/// tells every client.
+pub fn set_mode(hub: &Hub, a: rpc::SetMode) -> Reply {
+    let set = lock(&hub.threads)
+        .get(&a.thread.0)
+        .map(|h| h.mode.set(core_mode(a.mode)))
+        .is_some();
+    if !set {
+        return Err(no_thread(a.thread));
+    }
+    hub.emit(
+        a.thread,
+        vec![(a.thread, p::EventKind::ModeChanged { mode: a.mode })],
+    );
+    done()
+}
+
+fn core_mode(mode: p::Mode) -> Mode {
+    match mode {
+        p::Mode::Manual => Mode::Manual,
+        p::Mode::EditAutomatically => Mode::EditAutomatically,
+        p::Mode::Plan => Mode::Plan,
+        p::Mode::Auto => Mode::Auto,
+    }
+}
+
+fn wire_mode(mode: Mode) -> p::Mode {
+    match mode {
+        Mode::Manual => p::Mode::Manual,
+        Mode::EditAutomatically => p::Mode::EditAutomatically,
+        Mode::Plan => p::Mode::Plan,
+        Mode::Auto => p::Mode::Auto,
+    }
 }
 
 /// The thread of a connected session, new or stored: its agent on a task of its own.
@@ -303,6 +358,7 @@ async fn open(
     mut s: Connected,
     root: PathBuf,
     stored: Option<SessionRow>,
+    mode: p::Mode,
 ) -> Reply {
     let mut store = session::open_store(&hub.data_dir).map_err(not_started)?;
     let mut notes = Vec::new();
@@ -486,6 +542,8 @@ async fn open(
         window: s.opts.n_ctx,
     };
     let answer_now = s.answer_now.take();
+    s.opts.mode = ModeSwitch::new(core_mode(mode));
+    let switch = s.opts.mode.clone();
     let rule_files = std::mem::take(&mut s.rule_files);
     let rule_problems = std::mem::take(&mut s.rule_problems);
     let info = p::ThreadInfo {
@@ -559,7 +617,10 @@ async fn open(
         }
         notes.extend(skipped.iter().map(not_read));
     }
-    hub.emit(thread, lock(&shared).started());
+    // the stream says the mode from the thread's start on: its last word is the mode now
+    let mut start = lock(&shared).started();
+    start.extend(lock(&shared).mode_changed(mode));
+    hub.emit(thread, start);
     let (commands, received) = mpsc::unbounded_channel();
     let running = Arc::new(AtomicBool::new(false));
     let can_answer_now = answer_now.is_some();
@@ -570,6 +631,7 @@ async fn open(
             running: running.clone(),
             answer_now: can_answer_now,
             context,
+            mode: switch,
             mcp: mcp_view,
         },
     );
@@ -591,6 +653,7 @@ async fn open(
         notes,
         answer_now: can_answer_now,
         context,
+        mode,
     })
 }
 

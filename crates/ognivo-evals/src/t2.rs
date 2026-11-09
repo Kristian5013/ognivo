@@ -569,6 +569,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         hooks: Arc::new(hooks.hooks),
         agents,
         only: None,
+        mode: Default::default(),
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);

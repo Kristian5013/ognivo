@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { type Server, createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,8 +11,9 @@ import { gpuEnv } from "../gpu.js";
 // The GUI on a real core (docs/architecture.md §3): a session starts from the form, a
 // turn streams, its command waits for the user's yes in the thread, and its change is
 // reverted from the Changes panel; subagents show as lanes whose threads open; the
-// settings change the look; the core quits once the window is gone. The model is a fake
-// llama-server that streams what llama-server streams; no GPU, no network.
+// settings change the look; a plan comes first in plan mode, with its call shown as the
+// model writes it, and is carried out; the core quits once the window is gone. The model
+// is a fake llama-server that streams what llama-server streams; no GPU, no network.
 
 const main = fileURLToPath(new URL("../main.js", import.meta.url));
 const ognivo = fileURLToPath(new URL("../../../target/debug/ognivo", import.meta.url));
@@ -38,8 +39,19 @@ function answer(text: string): object[] {
   return [chunk({ role: "assistant", content: null }), chunk({ content: text }), chunk({}, "stop"), usage];
 }
 
+/** A reply streamed in parts: after each but the last it waits for its gate, which the
+ * test opens. */
+interface Gated {
+  parts: object[][];
+  gates: Promise<void>[];
+}
+
+type Reply = object[] | Gated;
+
+const sse = (events: object[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
+
 /** A llama-server of one slot that answers the chat requests with `replies`, in order. */
-function fakeServer(replies: object[][]): Promise<{ server: Server; url: string }> {
+function fakeServer(replies: Reply[]): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/props")) {
       res.setHeader("content-type", "application/json");
@@ -53,9 +65,19 @@ function fakeServer(replies: object[][]): Promise<{ server: Server; url: string 
     }
     req.resume();
     req.on("end", () => {
-      const events = replies.shift() ?? answer("Nothing more.");
+      const reply = replies.shift() ?? answer("Nothing more.");
       res.setHeader("content-type", "text/event-stream");
-      res.end(`${events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("")}data: [DONE]\n\n`);
+      if (Array.isArray(reply)) {
+        res.end(`${sse(reply)}data: [DONE]\n\n`);
+        return;
+      }
+      void (async () => {
+        for (const [i, part] of reply.parts.entries()) {
+          if (i > 0) await reply.gates[i - 1];
+          res.write(sse(part));
+        }
+        res.end("data: [DONE]\n\n");
+      })();
     });
   });
   return new Promise((resolve) =>
@@ -68,7 +90,7 @@ function fakeServer(replies: object[][]): Promise<{ server: Server; url: string 
 }
 
 /** The window on a core of its own, with a fake llama-server answering `replies`. */
-async function launch(replies: object[][]) {
+async function launch(replies: Reply[]) {
   const dir = mkdtempSync(join(tmpdir(), "ognivo-e2e-"));
   const project = join(dir, "proj");
   mkdirSync(project);
@@ -166,6 +188,79 @@ test("a session on the core: a turn, a question in the thread, a revert, the set
     await page.reload();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark", { timeout: 30_000 });
     await expect.poll(spark).toBe("#a371f7");
+  } finally {
+    await close();
+  }
+});
+
+test("plan mode: the reasoning and the call shown as the model writes them, the plan carried out", async () => {
+  const open: (() => void)[] = [];
+  const gates = [0, 1].map(() => new Promise<void>((r) => open.push(r)));
+  const args = JSON.stringify({ path: "plan.txt", content: "line one\nline two\n" });
+  const cut = args.indexOf("line two");
+  const { page, project, close } = await launch([
+    {
+      parts: [
+        [chunk({ role: "assistant", content: null }), chunk({ reasoning_content: "A file of two lines" })],
+        [
+          chunk({ reasoning_content: ", then the plan." }),
+          chunk({ tool_calls: [{ index: 0, id: "w1", type: "function", function: { name: "write", arguments: args.slice(0, cut) } }] }),
+        ],
+        [chunk({ tool_calls: [{ index: 0, function: { arguments: args.slice(cut) } }] }), chunk({}, "tool_calls"), usage],
+      ],
+      gates,
+    },
+    answer("The plan: plan.txt, with two lines."),
+    call("w2", "write", { path: "plan.txt", content: "line one\nline two\n" }),
+    answer("Done: plan.txt is there."),
+    answer("Done: plan.txt is there."),
+  ]);
+  try {
+    await page.getByRole("button", { name: "Start" }).click();
+    const composer = page.locator("textarea");
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+    // a new session starts in the default mode, and Shift+Tab goes to the next: plan
+    const edits = page.getByRole("button", { name: "Edit automatically", exact: true });
+    await expect(edits).toBeVisible();
+    await composer.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Plan", exact: true })).toBeVisible();
+    await composer.fill("Plan a file.");
+    await composer.press("Enter");
+
+    // the reasoning as it comes, in a window under "Thinking…"
+    const thinking = page.getByRole("log", { name: "The model's reasoning as it comes" });
+    await expect(thinking).toContainText("A file of two lines", { timeout: 30_000 });
+    await expect(page.getByText("Thinking…")).toBeVisible();
+    await page.screenshot({ path: "test-results/core-thinking.png" });
+    open[0]!();
+
+    // the call as the model writes it: its file on a line with a turning circle, its code;
+    // the reasoning before it is done
+    await expect(page.getByRole("status", { name: "The model writes this call" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("plan.txt", { exact: true })).toBeVisible();
+    await expect(page.getByRole("log", { name: "The call as the model writes it" })).toContainText("line one");
+    await expect(thinking).toHaveCount(0);
+    await page.waitForTimeout(400);
+    await page.screenshot({ path: "test-results/core-draft.png" });
+    open[1]!();
+
+    // plan mode refuses it without a question, and the plan comes, to carry out
+    await expect(page.getByText("The plan: plan.txt, with two lines.")).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText("refused", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
+    expect(existsSync(join(project, "plan.txt"))).toBe(false);
+    await page.screenshot({ path: "test-results/core-plan.png" });
+    await page.getByRole("button", { name: "Carry out · Edit automatically" }).click();
+    await expect(edits).toBeVisible();
+    await expect(page.getByText("Done: plan.txt is there.").first()).toBeVisible({ timeout: 30_000 });
+    expect(readFileSync(join(project, "plan.txt"), "utf8")).toBe("line one\nline two\n");
+
+    // the mode menu: what each mode lets the agent do
+    await edits.click();
+    const menu = page.getByRole("menu", { name: "Mode" });
+    await expect(menu.getByRole("menuitemradio", { name: /Edit automatically/ })).toHaveAttribute("aria-checked", "true");
+    await menu.getByRole("menuitemradio", { name: /^Manual/ }).click();
+    await expect(page.getByRole("button", { name: "Manual", exact: true })).toBeVisible();
   } finally {
     await close();
   }

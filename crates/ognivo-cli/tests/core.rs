@@ -241,6 +241,7 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
 
     let opened = a.ok("thread/start", start(&root, &url)).await;
     let thread = opened["thread"].clone();
+    assert_eq!(opened["mode"], "edit_automatically");
     assert_eq!(opened["info"]["kind"], "chat");
     assert_eq!(opened["info"]["project"], json!(root));
     assert!(
@@ -295,10 +296,11 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
             let kind = e["item"]["kind"].as_str().unwrap_or_default();
             (e["event"].as_str().unwrap().to_owned(), kind.to_owned())
         })
-        .filter(|(e, _)| e != "item_delta" && e != "generation")
+        .filter(|(e, _)| e != "item_delta" && e != "generation" && e != "call_draft")
         .collect();
     let want = [
         ("thread_started", ""),
+        ("mode_changed", ""),
         ("turn_started", ""),
         ("item_started", "reasoning"),
         ("item_completed", "reasoning"),
@@ -316,6 +318,26 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
         .map(|(e, k)| (e.as_str(), k.as_str()))
         .collect();
     assert_eq!(&have[..want.len()], &want, "{have:?}");
+    // each call showed as the model wrote it: its tool, then its arguments as they came,
+    // by ognivo's names
+    let drafts: Vec<&Value> = a
+        .events
+        .iter()
+        .filter(|e| e["event"] == "call_draft")
+        .map(|e| &e["draft"])
+        .collect();
+    let written = |generation: u32, field: &str| -> String {
+        drafts
+            .iter()
+            .filter(|d| d["generation"] == generation && d["index"] == 0 && d["field"] == field)
+            .map(|d| d["text"].as_str().unwrap())
+            .collect()
+    };
+    assert_eq!(drafts[0]["tool"], "Write", "{drafts:?}");
+    assert_eq!(drafts[0]["field"], Value::Null);
+    assert_eq!(written(1, "path"), "new.txt");
+    assert_eq!(written(1, "content"), "fresh\n");
+    assert_eq!(written(2, "command"), "touch made.txt");
     let shell = a
         .events
         .iter()
@@ -377,7 +399,7 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     let kept: Vec<&Value> = a
         .events
         .iter()
-        .filter(|e| e["event"] != "item_delta")
+        .filter(|e| e["event"] != "item_delta" && e["event"] != "call_draft")
         .collect();
     let read: Vec<&Value> = read["events"].as_array().unwrap().iter().collect();
     assert_eq!(read, kept);
@@ -408,6 +430,23 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
             &json!(false)
         )
     );
+    // its mode switched: every client hears it, and the list says it
+    assert_eq!(
+        b.ok("thread/mode", json!({"thread": thread, "mode": "plan"}))
+            .await,
+        json!({})
+    );
+    let got = a.until(|m| event(m, "mode_changed")).await;
+    assert_eq!(got.last().unwrap()["params"]["mode"], "plan");
+    let list = b
+        .ok("thread/list", json!({"project": root, "limit": null}))
+        .await;
+    assert_eq!(list["threads"][0]["mode"], "plan");
+    let closed = b
+        .call("thread/mode", json!({"thread": 999_999, "mode": "auto"}))
+        .await
+        .unwrap_err();
+    assert_eq!(closed["code"], -32001);
     let trajectory = b.ok("thread/trajectory", json!({"thread": thread})).await;
     assert_eq!(
         trajectory["trajectory"]["session_id"],
@@ -681,6 +720,69 @@ async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
         .await
         .unwrap_err();
     assert_eq!(e["code"], -32001);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[tokio::test]
+async fn a_thread_plans_in_plan_mode_and_carries_the_plan_out_once_switched() {
+    let write = r#"{"path":"plan.txt","content":"one\n"}"#;
+    let (url, _) = fake_server(vec![
+        call_stream("w1", "write", write),
+        answer_stream("The plan: plan.txt."),
+        call_stream("w2", "write", write),
+        answer_stream("Done."),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let mut params = start(&root, &url);
+    params["mode"] = json!("plan");
+    let opened = a.ok("thread/start", params).await;
+    assert_eq!(opened["mode"], "plan");
+    let thread = opened["thread"].clone();
+
+    // the write is refused without a question, and the plan comes
+    a.ok(
+        "turn/start",
+        json!({"thread": thread, "text": "plan a file"}),
+    )
+    .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    assert!(got.iter().all(|m| m["method"] != "approval/ask"), "{got:?}");
+    let refused = got
+        .iter()
+        .find(|m| event(m, "item_completed") && m["params"]["item"]["call"]["name"] == "Write")
+        .unwrap();
+    assert_eq!(refused["params"]["item"]["result"]["outcome"], "refused");
+    assert_eq!(
+        got.last().unwrap()["params"]["answer"],
+        "The plan: plan.txt."
+    );
+    assert!(!root.join("plan.txt").exists());
+
+    // switched, the next turn changes the file
+    a.ok(
+        "thread/mode",
+        json!({"thread": thread, "mode": "edit_automatically"}),
+    )
+    .await;
+    a.ok(
+        "turn/start",
+        json!({"thread": thread, "text": "Carry out the plan."}),
+    )
+    .await;
+    a.until(|m| event(m, "turn_completed")).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("plan.txt")).unwrap(),
+        "one\n"
+    );
     child.kill().unwrap();
     child.wait().unwrap();
 }

@@ -322,6 +322,7 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
             thread::command(hub, p.thread, command).await
         }
         rpc::THREAD_DELETE => thread::delete(hub, parse(params)?).await,
+        rpc::THREAD_MODE => thread::set_mode(hub, parse(params)?),
         rpc::CHANGES_ACCEPT => {
             let p: rpc::Accept = parse(params)?;
             thread::command(hub, p.thread, |reply| {

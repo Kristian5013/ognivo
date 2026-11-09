@@ -41,6 +41,8 @@ fn typescript() -> String {
         Generation::decl(&cfg),
         Delta::decl(&cfg),
         TurnEnd::decl(&cfg),
+        Mode::decl(&cfg),
+        CallDraft::decl(&cfg),
         Initialize::decl(&cfg),
         Initialized::decl(&cfg),
         ListThreads::decl(&cfg),
@@ -51,6 +53,7 @@ fn typescript() -> String {
         StartThread::decl(&cfg),
         ResumeThread::decl(&cfg),
         Opened::decl(&cfg),
+        SetMode::decl(&cfg),
         ThreadRef::decl(&cfg),
         ReadThread::decl(&cfg),
         ThreadEvents::decl(&cfg),
@@ -113,6 +116,7 @@ fn typescript() -> String {
         method::<ThreadRef, Done>(&cfg, rpc::TURN_INTERRUPT),
         method::<ThreadRef, Done>(&cfg, rpc::TURN_ANSWER_NOW),
         method::<EditTurn, Done>(&cfg, rpc::TURN_EDIT),
+        method::<SetMode, Done>(&cfg, rpc::THREAD_MODE),
         method::<ThreadRef, Changes>(&cfg, rpc::CHANGES_LIST),
         method::<Accept, Accepted>(&cfg, rpc::CHANGES_ACCEPT),
         method::<Revert, Reverted>(&cfg, rpc::CHANGES_REVERT),
@@ -168,4 +172,35 @@ fn the_gui_has_the_event_model_as_the_core_sends_it() {
         "{} is not what the Rust types make of it: run OGNIVO_BLESS=1 cargo test -p ognivo-protocol",
         path.display()
     );
+}
+
+/// The window lets the page call every method of a client: one its list leaves out never
+/// reaches the core (`thread/mode` did not, at first).
+#[test]
+fn the_window_lets_the_page_call_every_method() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/core.js");
+    let js = std::fs::read_to_string(&path).unwrap();
+    let allowed = js
+        .split("const METHODS = new Set([")
+        .nth(1)
+        .and_then(|rest| rest.split("]);").next())
+        .expect("core.js has its METHODS");
+    let ts = typescript();
+    let methods = ts
+        .split("export type Methods = {\n")
+        .nth(1)
+        .and_then(|rest| rest.split("\n};").next())
+        .unwrap();
+    let names: Vec<&str> = methods
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('"')?.split('"').next())
+        .collect();
+    assert!(names.contains(&rpc::THREAD_MODE), "{names:?}");
+    for name in names {
+        assert!(
+            allowed.contains(&format!("\"{name}\"")),
+            "{} does not let the page call {name}",
+            path.display()
+        );
+    }
 }

@@ -309,10 +309,13 @@ fn write_trajectory(args: &SessionArgs, id: ognivo_store::SessionId, file: &Path
     }
 }
 
-/// Text mode: the model's words on stdout as they stream, tool activity on stderr.
+/// Text mode: the model's words on stdout as they stream, tool activity on stderr. A call
+/// the model is writing shows once it runs, in the JSON lines too.
 fn show(e: &AgentEvent, jsonl: bool) {
     if jsonl {
-        if let Ok(line) = serde_json::to_string(e) {
+        if !matches!(e, AgentEvent::CallDraft { .. })
+            && let Ok(line) = serde_json::to_string(e)
+        {
             println!("{line}");
         }
         return;
@@ -322,7 +325,7 @@ fn show(e: &AgentEvent, jsonl: bool) {
             print!("{text}");
             let _ = std::io::stdout().flush();
         }
-        AgentEvent::Reasoning { .. } => {}
+        AgentEvent::Reasoning { .. } | AgentEvent::CallDraft { .. } => {}
         AgentEvent::Restarted { reason } => eprintln!("\n· restarted: {reason}"),
         AgentEvent::ToolStarted {
             tool, arguments, ..

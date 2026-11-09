@@ -1,8 +1,9 @@
 import { Command } from "cmdk";
-import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { type Budget, estimateTokens, mentionAt, sessionFiles } from "../context.ts";
 import { count } from "../format.ts";
+import { MODES, modeInfo, nextMode } from "../modes.ts";
 import profiles from "../profiles.json";
 import type * as P from "../protocol.ts";
 import type { ThreadStore } from "../store.ts";
@@ -19,20 +20,95 @@ export interface Sending {
   answerNow?: () => void;
 }
 
+/** The thread's mode, and a menu of the others; Shift+Tab in the composer goes to the
+ * next. */
+function ModePicker({ mode, onMode }: { mode: P.Mode; onMode: (mode: P.Mode) => void }) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  const info = modeInfo(mode);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: MouseEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+  return (
+    <div ref={root} className="relative">
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={`${info.label}: ${info.says} Shift+Tab switches to the next mode.`}
+        onClick={() => setOpen((o) => !o)}
+        className={`flex items-center gap-1.5 rounded border border-border px-2 py-0.5 hover:bg-raised ${info.tone}`}
+      >
+        <span aria-hidden className="font-mono">
+          {info.glyph}
+        </span>
+        <span>{info.label}</span>
+        <span aria-hidden className="text-muted-foreground">
+          ▾
+        </span>
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Mode"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") setOpen(false);
+          }}
+          className="absolute bottom-full left-0 z-20 mb-1 w-80 overflow-hidden rounded-md border border-border bg-panel py-1 shadow-lg"
+        >
+          {MODES.map((m) => (
+            <button
+              key={m.mode}
+              type="button"
+              role="menuitemradio"
+              aria-checked={m.mode === mode}
+              onClick={() => {
+                onMode(m.mode);
+                setOpen(false);
+              }}
+              className={`flex w-full gap-2 px-3 py-1.5 text-left hover:bg-raised ${m.mode === mode ? "bg-raised" : ""}`}
+            >
+              <span aria-hidden className={`w-5 shrink-0 font-mono ${m.tone}`}>
+                {m.glyph}
+              </span>
+              <span className="min-w-0">
+                <span className={`block font-medium ${m.tone}`}>{m.label}</span>
+                <span className="block text-[11px] leading-4 text-muted-foreground">{m.says}</span>
+              </span>
+            </button>
+          ))}
+          <p className="border-t border-border px-3 pt-1 text-[11px] text-muted-foreground">
+            Shift+Tab switches to the next mode
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Where the user writes, with `@` for the files of the session and what the message
  * would cost: its tokens, the files it names, and where the conversation would stand
  * against the thread's context (`context`, as the core opened it) or else the profile's
- * budget. Without a core it sends nothing. */
+ * budget. Without a core it sends nothing. With `onMode` it has the thread's mode. */
 export function Composer({
   store,
   draft = "",
   sending,
   context,
+  mode,
+  onMode,
 }: {
   store: ThreadStore;
   draft?: string;
   sending?: Sending;
   context?: P.Context;
+  mode?: P.Mode;
+  onMode?: (mode: P.Mode) => void;
 }) {
   const subscribe = useCallback((l: () => void) => store.subscribeList(l), [store]);
   // the list version stands for the items: they are read again when rows come
@@ -135,6 +211,11 @@ export function Composer({
           }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
           onKeyDown={(e) => {
+            if (e.key === "Tab" && e.shiftKey && mode && onMode && !(mention && matches.length > 0)) {
+              e.preventDefault();
+              onMode(nextMode(mode));
+              return;
+            }
             if (!mention || matches.length === 0) {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && sending) {
                 e.preventDefault();
@@ -157,6 +238,7 @@ export function Composer({
           className="composer block w-full resize-none rounded-lg border border-border bg-panel px-3 py-2 leading-5 outline-none placeholder:text-muted-foreground"
         />
         <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
+          {mode && onMode && <ModePicker mode={mode} onMode={onMode} />}
           <span>
             ≈ {count(own)} tokens{known ? ` + ${count(known)} in files` : ""}
             {unread.length ? ` + ${unread.length === 1 ? "a file" : `${unread.length} files`} not read yet` : ""}

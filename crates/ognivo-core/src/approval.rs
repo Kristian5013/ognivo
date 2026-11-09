@@ -14,8 +14,14 @@
 //!
 //! User and project rules (`~/.ognivo/config.toml`, `.claude/settings.json` permissions)
 //! are layered on top by [`crate::rules`] (deny > ask > allow).
+//!
+//! The thread's [`Mode`], which the user switches at any time, makes the policy stricter
+//! or looser before the rules are applied: it never lifts a rule's question or refusal,
+//! and in no mode does an edit of a protected path or outside the project go silently.
 
 use std::path::{Component, Path};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use ognivo_tools::Effect;
 
@@ -23,6 +29,101 @@ use ognivo_tools::Effect;
 pub enum Decision {
     Allow,
     Ask,
+}
+
+/// How far the agent goes without the user (the GUI's modes, as Claude Code's permission
+/// modes): what the policy decides, made stricter or looser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    /// Every edit, and every command that does more than read, asks first.
+    Manual,
+    /// The policy as it is: the agent's edits inside the project apply at once and are
+    /// reviewed in Changes; commands ask as the policy says.
+    #[default]
+    EditAutomatically,
+    /// The agent reads and plans, and changes nothing: edits, and commands that do more
+    /// than read, are refused without a question.
+    Plan,
+    /// What would ask goes ahead, except edits of protected paths and outside the project
+    /// and what a rule asks for.
+    Auto,
+}
+
+impl Mode {
+    /// A read (read, grep, glob) the policy decided on.
+    pub fn read(self, policy: Decision) -> Decision {
+        match self {
+            Mode::Auto => Decision::Allow,
+            _ => policy,
+        }
+    }
+
+    /// An edit the policy decided on; `None`: the mode refuses it.
+    pub fn edit(self, policy: Decision) -> Option<Decision> {
+        match self {
+            Mode::Plan => None,
+            Mode::Manual => Some(Decision::Ask),
+            Mode::EditAutomatically | Mode::Auto => Some(policy),
+        }
+    }
+
+    /// A command of `effect` the policy decided on; `None`: the mode refuses it.
+    pub fn command(self, effect: Effect, policy: Decision) -> Option<Decision> {
+        match self {
+            _ if effect == Effect::ReadOnly => Some(policy),
+            Mode::Plan => None,
+            Mode::Manual => Some(Decision::Ask),
+            Mode::Auto => Some(Decision::Allow),
+            Mode::EditAutomatically => Some(policy),
+        }
+    }
+
+    /// An MCP tool no rule names: a question, or in auto mode a yes.
+    pub fn mcp(self) -> Decision {
+        match self {
+            Mode::Auto => Decision::Allow,
+            _ => Decision::Ask,
+        }
+    }
+}
+
+/// The thread's mode as the user switches it, while a turn runs too: the agent and its
+/// subagents read it at each call.
+#[derive(Debug, Clone)]
+pub struct ModeSwitch(Arc<AtomicU8>);
+
+impl ModeSwitch {
+    pub fn new(mode: Mode) -> Self {
+        Self(Arc::new(AtomicU8::new(Self::number(mode))))
+    }
+
+    pub fn get(&self) -> Mode {
+        match self.0.load(Ordering::SeqCst) {
+            0 => Mode::Manual,
+            2 => Mode::Plan,
+            3 => Mode::Auto,
+            _ => Mode::EditAutomatically,
+        }
+    }
+
+    pub fn set(&self, mode: Mode) {
+        self.0.store(Self::number(mode), Ordering::SeqCst);
+    }
+
+    fn number(mode: Mode) -> u8 {
+        match mode {
+            Mode::Manual => 0,
+            Mode::EditAutomatically => 1,
+            Mode::Plan => 2,
+            Mode::Auto => 3,
+        }
+    }
+}
+
+impl Default for ModeSwitch {
+    fn default() -> Self {
+        Self::new(Mode::default())
+    }
 }
 
 /// Review state of the workspace. It turns dirty on the first change by any agent or
@@ -289,5 +390,61 @@ mod tests {
             decide_read(Path::new("/home/u/project2/a.rs"), root),
             Decision::Ask
         );
+    }
+
+    #[test]
+    fn modes_make_the_policy_stricter_or_looser() {
+        use Decision::{Allow, Ask};
+        let (manual, edits, plan, auto) = (
+            Mode::Manual,
+            Mode::EditAutomatically,
+            Mode::Plan,
+            Mode::Auto,
+        );
+        // edits: the policy, every one asking, none, or the policy: a protected path asks
+        // even in auto mode
+        assert_eq!(edits.edit(Allow), Some(Allow));
+        assert_eq!(manual.edit(Allow), Some(Ask));
+        assert_eq!(plan.edit(Allow), None);
+        assert_eq!(auto.edit(Allow), Some(Allow));
+        assert_eq!(auto.edit(Ask), Some(Ask));
+        // a command that only reads goes as the policy says in every mode
+        for mode in [manual, edits, plan, auto] {
+            assert_eq!(mode.command(Effect::ReadOnly, Allow), Some(Allow));
+        }
+        assert_eq!(
+            edits.command(Effect::ExecutesProjectCode, Allow),
+            Some(Allow)
+        );
+        assert_eq!(
+            manual.command(Effect::ExecutesProjectCode, Allow),
+            Some(Ask)
+        );
+        assert_eq!(plan.command(Effect::ExecutesProjectCode, Allow), None);
+        assert_eq!(auto.command(Effect::SideEffects, Ask), Some(Allow));
+        assert_eq!(auto.command(Effect::Network, Ask), Some(Allow));
+        assert_eq!(edits.command(Effect::Network, Ask), Some(Ask));
+        // reads outside the project ask, but in auto mode
+        assert_eq!(plan.read(Ask), Ask);
+        assert_eq!(manual.read(Allow), Allow);
+        assert_eq!(auto.read(Ask), Allow);
+        assert_eq!(auto.mcp(), Allow);
+        assert_eq!(edits.mcp(), Ask);
+    }
+
+    #[test]
+    fn a_switch_is_one_mode_for_all_who_hold_it() {
+        let switch = ModeSwitch::default();
+        assert_eq!(switch.get(), Mode::EditAutomatically);
+        let subagent = switch.clone();
+        for mode in [
+            Mode::Plan,
+            Mode::Auto,
+            Mode::Manual,
+            Mode::EditAutomatically,
+        ] {
+            switch.set(mode);
+            assert_eq!(subagent.get(), mode);
+        }
     }
 }

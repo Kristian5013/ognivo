@@ -27,6 +27,8 @@ type Schedule = (flush: () => void) => void;
 
 export class Threads {
   private entries = new Map<number, Entry>();
+  /** Each thread's mode, as it opened and as a client switched it. */
+  private modes = new Map<number, P.Mode>();
   private listeners = new Set<() => void>();
   private version = 0;
 
@@ -43,6 +45,18 @@ export class Threads {
 
   info(thread: number): P.ThreadInfo | undefined {
     return this.entries.get(thread)?.info;
+  }
+
+  /** The thread's mode, once it opened or a client switched it. */
+  mode(thread: number): P.Mode | undefined {
+    return this.modes.get(thread);
+  }
+
+  /** The thread's mode as it opened, or as this client switched it before the core heard. */
+  setMode(thread: number, mode: P.Mode): void {
+    if (this.modes.get(thread) === mode) return;
+    this.modes.set(thread, mode);
+    this.changed();
   }
 
   /** Whether a turn of the thread runs, as its events say. */
@@ -135,6 +149,9 @@ export class Threads {
       case "turn_completed":
         entry.running = false;
         this.changed();
+        break;
+      case "mode_changed":
+        this.setMode(e.thread, e.mode);
         break;
     }
     for (const l of toLive(e, entry.offset)) entry.store.apply(l);

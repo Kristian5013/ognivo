@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::{Event, Hunk, ItemId, ThreadId, ThreadInfo};
+use crate::{Event, Hunk, ItemId, Mode, ThreadId, ThreadInfo};
 
 pub const INITIALIZE: &str = "initialize";
 pub const THREAD_LIST: &str = "thread/list";
@@ -34,6 +34,7 @@ pub const TURN_START: &str = "turn/start";
 pub const TURN_INTERRUPT: &str = "turn/interrupt";
 pub const TURN_ANSWER_NOW: &str = "turn/answer_now";
 pub const TURN_EDIT: &str = "turn/edit";
+pub const THREAD_MODE: &str = "thread/mode";
 pub const CHANGES_LIST: &str = "changes/list";
 pub const CHANGES_ACCEPT: &str = "changes/accept";
 pub const CHANGES_REVERT: &str = "changes/revert";
@@ -124,6 +125,8 @@ pub struct ThreadSummary {
     pub answer_now: bool,
     /// Open: the context it works with.
     pub context: Option<Context>,
+    /// Open: its mode.
+    pub mode: Option<Mode>,
 }
 
 /// The context a thread works with, in tokens.
@@ -201,6 +204,9 @@ pub struct StartThread {
     /// Tokens of working context; the server's window when `None`.
     #[serde(default)]
     pub context: Option<u32>,
+    /// How far its agent goes without the user; `edit_automatically` when `None`.
+    #[serde(default)]
+    pub mode: Option<Mode>,
 }
 
 /// A stored thread, picked up where it ended, with its profile, level and seed.
@@ -215,6 +221,9 @@ pub struct ResumeThread {
     /// Tokens of working context; the server's window when `None`.
     #[serde(default)]
     pub context: Option<u32>,
+    /// How far its agent goes without the user; `edit_automatically` when `None`.
+    #[serde(default)]
+    pub mode: Option<Mode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -227,6 +236,15 @@ pub struct Opened {
     /// On the Native path: `turn/answer_now` ends the model's reasoning.
     pub answer_now: bool,
     pub context: Context,
+    pub mode: Mode,
+}
+
+/// `thread/mode`: the open thread's mode, from its agent's next call on, while a turn runs
+/// too; an event `mode_changed` tells every client. The answer is `Done`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SetMode {
+    pub thread: ThreadId,
+    pub mode: Mode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

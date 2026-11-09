@@ -28,6 +28,20 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
       return [{ type: "turn_completed", index: e.turn, end: e.end, why: e.why ?? undefined }];
     case "thread_rewound":
       return [{ type: "rewound", turn: e.turn }];
+    case "call_draft":
+      return [
+        {
+          type: "draft",
+          generation: e.draft.generation + offset,
+          index: e.draft.index,
+          tool: e.draft.tool ?? undefined,
+          field: e.draft.field ?? undefined,
+          text: e.draft.text,
+        },
+      ];
+    // the thread's, not its store's (threads.ts)
+    case "mode_changed":
+      return [];
   }
 }
 

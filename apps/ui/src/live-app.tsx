@@ -16,6 +16,7 @@ import { ThreadView } from "./components/thread.tsx";
 import { type Budget, compaction, contextChoices, contextSize, windowChoice } from "./context.ts";
 import { type Ask, type Core, CoreError } from "./core.ts";
 import { count, ending } from "./format.ts";
+import { DEFAULT_MODE, isMode, modeInfo } from "./modes.ts";
 import profiles from "./profiles.json";
 import * as P from "./protocol.ts";
 import type { ThreadStore } from "./store.ts";
@@ -43,6 +44,8 @@ interface Settings {
   subagents: boolean;
   /** Tokens of working context; 0: the server's window. */
   context: number;
+  /** The mode chosen last, which a new thread starts in. */
+  mode: P.Mode;
   /** Projects started last, the newest first. */
   projects: string[];
 }
@@ -56,12 +59,14 @@ const DEFAULTS: Settings = {
   native: false,
   subagents: false,
   context: 0,
+  mode: DEFAULT_MODE,
   projects: [],
 };
 
 function loadSettings(): Settings {
   try {
-    return { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(SETTINGS) ?? "{}") as Partial<Settings>) };
+    const s = { ...DEFAULTS, ...(JSON.parse(localStorage.getItem(SETTINGS) ?? "{}") as Partial<Settings>) };
+    return isMode(s.mode) ? s : { ...s, mode: DEFAULT_MODE };
   } catch {
     return DEFAULTS;
   }
@@ -617,6 +622,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   };
 
   const opened = (o: P.Opened) => {
+    threads.setMode(o.thread, o.mode);
     setNotes((n) => new Map(n).set(o.thread, o.notes));
     setContexts((c) => new Map(c).set(o.thread, o.context));
     setOpen((s) => new Set(s).add(o.thread));
@@ -649,8 +655,9 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       priors: false,
       subagents: form.subagents,
       context: form.context || null,
+      mode: settings.mode,
     });
-    const next = { ...form, projects: [project, ...form.projects.filter((p) => p !== project)].slice(0, 12) };
+    const next = { ...form, mode: settings.mode, projects: [project, ...form.projects.filter((p) => p !== project)].slice(0, 12) };
     setSettings(next);
     saveSettings(next);
     opened(o);
@@ -682,6 +689,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
           priors: false,
           subagents: settings.subagents,
           context: settings.context || null,
+          mode: threads.mode(thread) ?? settings.mode,
         }),
       );
       await call();
@@ -714,6 +722,30 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
               ? () => void core.call("turn/answer_now", { thread: selected }).catch((e: unknown) => setError(message(e)))
               : undefined,
         };
+
+  // the thread's mode; a new thread starts in the one chosen last
+  const mode = (selected === undefined ? undefined : (threads.mode(selected) ?? summary?.mode)) ?? settings.mode;
+  /** The selected thread's mode, from its agent's next call on; a thread the core does not
+   * have open gets it when it is picked up again. */
+  const switchMode = async (m: P.Mode) => {
+    const next = { ...settings, mode: m };
+    setSettings(next);
+    saveSettings(next);
+    if (selected === undefined) return;
+    threads.setMode(selected, m);
+    if (!isOpen) return;
+    try {
+      await core.call("thread/mode", { thread: selected, mode: m });
+    } catch (e) {
+      if (!(e instanceof CoreError) || e.code !== P.ERRORS.noThread) throw e;
+    }
+  };
+  // a turn of plan mode that answered: its plan, to carry out
+  const planned = !running && !parent && mode === "plan" && last?.kind === "end" && last.end === "answer";
+  const carryOut = (m: P.Mode) =>
+    switchMode(m)
+      .then(() => sending?.send("Carry out the plan."))
+      .catch((e: unknown) => setError(message(e)));
 
   const asks = [...core.asks.values()];
   const approvals = asks.filter((a): a is ApprovalAsk => a.method === "approval/ask");
@@ -814,6 +846,30 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
                 </div>
               </div>
             )}
+            {planned && sending && (
+              <div className="px-6 pt-2">
+                <div className="rise mx-auto flex max-w-3xl flex-wrap items-center gap-2 rounded-md border border-spark/40 bg-panel px-3 py-1.5 text-[12px]">
+                  <span className="min-w-0 flex-1 text-spark">
+                    ◇ The plan is ready. Carry it out, or write what to change in it.
+                  </span>
+                  {(["edit_automatically", "auto", "manual"] as const).map((m, i) => (
+                    <button
+                      key={m}
+                      type="button"
+                      title={modeInfo(m).says}
+                      onClick={() => void carryOut(m)}
+                      className={
+                        i === 0
+                          ? "shrink-0 rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90"
+                          : "shrink-0 rounded border border-border px-2 py-0.5 hover:bg-raised"
+                      }
+                    >
+                      {i === 0 ? `Carry out · ${modeInfo(m).label}` : modeInfo(m).label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             {summary && !isOpen && (
               <p className="px-6 pt-1 text-center text-[12px] text-muted-foreground">
                 The core does not have this session open: a message picks it up again on {summary.server}
@@ -828,6 +884,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
                 key={store.info.id}
                 store={store}
                 sending={sending}
+                mode={mode}
+                onMode={(m) => void switchMode(m).catch((e: unknown) => setError(message(e)))}
                 context={(selected === undefined ? undefined : contexts.get(selected)) ?? summary?.context ?? undefined}
               />
             )}

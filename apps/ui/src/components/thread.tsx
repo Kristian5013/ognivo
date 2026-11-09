@@ -6,8 +6,9 @@ import { Streamdown } from "streamdown";
 import { ending, seconds } from "../format.ts";
 import type { VoidItem } from "../model.ts";
 import type { Row, ThreadStore } from "../store.ts";
+import { Follow, tail } from "./follow.tsx";
 import { SubagentCard, ThreadNavContext } from "./subagent.tsx";
-import { ToolCard } from "./tool.tsx";
+import { DraftCard, ToolCard } from "./tool.tsx";
 
 function Chevron({ open }: { open: boolean }) {
   return (
@@ -33,17 +34,32 @@ function Reasoning({
   row: Extract<Row, { kind: "item" }> & { item: { kind: "reasoning" } };
 }) {
   const ms = useGenerationMs(store, row.item.generation);
+  // while it streams, a window on it; once it ends, a line that opens to all of it
+  if (row.live) {
+    const text = row.item.text.trim();
+    return (
+      <div>
+        <div className="flex items-center gap-2 text-muted-foreground">
+          <span className="spinner" aria-hidden />
+          <span className="ember-text">Thinking…</span>
+        </div>
+        {text && (
+          <Follow
+            content={row.item.text}
+            label="The model's reasoning as it comes"
+            className="mt-1.5 max-h-40 border-l-2 border-spark/40 pl-3"
+          >
+            <p className="leading-5 whitespace-pre-wrap text-muted-foreground">{tail(text)}</p>
+          </Follow>
+        )}
+      </div>
+    );
+  }
   return (
     <Collapsible.Root open={row.open} onOpenChange={(o) => store.setOpen(row.item.id, o)}>
       <Collapsible.Trigger className="flex cursor-pointer items-center gap-2 text-muted-foreground hover:text-foreground">
         <Chevron open={row.open} />
-        {row.live ? (
-          <span className="ember-text">Thinking…</span>
-        ) : ms ? (
-          `Thought for ${seconds(ms)}`
-        ) : (
-          "Thought"
-        )}
+        {ms ? `Thought for ${seconds(ms)}` : "Thought"}
       </Collapsible.Trigger>
       <Collapsible.Content>
         {row.open && (
@@ -176,6 +192,8 @@ function Content({ store, row, dropped }: { store: ThreadStore; row: Row; droppe
           <span className="h-px flex-1 bg-border" />
         </div>
       );
+    case "draft":
+      return <DraftCard draft={row.draft} state={row.state} />;
     case "end":
       return (
         <div className="mt-2 mb-6 flex items-center gap-3 text-[12px] text-muted-foreground">
@@ -232,7 +250,7 @@ const RowView = memo(function RowView({
   const subscribe = useCallback((l: () => void) => store.subscribeRow(index, l), [store, index]);
   const row = useSyncExternalStore(subscribe, () => store.row(index));
   // a row that comes while the model works rises into place; one read back does not
-  const [rising] = useState(() => row?.kind === "item" && row.live);
+  const [rising] = useState(() => (row?.kind === "item" && row.live) || row?.kind === "draft");
   if (!row) return null;
   const generation = row.kind === "item" ? row.item.generation : undefined;
   // a turn taken back stays to be read, out of the way

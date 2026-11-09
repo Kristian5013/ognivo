@@ -883,6 +883,18 @@ pub fn name_of(family: Family, layout: Layout, id: &ToolId) -> Option<&'static s
         .map(|t| t.name)
 }
 
+/// The field an argument fills, the tool and the argument by their model-facing names in
+/// `family` and `layout`: what a call the model is still writing shows of it.
+pub fn field_of(family: Family, layout: Layout, tool: &str, arg: &str) -> Option<&'static str> {
+    table(family, layout)
+        .iter()
+        .find(|t| t.name == tool)?
+        .args
+        .iter()
+        .find(|a| a.name == arg)
+        .map(|a| a.field)
+}
+
 /// Checks a call against its declaration and maps it to a [`Call`].
 pub fn parse(
     family: Family,
@@ -1203,6 +1215,30 @@ fn coerce(v: &Value, kind: Kind) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_call_being_written_has_ognivos_names() {
+        let (h, q, g) = (Family::Harmony, Family::QwenXml, Family::Gemma4);
+        let s = Layout::Standard;
+        // the file and its content, whatever each family calls them
+        for (family, tool) in [(h, "write"), (q, "Write"), (g, "write")] {
+            let path = ["path", "file", "file_path"]
+                .into_iter()
+                .find_map(|a| field_of(family, s, tool, a));
+            assert_eq!(path, Some("path"), "{family:?}");
+        }
+        assert_eq!(field_of(q, s, "Write", "content"), Some("content"));
+        assert_eq!(
+            field_of(h, Layout::Priors, "repo_browser.apply_patch", "patch"),
+            Some("patch")
+        );
+        assert_eq!(
+            field_of(h, Layout::Priors, "container.exec", "command"),
+            Some("argv")
+        );
+        assert_eq!(field_of(h, s, "write", "nope"), None);
+        assert_eq!(field_of(h, s, "nope", "path"), None);
+    }
 
     #[test]
     fn delegate_comes_only_with_subagents_and_its_tasks_are_checked() {

@@ -17,6 +17,7 @@ use clap::Args;
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::approval::Mode;
 use ognivo_core::instructions::Load;
 use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::rules::Pending;
@@ -55,6 +56,9 @@ const HELP: &str = "\
 /accept [file]   mark it reviewed; with nothing left, builds and tests run without asking
 /revert [file]   put the files back as they were; commands with side effects stay done
 /clear           start a new conversation; what the session changed stays unreviewed
+/mode [mode]     how far the agent goes without asking: manual (every edit and command
+                 asks), edit (edits apply at once, the default), plan (it reads and plans,
+                 nothing changes) or auto (no questions but protected files and rules)
 /exit            quit; so does ^D
 A line that ends in \\ goes on in the next one; \"\"\" on a line of its own starts and ends a block.
 ^C stops the running turn, and the conversation goes on.
@@ -368,6 +372,10 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             }
             Entry::Revert(file) => {
                 revert(&mut agent, &screen, &input, &root, file.as_deref()).await;
+                continue;
+            }
+            Entry::Mode(name) => {
+                switch_mode(&agent, &screen, name.as_deref());
                 continue;
             }
             Entry::Exit => {
@@ -858,6 +866,8 @@ enum Entry {
     Changes(Option<String>),
     Accept(Option<String>),
     Revert(Option<String>),
+    /// A mode, if one was named.
+    Mode(Option<String>),
     Exit,
 }
 
@@ -910,7 +920,43 @@ fn command(text: &str) -> Option<Entry> {
         ("/changes" | "/diff", arg) => Some(Entry::Changes(arg)),
         ("/accept", arg) => Some(Entry::Accept(arg)),
         ("/revert", arg) => Some(Entry::Revert(arg)),
+        ("/mode", arg) => Some(Entry::Mode(arg)),
         _ => None,
+    }
+}
+
+/// `/mode`'s names for the modes.
+const MODES: [(&str, Mode); 4] = [
+    ("manual", Mode::Manual),
+    ("edit", Mode::EditAutomatically),
+    ("plan", Mode::Plan),
+    ("auto", Mode::Auto),
+];
+
+fn mode_name(mode: Mode) -> &'static str {
+    MODES
+        .iter()
+        .find(|(_, m)| *m == mode)
+        .map_or("edit", |(name, _)| name)
+}
+
+/// `/mode`: the mode, or the mode switched to.
+fn switch_mode(agent: &Agent, screen: &Screen, name: Option<&str>) {
+    let names = MODES.map(|(n, _)| n).join(", ");
+    match name.map(|n| MODES.iter().find(|(m, _)| *m == n.to_lowercase())) {
+        None => screen.line(
+            &format!(
+                "· mode: {} · /mode {}",
+                mode_name(agent.mode()),
+                names.replace(", ", " | ")
+            ),
+            Paint::Dim,
+        ),
+        Some(Some((name, mode))) => {
+            agent.set_mode(*mode);
+            screen.line(&format!("· mode: {name}"), Paint::Dim);
+        }
+        Some(None) => screen.line(&format!("· the modes are {names}"), Paint::Yellow),
     }
 }
 
@@ -1166,6 +1212,11 @@ mod tests {
             Some(Entry::Revert(Some("src/lib.rs".into())))
         );
         assert_eq!(command("/accept\nand more"), None);
+        assert_eq!(command("/mode"), Some(Entry::Mode(None)));
+        assert_eq!(
+            command("/mode plan"),
+            Some(Entry::Mode(Some("plan".into())))
+        );
     }
 
     #[test]

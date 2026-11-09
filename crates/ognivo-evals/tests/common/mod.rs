@@ -263,6 +263,7 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         hooks: Default::default(),
         agents: Default::default(),
         only: None,
+        mode: Default::default(),
     }
 }
 
