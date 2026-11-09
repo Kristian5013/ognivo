@@ -77,7 +77,7 @@
    ]
   },
   "context": {
-   "working_max": 65536,
+   "working_max": 98304,
    "compact_at": 0.65,
    "max_tokens": 16384,
    "ceiling": 262144

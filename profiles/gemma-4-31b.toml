@@ -43,7 +43,7 @@ default = "on"                  # the card's agentic scores (Tau2 76.9%) are wit
 history = "preserve"            # preserve_thinking=true (llama.cpp default), as the 26B
 
 [context]
-working_max = 65536             # what 24 GB holds beside the Q4_0 with KV q8_0 ([server]); not measured yet
+working_max = 98304             # what 24 GB holds beside the Q4_0 with KV q8_0 and -ub 512 ([server], 2026-11-09)
 compact_at = 0.65               # the 26B's until measured; MRCR v2 128K is 66.4% (the 26B: 44.1%)
 max_tokens = 16384              # the 26B's until measured
 ceiling = 262144                # the model card: a context of 256K
@@ -61,5 +61,5 @@ known = [
 ]
 
 [server]
-recommended_flags = "-c 65536 -np 1 -fa on -ngl 99 -ctk q8_0 -ctv q8_0 -b 2048 -ub 2048 --ctx-checkpoints 8 --checkpoint-min-step 2048 --cache-ram 12288 --chat-template-file profiles/templates/gemma-4-31B-it/canonical.jinja"
-notes = "Dense: each token reads all 30.7B, so decode is about 3x slower than the 26B A4B's (research). Estimated from the GGUF's shapes, not measured: the 10 global layers keep 80 KiB a token at f16 (42.5 KiB at q8_0), the 50 sliding-window ones 1024 + -ub cells of 800 KiB at f16 (425 KiB at q8_0). Beside the Q4_0 (16.4 GiB) on 24 GB: 64K at q8_0 is 2.7 GiB global + 1.2 GiB sliding window; f16 holds about 48K, with -ub 512. No --swa-full. KV never below q8_0. A checkpoint is the sliding-window cache, about 1.2 GiB in RAM here: 8 of them."
+recommended_flags = "-c 98304 -np 1 -fa on -ngl 99 -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --ctx-checkpoints 8 --checkpoint-min-step 2048 --cache-ram 12288 --chat-template-file profiles/templates/gemma-4-31B-it/canonical.jinja"
+notes = "Measured 2026-11-09 on the RTX 5090 Laptop (24 GB), pinned b11924: 98304 with KV q8_0 and -ub 512 takes 22821 of 24463 MiB; with -ub 2048 the 1.6 GiB compute buffer does not fit at 96K (64K takes 22331 MiB). -ub 512 costs no prefill: 1.38K tok/s on 10.7K tokens, as with -ub 2048 (1.39K). Decode 36 tok/s near 2K, 33 at 10.7K: dense, each token reads all 30.7B. The 10 global layers keep 42.5 KiB a token at q8_0 (80 at f16), the 50 sliding-window ones 1024 + -ub cells of 425 KiB (800 at f16): f16 would hold about 48K. No --swa-full. KV never below q8_0. A checkpoint is the sliding-window cache, about 0.6 GiB in RAM here: 8 of them."
