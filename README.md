@@ -17,6 +17,7 @@ terminal sessions in the window, packages (.deb, AppImage) and documentation in 
 |---|---|---|---|
 | `gpt-oss-20b` | gpt-oss-20b | Harmony | yes |
 | `gemma-4-26b-a4b` | Gemma 4 26B A4B | Gemma 4's call syntax | not yet |
+| `gemma-4-31b` | Gemma 4 31B | Gemma 4's call syntax | not yet |
 | `qwen3.8-27b` | Qwen3.8-27B | XML | yes |
 | `qwen3.6-35b-a3b` | Qwen3.6-35B-A3B | XML | yes |
 

@@ -239,6 +239,10 @@ const BUILTIN: &[(&str, &str)] = &[
         include_str!("../../../profiles/gemma-4-26b-a4b.toml"),
     ),
     (
+        "gemma-4-31b.toml",
+        include_str!("../../../profiles/gemma-4-31b.toml"),
+    ),
+    (
         "qwen3.8-27b.toml",
         include_str!("../../../profiles/qwen3.8-27b.toml"),
     ),
@@ -274,6 +278,7 @@ mod tests {
             families,
             [
                 Family::Harmony,
+                Family::Gemma4,
                 Family::Gemma4,
                 Family::QwenXml,
                 Family::QwenXml
@@ -335,26 +340,34 @@ mod tests {
 
     #[test]
     fn template_kwargs_follow_reasoning() {
-        let p = builtin().unwrap();
+        let all = builtin().unwrap();
+        let kwargs = |id: &str, level: Option<&str>| {
+            let p = all.iter().find(|p| p.id == id).unwrap();
+            Value::Object(p.chat_template_kwargs(level))
+        };
         assert_eq!(
-            Value::Object(p[0].chat_template_kwargs(None)),
+            kwargs("gpt-oss-20b", None),
             json!({"reasoning_effort": "high"})
         );
+        // Gemma 4: thinking on or off, no effort
+        for id in ["gemma-4-26b-a4b", "gemma-4-31b"] {
+            assert_eq!(
+                kwargs(id, None),
+                json!({"enable_thinking": true, "preserve_thinking": true}),
+                "{id}"
+            );
+        }
         assert_eq!(
-            Value::Object(p[1].chat_template_kwargs(None)),
-            json!({"enable_thinking": true, "preserve_thinking": true})
-        );
-        assert_eq!(
-            Value::Object(p[2].chat_template_kwargs(None)),
+            kwargs("qwen3.8-27b", None),
             json!({"enable_thinking": true, "preserve_thinking": true, "reasoning_effort": "medium"})
         );
         assert_eq!(
-            Value::Object(p[2].chat_template_kwargs(Some("off"))),
+            kwargs("qwen3.8-27b", Some("off")),
             json!({"enable_thinking": false, "preserve_thinking": true})
         );
         // Qwen3.6: thinking on or off, no effort
         assert_eq!(
-            Value::Object(p[3].chat_template_kwargs(None)),
+            kwargs("qwen3.6-35b-a3b", None),
             json!({"enable_thinking": true, "preserve_thinking": true})
         );
     }

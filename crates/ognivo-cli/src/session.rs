@@ -46,7 +46,7 @@ pub struct SessionArgs {
     /// Bearer token if the server was started with --api-key
     #[arg(long, env = "OGNIVO_API_KEY", hide_env_values = true)]
     pub api_key: Option<String>,
-    /// Profile id (gpt-oss-20b, gemma-4-26b-a4b, qwen3.8-27b, qwen3.6-35b-a3b); detected from the server when omitted
+    /// Profile id (gpt-oss-20b, gemma-4-26b-a4b, gemma-4-31b, qwen3.8-27b, qwen3.6-35b-a3b); detected from the server when omitted
     #[arg(long)]
     pub profile: Option<String>,
     /// Project root; the current directory by default

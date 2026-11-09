@@ -1,0 +1,37 @@
+{
+ "checked_on": "2026-11-09",
+ "canonical": {
+  "repo": "google/gemma-4-31B-it",
+  "main_revision": "842da3794eaa0b77d5f08bae87a17459d91ff475",
+  "file": "chat_template.jinja",
+  "blob_oid": "4741bf6e4132ba23a5537f9d6e74e9a6d613d7cd",
+  "size": 18683,
+  "last_commit": {
+   "id": "68abe48010cbe15293462fa11e901a60639a44e5",
+   "date": "2026-07-15T16:35:25.000Z",
+   "title": "fix: chat template — null handling, reasoning preservation, turn-tag balance, input validation (#118)"
+  },
+  "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "url": "https://huggingface.co/google/gemma-4-31B-it/resolve/842da3794eaa0b77d5f08bae87a17459d91ff475/chat_template.jinja",
+  "same_as": "profiles/templates/gemma-4-26B-A4B-it/canonical.jinja (google/gemma-4-26B-A4B-it, the same blob 4741bf6e), byte for byte",
+  "tokenizer_config_json": {
+   "sha256": "9f4fec4b1dc6ecddf8f4a92e9caea5971c0e67d81309f3f9066a2bee8c362633",
+   "same_as": "the 26B A4B's, with Google's response_template (#130, 2026-07-20)"
+  },
+  "generation_config_json": {
+   "bos_token_id": 2,
+   "eos_token_id": [1, 106, 50],
+   "temperature": 1.0,
+   "top_k": 64,
+   "top_p": 0.95
+  },
+  "saved_as": "canonical.jinja"
+ },
+ "gguf_embedded": {
+  "gguf": "gemma-4-31B_q4_0-it.gguf (the owner's: Q4_0, 17651001568 bytes; general.base_model.0.repo_url google/gemma-4-31B-it, no quantizer named, general.name \"Hf\")",
+  "sha256": "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4",
+  "differs": "no: the canonical template byte for byte, so it is not saved again",
+  "vocabulary": "262144 tokens, those of Unsloth's 26B A4B GGUF byte for byte (sha256 of the tokens joined by newlines: 7af66a9004b0dd94832142c7cd1f4670c9249d38f101de44c4f435e643573a23); of their control and user-defined tokens only <eos> differs, a control token here",
+  "meta": "gguf-meta.json"
+ }
+}

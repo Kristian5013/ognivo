@@ -1,0 +1,65 @@
+# Gemma 4 31B, dense (30.7B; 60 layers: 50 of sliding-window attention over 1024 tokens with 16
+# KV heads of 256, and 10 global ones with 4 KV heads of 512, K=V), with the 26B A4B's tool-call
+# DSL (<|tool_call>call:NAME{k:<|"|>v<|"|>}<tool_call|>), tokens, template and sampling.
+# Sources: the model card, config.json and generation_config.json of google/gemma-4-31B-it at
+# 842da379 (2026-07-20); the owner's GGUF gemma-4-31B_q4_0-it.gguf, whose vocabulary and
+# embedded template are the 26B A4B's byte for byte; docs/research/2026-10-29/gemma4.md.
+id = "gemma-4-31b"
+family = "gemma4"
+display_name = "Gemma 4 31B"
+
+[detect]
+probe = { text = "<|tool_call>", id = 48 }
+name_hints = ["gemma-4-31b"]
+
+[tokens]
+structural = [
+    "<|turn>", "<turn|>", "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
+    "<|tool_response>", "<tool_response|>", '<|"|>', "<|think|>", "<|channel>", "<channel|>",
+]
+# Without the thinking tags (<|think|>, <|channel>, <channel|>), which tasks may quote.
+framing = [
+    "<|turn>", "<turn|>", "<|tool>", "<tool|>", "<|tool_call>", "<tool_call|>",
+    "<|tool_response>", "<tool_response|>", '<|"|>',
+]
+eog = [1, 106, 50] # <eos>, <turn|>, <|tool_response> (generation_config.json)
+specials = [
+    "<pad>", "<eos>", "<bos>", "<unk>", "<mask>",
+    "<|image>", "<|audio>", "<|image|>", "<|audio|>", "<image|>", "<audio|>", "<|video|>",
+]
+bos = 2            # token-array prompts get no BOS from the server: the agent adds it
+
+[sampling.main]
+# The card's, for all uses: temperature 1.0, top_p 0.95, top_k 64.
+temperature = 1.0
+top_p = 0.95
+top_k = 64
+min_p = 0.0
+
+[reasoning]
+control = "toggle"              # <|think|> in the system turn: fixed for the session
+levels = ["on", "off"]
+default = "on"                  # the card's agentic scores (Tau2 76.9%) are with thinking
+history = "preserve"            # preserve_thinking=true (llama.cpp default), as the 26B
+
+[context]
+working_max = 65536             # what 24 GB holds beside the Q4_0 with KV q8_0 ([server]); not measured yet
+compact_at = 0.65               # the 26B's until measured; MRCR v2 128K is 66.4% (the 26B: 44.1%)
+max_tokens = 16384              # the 26B's until measured
+ceiling = 262144                # the model card: a context of 256K
+
+[template]
+dir = "profiles/templates/gemma-4-31B-it"
+file_sha256 = "ae53464bf3be25802b3a5b37def7fd89667067d7577049b3b2d74c4d8de4c6d4"
+# The 26B A4B's canonical template byte for byte. enable_thinking/preserve_thinking come from
+# [reasoning] and are always sent explicitly: the template defaults are false/false,
+# llama-server defaults to true/true.
+# sha256 of the served form, as /props reports it (template.rs: served_form)
+known = [
+    { sha256 = "6a1015c47ccfcfa67c3b772385bccee357a4d37c3cda37bd202e9047f391ab82", verdict = "canonical", note = "google/gemma-4-31B-it, 2026-07-15; gemma-4-31B_q4_0-it.gguf embeds it" },
+    { sha256 = "aa3185dfc65051046349995de1cfc2fbb275491b9a3832b71595f1ff5b31d61b", verdict = "ok", note = "Unsloth's Gemma 4 GGUF template (26B A4B, file 845f1ee4); renders byte-identically to canonical under llama.cpp" },
+]
+
+[server]
+recommended_flags = "-c 65536 -np 1 -fa on -ngl 99 -ctk q8_0 -ctv q8_0 -b 2048 -ub 2048 --ctx-checkpoints 8 --checkpoint-min-step 2048 --cache-ram 12288 --chat-template-file profiles/templates/gemma-4-31B-it/canonical.jinja"
+notes = "Dense: each token reads all 30.7B, so decode is about 3x slower than the 26B A4B's (research). Estimated from the GGUF's shapes, not measured: the 10 global layers keep 80 KiB a token at f16 (42.5 KiB at q8_0), the 50 sliding-window ones 1024 + -ub cells of 800 KiB at f16 (425 KiB at q8_0). Beside the Q4_0 (16.4 GiB) on 24 GB: 64K at q8_0 is 2.7 GiB global + 1.2 GiB sliding window; f16 holds about 48K, with -ub 512. No --swa-full. KV never below q8_0. A checkpoint is the sliding-window cache, about 1.2 GiB in RAM here: 8 of them."

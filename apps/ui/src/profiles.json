@@ -45,6 +45,52 @@
   },
   "native": false
  },
+ "gemma-4-31b": {
+  "tokens": {
+   "framing": [
+    "\u003c|turn\u003e",
+    "\u003cturn|\u003e",
+    "\u003c|tool\u003e",
+    "\u003ctool|\u003e",
+    "\u003c|tool_call\u003e",
+    "\u003ctool_call|\u003e",
+    "\u003c|tool_response\u003e",
+    "\u003ctool_response|\u003e",
+    "\u003c|\"|\u003e"
+   ],
+   "other": [
+    "\u003c|think|\u003e",
+    "\u003c|channel\u003e",
+    "\u003cchannel|\u003e",
+    "\u003cpad\u003e",
+    "\u003ceos\u003e",
+    "\u003cbos\u003e",
+    "\u003cunk\u003e",
+    "\u003cmask\u003e",
+    "\u003c|image\u003e",
+    "\u003c|audio\u003e",
+    "\u003c|image|\u003e",
+    "\u003c|audio|\u003e",
+    "\u003cimage|\u003e",
+    "\u003caudio|\u003e",
+    "\u003c|video|\u003e"
+   ]
+  },
+  "context": {
+   "working_max": 65536,
+   "compact_at": 0.65,
+   "max_tokens": 16384,
+   "ceiling": 262144
+  },
+  "reasoning": {
+   "levels": [
+    "on",
+    "off"
+   ],
+   "default": "on"
+  },
+  "native": false
+ },
  "gpt-oss-20b": {
   "tokens": {
    "framing": [

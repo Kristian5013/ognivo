@@ -703,4 +703,18 @@ mod tests {
                 .all(|m| !m.contains("past the most"))
         );
     }
+
+    #[test]
+    fn a_gemma_4_file_name_picks_its_size() {
+        // both have the same tokens: the name tells them apart
+        let profiles = builtin().unwrap();
+        let by =
+            |file: &str| profile_by_name(&[file.to_lowercase()], &profiles).map(|p| p.id.as_str());
+        assert_eq!(by("gemma-4-31B_q4_0-it.gguf"), Some("gemma-4-31b"));
+        assert_eq!(by("gemma-4-31B-it-UD-Q4_K_XL.gguf"), Some("gemma-4-31b"));
+        assert_eq!(
+            by("gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"),
+            Some("gemma-4-26b-a4b")
+        );
+    }
 }

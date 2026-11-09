@@ -32,6 +32,11 @@
       "profile": "profiles/qwen3.6-35b-a3b.toml",
       "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf",
       "agent_timeout_s": 600
+    },
+    "gemma-4-31b": {
+      "profile": "profiles/gemma-4-31b.toml",
+      "gguf": "/run/media/kristian/b39e73c3-74a9-42e9-bffb-28c79f61cc2e/gemma-4-31B_q4_0-it.gguf",
+      "agent_timeout_s": 1500
     }
   }
 }
