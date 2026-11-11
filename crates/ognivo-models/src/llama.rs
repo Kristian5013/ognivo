@@ -115,6 +115,12 @@ pub struct Props {
     pub n_ctx: Option<u32>,
     pub chat_template: Option<String>,
     pub default_sampling: DefaultSampling,
+    /// Whether the model takes images: a server started with its projector (`--mmproj`).
+    /// `None` where `/props` does not say.
+    pub vision: Option<bool>,
+    /// The text that stands for an image in a prompt string: drawn anew at each start of
+    /// upstream llama-server, `<__media__>` before it named one.
+    pub media_marker: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -142,6 +148,11 @@ impl Props {
             total_slots: u32_of(&v["total_slots"]),
             n_ctx: u32_of(&settings["n_ctx"]).filter(|&n| n > 0),
             chat_template: v["chat_template"].as_str().map(str::to_owned),
+            vision: v["modalities"]["vision"].as_bool(),
+            media_marker: v["media_marker"]
+                .as_str()
+                .filter(|m| !m.is_empty())
+                .map(str::to_owned),
             default_sampling: DefaultSampling {
                 temperature: params["temperature"].as_f64(),
                 top_p: params["top_p"].as_f64(),
@@ -545,6 +556,17 @@ mod tests {
         assert_eq!(p.build_info.as_deref(), Some("b11924-12cc59ba4"));
         assert_eq!(p.n_ctx, Some(16384));
         assert_eq!(p.default_sampling.top_k, Some(40.0));
+        assert_eq!((p.vision, p.media_marker.as_deref()), (None, None));
+        // with a projector: what it reads, and the marker of this start
+        let seeing = json!({
+            "modalities": {"vision": true, "video": false, "audio": false},
+            "media_marker": "<__media_abc123__>",
+        });
+        let p = Props::from_json(&seeing);
+        assert_eq!(
+            (p.vision, p.media_marker.as_deref()),
+            (Some(true), Some("<__media_abc123__>"))
+        );
 
         let ik = json!({"default_generation_settings": {"n_ctx": 16384, "temperature": 0.8, "top_k": 40}});
         assert_eq!(Props::from_json(&ik).default_sampling.top_k, Some(40.0));

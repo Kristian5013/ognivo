@@ -65,6 +65,13 @@ checked against.
   `--context 64k`, `OGNIVO_CONTEXT` or the window's Context field set another.
   At the profile's share of it, 65–90%, the conversation is compacted in the middle of a
   turn: the model's summary, ognivo's facts and the last steps replace the rest.
+- **Images** for a model whose llama-server runs its projector (`--mmproj`): Gemma 4 and
+  Qwen3.6/3.8 see them, gpt-oss does not. Paste, drop or add them with a message in the
+  window, `/image FILE` in `chat`, `--image FILE` in `run`; a read of an image file gives
+  the model the image. PNG, JPEG, GIF and BMP, up to 10 MB each and 8 or 32 MB a message;
+  the window turns other formats into PNG. A request carries up to 48 MB of the newest
+  images (llama-server takes 100 MB), and the model reads what the older ones were. On the Native path a step with images goes to the server
+  as text with its media marker, content guarded as on the Generic path.
 - **Guards** against special tokens in content, repeated output, repeated calls and calls
   cut off by the token limit.
 - **Subagents** (`--subagents`): the agent hands tasks to subagents with `delegate`. They

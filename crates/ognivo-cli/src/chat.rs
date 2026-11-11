@@ -23,6 +23,7 @@ use ognivo_core::journal::{FileChange, JournalError, Reverted};
 use ognivo_core::rules::Pending;
 use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
+use ognivo_models::image::{self, Image};
 use ognivo_tools::files;
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 use rustyline::DefaultEditor;
@@ -32,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use ognivo_store::{SessionRow, Store};
 
-use crate::session::{Failure, SessionArgs};
+use crate::session::{Failure, NO_VISION, SessionArgs, image_file};
 use crate::view::{self, Paint, Screen, Style, View, duration, kilo, printable};
 
 #[derive(Debug, Args)]
@@ -56,6 +57,9 @@ const HELP: &str = "\
 /accept [file]   mark it reviewed; with nothing left, builds and tests run without asking
 /revert [file]   put the files back as they were; commands with side effects stay done
 /clear           start a new conversation; what the session changed stays unreviewed
+/image [file]    an image for your next message, which the model sees before its text:
+                 PNG, JPEG, GIF or BMP, for a model whose server runs --mmproj; without a
+                 file, what goes with it; /image clear takes them back
 /mode [mode]     how far the agent goes without asking: manual (every edit and command
                  asks), edit (edits apply at once, the default), plan (it reads and plans,
                  nothing changes) or auto (no questions but protected files and rules)
@@ -231,6 +235,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     if signed {
         mcp_lines = s.start_mcp().await;
     }
+    let vision = s.opts.vision;
     let agent = match &stored {
         Some(row) => s.resumed_agent(row, store, Box::new(approver)),
         None => s.new_agent("chat", &a.session.url, store, Box::new(approver)),
@@ -333,6 +338,8 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     let mut term = signal(SignalKind::terminate())?;
     // ^\ in a line-mode terminal: the reasoning ends, and the answer comes (Native path)
     let mut quit = signal(SignalKind::quit())?;
+    // the images `/image` attached, which go with the next message
+    let mut images: Vec<Image> = Vec::new();
     loop {
         if let Some(e) = agent.store_failure() {
             screen.line(
@@ -378,6 +385,10 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
                 switch_mode(&agent, &screen, name.as_deref());
                 continue;
             }
+            Entry::Image(file) => {
+                attach(&mut images, vision, &screen, file.as_deref());
+                continue;
+            }
             Entry::Exit => {
                 agent.end_session("prompt_input_exit").await;
                 if let Some(id) = agent.close() {
@@ -404,7 +415,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         let mut view = View::new(screen.clone(), root.clone(), a.show_reasoning);
         let outcome = {
             let mut on = |e: AgentEvent| view.show(e);
-            let turn = agent.turn(&text, &mut on);
+            let turn = agent.turn_with(&text, std::mem::take(&mut images), &mut on);
             tokio::pin!(turn);
             loop {
                 tokio::select! {
@@ -573,7 +584,7 @@ fn stored(a: &ChatArgs, store: &Store) -> Result<Option<SessionRow>, Failure> {
 /// The first line of the user's last message, for a resumed session.
 fn last_message(agent: &Agent) -> Option<String> {
     agent.messages().iter().rev().find_map(|m| match m {
-        ognivo_models::ChatMessage::User(text) if !text.starts_with("[ognivo]") => {
+        ognivo_models::ChatMessage::User { text, .. } if !text.starts_with("[ognivo]") => {
             text.lines().next().map(printable)
         }
         _ => None,
@@ -868,6 +879,8 @@ enum Entry {
     Revert(Option<String>),
     /// A mode, if one was named.
     Mode(Option<String>),
+    /// An image file, if one was named.
+    Image(Option<String>),
     Exit,
 }
 
@@ -921,7 +934,56 @@ fn command(text: &str) -> Option<Entry> {
         ("/accept", arg) => Some(Entry::Accept(arg)),
         ("/revert", arg) => Some(Entry::Revert(arg)),
         ("/mode", arg) => Some(Entry::Mode(arg)),
+        ("/image", arg) => Some(Entry::Image(arg)),
         _ => None,
+    }
+}
+
+/// `/image`: an image for the next message, what goes with it, or nothing again.
+fn attach(images: &mut Vec<Image>, vision: bool, screen: &Screen, file: Option<&str>) {
+    let listed = |images: &[Image]| {
+        let what: Vec<String> = images.iter().map(Image::describe).collect();
+        what.join("; ")
+    };
+    match file {
+        None if images.is_empty() => screen.line(
+            "· no image goes with your next message: /image FILE attaches one",
+            Paint::Dim,
+        ),
+        None => screen.line(
+            &format!("· with your next message: {}", listed(images)),
+            Paint::Dim,
+        ),
+        Some("clear") => {
+            images.clear();
+            screen.line("· no image goes with your next message", Paint::Dim);
+        }
+        Some(_) if !vision => screen.line(&format!("· {NO_VISION}"), Paint::Yellow),
+        Some(_) if images.len() >= image::MAX_PER_MESSAGE => screen.line(
+            &format!(
+                "· a message may hold at most {} images",
+                image::MAX_PER_MESSAGE
+            ),
+            Paint::Yellow,
+        ),
+        Some(file) => match image_file(Path::new(file)).and_then(|i| {
+            let mut all = images.clone();
+            all.push(i.clone());
+            image::too_many(&all).map_or(Ok(i), Err)
+        }) {
+            Ok(i) => {
+                screen.line(
+                    &format!(
+                        "· {} goes with your next message: {}",
+                        printable(file),
+                        i.describe()
+                    ),
+                    Paint::Dim,
+                );
+                images.push(i);
+            }
+            Err(why) => screen.line(&format!("· {}", printable(&why)), Paint::Yellow),
+        },
     }
 }
 
@@ -1213,6 +1275,11 @@ mod tests {
         );
         assert_eq!(command("/accept\nand more"), None);
         assert_eq!(command("/mode"), Some(Entry::Mode(None)));
+        assert_eq!(
+            command("/image shots/a b.png"),
+            Some(Entry::Image(Some("shots/a b.png".into())))
+        );
+        assert_eq!(command("/image"), Some(Entry::Image(None)));
         assert_eq!(
             command("/mode plan"),
             Some(Entry::Mode(Some("plan".into())))

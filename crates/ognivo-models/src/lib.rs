@@ -16,7 +16,8 @@
 //! - [`template`]: chat templates in the form servers report them;
 //! - [`grammar`]: GBNF for llama.cpp, JSON Schema turned into rules;
 //! - [`router`]: the servers and their models, and whose step goes next at their slots,
-//!   by priority.
+//!   by priority;
+//! - [`image`]: the images the model sees, the user's and those a call reads.
 //!
 //! - [`harmony`]: gpt-oss's format, rendered as its reference does and read back
 //!   tolerantly, for the Native path (M2);
@@ -34,6 +35,7 @@ pub mod generic;
 pub mod grammar;
 pub mod guard;
 pub mod harmony;
+pub mod image;
 pub mod llama;
 pub mod native;
 pub mod profile;
@@ -52,6 +54,7 @@ pub use generic::{
     Outcome, ToolCall, ToolChoice, ToolDecl, chat_body, chat_events,
 };
 pub use guard::Guard;
+pub use image::Image;
 pub use native::{AnswerNow, NativeDriver};
 pub use profile::ModelProfile;
 

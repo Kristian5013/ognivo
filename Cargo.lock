@@ -1138,6 +1138,7 @@ name = "ognivo-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "futures",
  "ognivo-core",
@@ -1214,6 +1215,7 @@ dependencies = [
 name = "ognivo-models"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "regex",
  "reqwest",

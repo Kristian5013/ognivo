@@ -570,6 +570,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
         agents,
         only: None,
         mode: Default::default(),
+        vision: false,
     };
     let mut agent = Agent::new(driver, t.profile.family, Box::new(NoUser), opts);
     agent.keep_in(session);

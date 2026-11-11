@@ -55,6 +55,16 @@ impl Guard {
         }
     }
 
+    /// The guard with one more guarded string: llama-server's media marker, in a prompt
+    /// that goes as text with images (§5.8).
+    pub fn with(&self, extra: &str) -> Guard {
+        let mut g = self.clone();
+        if !extra.is_empty() && !g.guarded.iter().any(|s| s == extra) {
+            g.guarded.push(extra.to_owned());
+        }
+        g
+    }
+
     /// `text` with a joiner after the first character of every guarded string and every
     /// joiner already in it doubled.
     pub fn escape<'a>(&self, text: &'a str) -> Cow<'a, str> {

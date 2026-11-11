@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
+use ognivo_models::image::{self, Image};
 use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
     Channel, ChatMessage, DriverError, DriverEvent, Family, FinishReason, Finished, ModelDriver,
@@ -138,9 +139,15 @@ impl Approver for AllowAll {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    /// A turn began: the user's message, or a subagent's task.
+    /// A turn began: the user's message, or a subagent's task, and the user's images,
+    /// which the model sees before the text. A log keeps what they are, not their bytes.
     TurnStarted {
         user: String,
+        #[serde(
+            serialize_with = "image::described",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        images: Vec<Image>,
     },
     Reasoning {
         text: String,
@@ -173,6 +180,12 @@ pub enum AgentEvent {
         id: String,
         tool: String,
         result: String,
+        /// The image file it read, which the model gets after the text.
+        #[serde(
+            serialize_with = "image::described",
+            skip_serializing_if = "Vec::is_empty"
+        )]
+        images: Vec<Image>,
     },
     /// Instruction files (AGENTS.md, CLAUDE.md, their imports) the model got after a
     /// call's result, from the directories on the path of the file it read or changed, and
@@ -386,6 +399,9 @@ pub struct AgentOptions {
     /// The thread's mode, which the user may switch while a turn runs: a subagent holds
     /// its agent's.
     pub mode: ModeSwitch,
+    /// The model takes images: its server runs a projector (`/props`). Without it the
+    /// model gets what each image is instead of the image (docs/architecture.md §5.8).
+    pub vision: bool,
 }
 
 /// The time limit of the running turn.
@@ -493,6 +509,70 @@ impl Drafts {
     }
 }
 
+/// The bytes of `path` when it is an image file, whatever its name: the read gives the
+/// image, not its text. Only the first bytes are read of any other file.
+fn image_file(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = [0u8; 16];
+    let n = f.read(&mut head).ok()?;
+    if !image::looks_like_image(&head[..n]) {
+        return None;
+    }
+    let mut bytes = head[..n].to_vec();
+    // one byte past the limit says the file is over it
+    f.take(image::MAX_BYTES as u64 + 1 - n as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    Some(bytes)
+}
+
+/// The conversation with the newest images that have `room` (§5.8): those of older messages
+/// go as what they are. A message's images go all or none.
+fn latest_images(mut messages: Vec<ChatMessage>, mut room: usize) -> Vec<ChatMessage> {
+    let Some(over) = messages.iter().rposition(|m| {
+        let bytes: usize = m.images().iter().map(Image::size).sum();
+        let over = bytes > room;
+        room = room.saturating_sub(bytes);
+        over
+    }) else {
+        return messages;
+    };
+    let why = "as a request carries only the newest images";
+    for m in &mut messages[..=over] {
+        if !m.images().is_empty() {
+            *m = unseen(m.clone(), why);
+        }
+    }
+    messages
+}
+
+/// A message without its images: what each image is, after the text, and `why`.
+fn unseen(m: ChatMessage, why: &str) -> ChatMessage {
+    let note = |images: &[Image]| {
+        let what: Vec<String> = images.iter().map(Image::describe).collect();
+        format!("[ognivo] Not shown, {why}: {}.", what.join("; "))
+    };
+    let with = |text: String, images: &[Image]| {
+        if text.is_empty() {
+            note(images)
+        } else {
+            format!("{text}\n\n{}", note(images))
+        }
+    };
+    match m {
+        ChatMessage::User { text, images } if !images.is_empty() => {
+            ChatMessage::user(with(text, &images))
+        }
+        ChatMessage::Tool {
+            tool_call_id,
+            content,
+            images,
+        } if !images.is_empty() => ChatMessage::tool(tool_call_id, with(content, &images)),
+        other => other,
+    }
+}
+
 /// What the agent asked the model, as a fingerprint for traces: sha256 of its messages
 /// and tools as JSON.
 fn prompt_hash(req: &StepRequest) -> String {
@@ -555,6 +635,8 @@ pub struct Agent {
     stuck: Option<String>,
     /// The id of the call being executed.
     running: Option<String>,
+    /// The image file the call being executed read, for its result.
+    read_images: Vec<Image>,
     /// Tokens the server held after the last step.
     context: u64,
     /// The least context at which the model wrote nothing ([`NOTHING_WRITTEN_PAST`]): the
@@ -1256,7 +1338,7 @@ impl Agent {
         Self {
             messages: vec![
                 ChatMessage::System(system_prompt(opts.layout)),
-                ChatMessage::User(project_context(
+                ChatMessage::user(project_context(
                     &opts.root,
                     &prompt_instructions.text,
                     opts.mcp.as_deref(),
@@ -1286,6 +1368,7 @@ impl Agent {
             repeats: Repeats::default(),
             stuck: None,
             running: None,
+            read_images: Vec::new(),
             context: 0,
             broke_at: None,
             counted: 0,
@@ -1308,7 +1391,7 @@ impl Agent {
     /// prompt and starts with that alone).
     fn head(&self) -> usize {
         match self.messages.get(1) {
-            Some(ChatMessage::User(t)) if t.starts_with(PROJECT_AT) => 2,
+            Some(ChatMessage::User { text, .. }) if text.starts_with(PROJECT_AT) => 2,
             _ => 1,
         }
     }
@@ -1507,10 +1590,8 @@ impl Agent {
                 } else {
                     "[error] not run: the turn was stopped"
                 };
-                self.messages.push(ChatMessage::Tool {
-                    tool_call_id: id,
-                    content: content.to_owned(),
-                });
+                self.messages
+                    .push(ChatMessage::tool(id, content.to_owned()));
             }
         }
         self.stopped = Some(why.to_owned());
@@ -1533,7 +1614,7 @@ impl Agent {
         self.session_start = Some("clear");
         self.messages = vec![
             ChatMessage::System(system_prompt(self.opts.layout)),
-            ChatMessage::User(project_context(
+            ChatMessage::user(project_context(
                 &self.opts.root,
                 &self.prompt_instructions.text,
                 self.opts.mcp.as_deref(),
@@ -1558,7 +1639,9 @@ impl Agent {
             .iter()
             .enumerate()
             .skip(self.head())
-            .filter(|(_, m)| matches!(m, ChatMessage::User(t) if !t.starts_with("[ognivo]")))
+            .filter(
+                |(_, m)| matches!(m, ChatMessage::User { text, .. } if !text.starts_with("[ognivo]")),
+            )
             .map(|(i, _)| i)
             .collect()
     }
@@ -1598,15 +1681,27 @@ impl Agent {
         user: &str,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Result<TurnEnd, DriverError> {
+        self.turn_with(user, Vec::new(), on).await
+    }
+
+    /// Runs one user turn whose message holds images, which the model sees before its
+    /// text; a model that takes no images gets what they are ([`AgentOptions::vision`]).
+    pub async fn turn_with(
+        &mut self,
+        user: &str,
+        images: Vec<Image>,
+        on: &mut (dyn FnMut(AgentEvent) + Send),
+    ) -> Result<TurnEnd, DriverError> {
         self.in_turn = true;
         if let Some(s) = self.session.as_mut() {
-            s.user(user);
+            s.user(user, &images);
         }
         // the session keeps the user's message and the turn's end on its own
         on(AgentEvent::TurnStarted {
             user: user.to_owned(),
+            images: images.clone(),
         });
-        let end = self.steps(user, on).await;
+        let end = self.steps(user, images, on).await;
         self.in_turn = false;
         // a skill's allowed-tools count in the turn that ran it
         self.opts.rules.deactivate();
@@ -1706,8 +1801,16 @@ impl Agent {
     }
 
     /// The next generation's request; it counts as a step, and its seed follows from that.
+    /// A model that takes no images gets what they are instead: a conversation that had
+    /// them can go on with another model.
     fn request(&mut self, tool_choice: ToolChoice, messages: Vec<ChatMessage>) -> StepRequest {
         self.stats.steps += 1;
+        let messages = if self.opts.vision {
+            latest_images(messages, image::MAX_REQUEST_BYTES)
+        } else {
+            let why = "as this model reads no images";
+            messages.into_iter().map(|m| unseen(m, why)).collect()
+        };
         StepRequest {
             messages,
             tools: self.tools.clone(),
@@ -1892,7 +1995,7 @@ impl Agent {
         self.news = false;
         self.emit(on, AgentEvent::Compacting { tokens, limit });
         let mut messages = self.messages.clone();
-        messages.push(ChatMessage::User(compact::SUMMARY_REQUEST.to_owned()));
+        messages.push(ChatMessage::user(compact::SUMMARY_REQUEST.to_owned()));
         let req = self.request(ToolChoice::None, messages);
         let summary = match self.generate(req, deadline, on, false, "summary").await? {
             None => return Ok(Some(TurnEnd::TimeLimit)),
@@ -1926,7 +2029,7 @@ impl Agent {
             note.push_str("\n\n");
             note.push_str(&n);
         }
-        self.messages.push(ChatMessage::User(note));
+        self.messages.push(ChatMessage::user(note));
         self.messages.extend(kept);
         self.turn_start = head;
         self.context = 0;
@@ -2012,6 +2115,7 @@ impl Agent {
     async fn steps(
         &mut self,
         user: &str,
+        images: Vec<Image>,
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Result<TurnEnd, DriverError> {
         let request = user;
@@ -2110,9 +2214,15 @@ impl Agent {
             ));
             self.reverted.clear();
         }
-        self.messages.push(ChatMessage::User(user));
+        // a compaction keeps the request, and says it had images
+        let kept = match images.len() {
+            0 => request.to_owned(),
+            1 => format!("{request} [with an image]"),
+            n => format!("{request} [with {n} images]"),
+        };
+        self.messages.push(ChatMessage::User { text: user, images });
         self.turn_start = self.messages.len() - 1;
-        self.requests.push(request.to_owned());
+        self.requests.push(kept);
         self.save();
         let (mut sent_to_verify, mut sent_to_correct) = (false, false);
         let mut unusable = 0;
@@ -2182,7 +2292,7 @@ impl Agent {
                     // made a write that had run again, three times (2026-11-02, second run)
                     let note = "[ognivo] Your last output ended with neither a tool call nor an answer: it stopped inside your reasoning, so that output ran nothing. The calls before it ran, and their results are above. Make the call you were planning directly, or give the final answer.".to_owned();
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
-                    self.messages.push(ChatMessage::User(note));
+                    self.messages.push(ChatMessage::user(note));
                 }
                 Outcome::Answer => {
                     let verification = self.ledger.status(&self.opts.root);
@@ -2230,7 +2340,7 @@ impl Agent {
                     if let Some(note) = back {
                         self.stats.answers_sent_back += 1;
                         self.emit(on, AgentEvent::Notice { text: note.clone() });
-                        self.messages.push(ChatMessage::User(note));
+                        self.messages.push(ChatMessage::user(note));
                         continue;
                     }
                     self.messages.push(ChatMessage::Assistant {
@@ -2265,6 +2375,7 @@ impl Agent {
                         self.messages.push(ChatMessage::Tool {
                             tool_call_id: call.id.clone(),
                             content: result,
+                            images: std::mem::take(&mut self.read_images),
                         });
                         self.save();
                     }
@@ -2285,7 +2396,7 @@ impl Agent {
                         self.opts.context.max_tokens
                     );
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
-                    self.messages.push(ChatMessage::User(note));
+                    self.messages.push(ChatMessage::user(note));
                 }
                 Outcome::Malformed { reason, .. } => {
                     self.stats.malformed += 1;
@@ -2294,7 +2405,7 @@ impl Agent {
                         "[ognivo] Your last tool call could not be used ({reason}), so nothing was run. Call the tool again with a JSON object of arguments."
                     );
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
-                    self.messages.push(ChatMessage::User(note));
+                    self.messages.push(ChatMessage::user(note));
                 }
                 Outcome::Repeating {
                     channel, sample, ..
@@ -2314,7 +2425,7 @@ impl Agent {
                         "[ognivo] Your last output was stopped because {channel} kept repeating {sample:?}; nothing was run and it was discarded. {advice}"
                     );
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
-                    self.messages.push(ChatMessage::User(note));
+                    self.messages.push(ChatMessage::user(note));
                 }
             }
             self.save();
@@ -2380,6 +2491,7 @@ impl Agent {
     ) -> String {
         self.stats.calls += 1;
         self.running = Some(call.id.clone());
+        self.read_images.clear();
         // a tool of an MCP server is the server's to check
         let gateway = self.opts.mcp.clone();
         let searched = gateway.as_ref().is_some_and(|g| g.searched());
@@ -2513,6 +2625,7 @@ impl Agent {
                 id: call.id.clone(),
                 tool: call.name.clone(),
                 result: result.clone(),
+                images: self.read_images.clone(),
             },
         );
         if !near.files.is_empty() || !near.skipped.is_empty() {
@@ -2562,7 +2675,12 @@ impl Agent {
                 {
                     return refusal;
                 }
-                match files::read(&Target::new(p.clone(), &root), offset, limit, style) {
+                let target = Target::new(p.clone(), &root);
+                let read = match image_file(&p) {
+                    Some(bytes) => self.read_image(&target, &bytes),
+                    None => files::read(&target, offset, limit, style).map_err(|e| error_text(&e)),
+                };
+                match read {
                     Ok(text) => {
                         if self.turn_reads.insert(p.clone()) {
                             self.news = true;
@@ -2570,7 +2688,7 @@ impl Agent {
                         self.seen.insert(p);
                         text
                     }
-                    Err(e) => error_text(&e),
+                    Err(e) => e,
                 }
             }
             Call::Grep {
@@ -2995,12 +3113,27 @@ impl Agent {
     /// extra message enters the history.
     fn append_to_last(&mut self, note: &str) {
         match self.messages.last_mut() {
-            Some(ChatMessage::Tool { content, .. } | ChatMessage::User(content)) => {
+            Some(ChatMessage::Tool { content, .. } | ChatMessage::User { text: content, .. }) => {
                 content.push_str("\n\n");
                 content.push_str(note);
             }
-            _ => self.messages.push(ChatMessage::User(note.to_owned())),
+            _ => self.messages.push(ChatMessage::user(note.to_owned())),
         }
+    }
+
+    /// An image file as a call's result: what it is, and the image after it for a model
+    /// that takes images (§5.8).
+    fn read_image(&mut self, t: &Target, bytes: &[u8]) -> Result<String, String> {
+        let shown = t.shown.display();
+        let i = Image::new(bytes).map_err(|e| format!("[error] {shown}: {e}"))?;
+        let what = i.describe();
+        if !self.opts.vision {
+            return Ok(format!(
+                "[read: {shown} — an image, {what}. This model reads no images here, so it is not shown.]"
+            ));
+        }
+        self.read_images.push(i);
+        Ok(format!("[read: {shown} — an image, {what}; it follows]"))
     }
 
     fn commit(
@@ -4001,6 +4134,7 @@ mod tests {
             agents: Templates::default(),
             only: None,
             mode: Default::default(),
+            vision: false,
         }
     }
 
@@ -4090,7 +4224,9 @@ mod tests {
         a.messages()
             .iter()
             .filter_map(|m| match m {
-                ChatMessage::User(t) if t.starts_with("[ognivo]") && !t.starts_with(PROJECT_AT) => {
+                ChatMessage::User { text: t, .. }
+                    if t.starts_with("[ognivo]") && !t.starts_with(PROJECT_AT) =>
+                {
                     Some(t.clone())
                 }
                 _ => None,
@@ -4130,7 +4266,9 @@ mod tests {
         r.agent.turn("second", &mut on).await.unwrap();
         let starts = r.agent.turn_starts();
         assert_eq!(starts.len(), 2);
-        assert!(matches!(&r.agent.messages()[starts[1]], ChatMessage::User(t) if t == "second"));
+        assert!(
+            matches!(&r.agent.messages()[starts[1]], ChatMessage::User { text: t, .. } if t == "second")
+        );
         r.agent.rewind(starts[1]);
         assert_eq!(r.agent.messages().len(), starts[1]);
         assert_eq!(r.agent.turn_starts(), &starts[..1]);
@@ -4141,7 +4279,7 @@ mod tests {
         assert!(
             matches!(&sent[starts[1] - 1], ChatMessage::Assistant { content, .. } if content == "one")
         );
-        let ChatMessage::User(t) = &sent[starts[1]] else {
+        let ChatMessage::User { text: t, .. } = &sent[starts[1]] else {
             panic!("{sent:?}")
         };
         assert!(
@@ -4151,13 +4289,169 @@ mod tests {
         assert!(
             !sent
                 .iter()
-                .any(|m| matches!(m, ChatMessage::User(t) if t == "second"))
+                .any(|m| matches!(m, ChatMessage::User { text: t, .. } if t == "second"))
         );
         // the file keeps what the turn taken back did
         assert_eq!(
             std::fs::read_to_string(r.root.join("lib.rs")).unwrap(),
             "fn a() -> u32 {\n    2\n}\n"
         );
+    }
+
+    /// A PNG of `width`×`height`: its header, which is all ognivo reads of it.
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        b.extend(width.to_be_bytes());
+        b.extend(height.to_be_bytes());
+        b.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        b
+    }
+
+    #[tokio::test]
+    async fn the_users_images_reach_a_model_that_sees_and_one_that_does_not_reads_what_they_are() {
+        let shot = Image::new(&png(4, 2)).unwrap();
+        for vision in [true, false] {
+            let mut r = agent(vec![answer("A cat.")], WorkspaceState::CLEAN);
+            r.agent.opts.vision = vision;
+            let mut events = Vec::new();
+            r.agent
+                .turn_with("What is it?", vec![shot.clone()], &mut |e| events.push(e))
+                .await
+                .unwrap();
+            let seen = r.seen.lock().unwrap();
+            let Some(ChatMessage::User { text, images }) = seen[0].messages.last() else {
+                panic!("{:?}", seen[0].messages.last());
+            };
+            if vision {
+                assert_eq!(
+                    (text.as_str(), images.as_slice()),
+                    ("What is it?", [shot.clone()].as_slice())
+                );
+            } else {
+                assert!(images.is_empty());
+                assert_eq!(
+                    text,
+                    "What is it?\n\n[ognivo] Not shown, as this model reads no images: PNG, 4×2, 33 bytes."
+                );
+            }
+            // the conversation keeps them either way, and the turn shows them
+            let kept = &r.agent.messages()[r.agent.turn_starts()[0]];
+            assert_eq!(kept.images(), std::slice::from_ref(&shot));
+            assert!(matches!(
+                &events[0],
+                AgentEvent::TurnStarted { user, images } if user == "What is it?" && images.as_slice() == std::slice::from_ref(&shot)
+            ));
+            assert_eq!(r.agent.requests, ["What is it? [with an image]"]);
+        }
+        // a log keeps what they are, not their bytes
+        let e = AgentEvent::TurnStarted {
+            user: "What is it?".into(),
+            images: vec![shot.clone()],
+        };
+        assert_eq!(
+            serde_json::to_value(&e).unwrap(),
+            json!({"type": "turn_started", "user": "What is it?", "images": [{"mime": "image/png", "width": 4, "height": 2, "bytes": 33}]})
+        );
+    }
+
+    #[test]
+    fn a_request_carries_the_newest_images_that_fit_and_older_ones_as_what_they_are() {
+        let shot = |w| Image::new(&png(w, 2)).unwrap();
+        let messages = vec![
+            ChatMessage::User {
+                text: "one".into(),
+                images: vec![shot(1)],
+            },
+            ChatMessage::Tool {
+                tool_call_id: "c1".into(),
+                content: "[read: a.png]".into(),
+                images: vec![shot(2), shot(3)],
+            },
+            ChatMessage::user("a note"),
+            ChatMessage::User {
+                text: "three".into(),
+                images: vec![shot(4)],
+            },
+        ];
+        // each image is 33 bytes: room for three
+        let sent = latest_images(messages.clone(), 3 * 33);
+        assert_eq!(sent[1..], messages[1..]);
+        assert_eq!(
+            sent[0],
+            ChatMessage::user(
+                "one\n\n[ognivo] Not shown, as a request carries only the newest images: PNG, 1×2, 33 bytes."
+            )
+        );
+        // a message's images go together or not at all
+        let sent = latest_images(messages.clone(), 2 * 33);
+        assert_eq!(
+            sent.iter().map(|m| m.images().len()).collect::<Vec<_>>(),
+            [0, 0, 0, 1]
+        );
+        assert_eq!(latest_images(messages.clone(), 4 * 33), messages);
+    }
+
+    #[tokio::test]
+    async fn an_image_file_read_is_the_image_for_a_model_that_sees() {
+        for vision in [true, false] {
+            let mut r = agent(
+                vec![
+                    calls(
+                        &[("read", json!({"path": "shot.png"}))],
+                        FinishReason::ToolCalls,
+                    ),
+                    calls(
+                        &[("read", json!({"path": "photo.webp"}))],
+                        FinishReason::ToolCalls,
+                    ),
+                    answer("Seen."),
+                ],
+                WorkspaceState::CLEAN,
+            );
+            r.agent.opts.vision = vision;
+            std::fs::write(r.root.join("shot.png"), png(8, 6)).unwrap();
+            let mut webp = b"RIFF\0\0\0\0WEBPVP8 ".to_vec();
+            webp.extend([0; 16]);
+            std::fs::write(r.root.join("photo.webp"), webp).unwrap();
+            let (_, events) = turn(&mut r).await;
+            let seen = r.seen.lock().unwrap();
+            let Some(ChatMessage::Tool {
+                content, images, ..
+            }) = seen[1].messages.last()
+            else {
+                panic!("{:?}", seen[1].messages.last());
+            };
+            let finished: Vec<&Vec<Image>> = events
+                .iter()
+                .filter_map(|e| match e {
+                    AgentEvent::ToolFinished { images, .. } => Some(images),
+                    _ => None,
+                })
+                .collect();
+            if vision {
+                assert_eq!(
+                    content,
+                    "[read: shot.png — an image, PNG, 8×6, 33 bytes; it follows]"
+                );
+                assert_eq!(images.len(), 1);
+                assert_eq!(images[0].width(), 8);
+                assert_eq!(finished[0], images);
+            } else {
+                assert_eq!(
+                    content,
+                    "[read: shot.png — an image, PNG, 8×6, 33 bytes. This model reads no images here, so it is not shown.]"
+                );
+                assert!(images.is_empty() && finished[0].is_empty());
+            }
+            // a format the server cannot read is an error that says why
+            let ChatMessage::Tool { content, .. } = seen[2].messages.last().unwrap() else {
+                panic!();
+            };
+            assert_eq!(
+                content,
+                "[error] photo.webp: a WebP image: the server reads PNG, JPEG, GIF and BMP"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4274,7 +4568,7 @@ mod tests {
             .iter()
             .map(|m| match m {
                 ChatMessage::System(_) => "system",
-                ChatMessage::User(_) => "user",
+                ChatMessage::User { .. } => "user",
                 ChatMessage::Assistant { .. } => "assistant",
                 ChatMessage::Tool { .. } => "tool",
             })
@@ -4466,7 +4760,7 @@ mod tests {
             WorkspaceState::CLEAN,
             Box::new(AllowAll),
         );
-        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+        let ChatMessage::User { text: project, .. } = &r.agent.messages()[1] else {
             panic!("{:?}", r.agent.messages()[1]);
         };
         assert!(
@@ -4483,7 +4777,7 @@ mod tests {
         // a new conversation looks again
         std::fs::write(r.root.join("Cargo.toml"), "[package]\n").unwrap();
         r.agent.clear();
-        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+        let ChatMessage::User { text: project, .. } = &r.agent.messages()[1] else {
             panic!("{:?}", r.agent.messages()[1]);
         };
         assert!(
@@ -4641,7 +4935,7 @@ mod tests {
         let (end, _) = turn(&mut r).await;
         assert_eq!(end, TurnEnd::TimeLimit);
         assert!(t.elapsed() < limit * 3, "{:?}", t.elapsed());
-        let ChatMessage::User(task) = &r.agent.messages()[2] else {
+        let ChatMessage::User { text: task, .. } = &r.agent.messages()[2] else {
             panic!()
         };
         assert!(
@@ -4897,15 +5191,15 @@ mod tests {
         // the server has the message as it was sent
         assert_eq!(
             r.agent.messages().last(),
-            Some(&ChatMessage::User("fix it".into()))
+            Some(&ChatMessage::user("fix it"))
         );
         r.agent.turn("go on", &mut on).await.unwrap();
         let seen = r.seen.lock().unwrap();
         assert_eq!(
             seen[1].messages[2..],
             [
-                ChatMessage::User("fix it".into()),
-                ChatMessage::User("go on\n\n[ognivo] The user stopped the last turn.".into())
+                ChatMessage::user("fix it"),
+                ChatMessage::user("go on\n\n[ognivo] The user stopped the last turn.")
             ]
         );
     }
@@ -5050,8 +5344,8 @@ mod tests {
         let last = seen.last().unwrap().messages.last().unwrap().clone();
         assert_eq!(
             last,
-            ChatMessage::User(
-                "fix it\n\n[ognivo] Since your last turn the user reverted your changes to lib.rs: they are as they were before your edits. Read them again before you edit them.".into()
+            ChatMessage::user(
+                "fix it\n\n[ognivo] Since your last turn the user reverted your changes to lib.rs: they are as they were before your edits. Read them again before you edit them."
             )
         );
         // told once
@@ -5112,7 +5406,7 @@ mod tests {
         );
         // the model was told with the user's message, and so was the user
         let seen = r.seen.lock().unwrap();
-        let Some(ChatMessage::User(first)) = seen[0].messages.last() else {
+        let Some(ChatMessage::User { text: first, .. }) = seen[0].messages.last() else {
             panic!()
         };
         assert!(
@@ -5342,7 +5636,7 @@ mod tests {
         // the files come with the project, after a system prompt that has nothing of it
         assert!(system.starts_with("You are ognivo"), "{system}");
         assert!(!system.contains("<instructions"), "{system}");
-        let ChatMessage::User(project) = &r.agent.messages()[1] else {
+        let ChatMessage::User { text: project, .. } = &r.agent.messages()[1] else {
             panic!("{:?}", r.agent.messages()[1]);
         };
         assert!(
@@ -5477,7 +5771,7 @@ mod tests {
         agent.turn("and now?", &mut |_| {}).await.unwrap();
         let sent = seen.lock().unwrap()[0].messages.clone();
         assert_eq!(&sent[..before.len()], before.as_slice());
-        let ChatMessage::User(next) = &sent[before.len()] else {
+        let ChatMessage::User { text: next, .. } = &sent[before.len()] else {
             panic!("{sent:?}");
         };
         assert!(next.starts_with("and now?"), "{next}");
@@ -5522,9 +5816,8 @@ mod tests {
         agent.turn("go on", &mut on).await.unwrap();
         assert_eq!(
             seen.lock().unwrap()[0].messages.last(),
-            Some(&ChatMessage::User(
+            Some(&ChatMessage::user(
                 "go on\n\n[ognivo] ognivo stopped before the last turn ended; the session goes on now."
-                    .into()
             ))
         );
         drop(agent);
@@ -5608,13 +5901,13 @@ mod tests {
         assert_eq!(ask.messages.len(), 7 + 2 + 1);
         assert_eq!(
             ask.messages.last(),
-            Some(&ChatMessage::User(compact::SUMMARY_REQUEST.into()))
+            Some(&ChatMessage::user(compact::SUMMARY_REQUEST))
         );
         // then: the system message, the project, the note, and the last step as it was
         let next = &seen[4].messages[1..];
         assert_eq!(next.len(), 4);
         assert_eq!(seen[4].messages[..2], seen[2].messages[..2]);
-        let ChatMessage::User(note) = &next[1] else {
+        let ChatMessage::User { text: note, .. } = &next[1] else {
             panic!("{next:?}");
         };
         assert!(note.contains("\n1. fix it\n"), "{note}");
@@ -5677,7 +5970,7 @@ mod tests {
             }
         )));
         let seen = r.seen.lock().unwrap();
-        let ChatMessage::User(note) = &seen[4].messages[2] else {
+        let ChatMessage::User { text: note, .. } = &seen[4].messages[2] else {
             panic!();
         };
         assert!(
@@ -6014,6 +6307,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_trajectory_says_what_the_images_were_and_keeps_no_bytes() {
+        let mut r = agent(
+            vec![
+                calls(
+                    &[("read", json!({"path": "shot.png"}))],
+                    FinishReason::ToolCalls,
+                ),
+                answer("Two shots."),
+            ],
+            WorkspaceState::CLEAN,
+        );
+        r.agent.opts.vision = true;
+        std::fs::write(r.root.join("shot.png"), png(8, 6)).unwrap();
+        let id = kept(&mut r);
+        let shot = Image::new(&png(4, 2)).unwrap();
+        r.agent
+            .turn_with("compare", vec![shot], &mut |_| {})
+            .await
+            .unwrap();
+        let Run {
+            agent, root, _dir, ..
+        } = r;
+        drop(agent);
+        let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
+        let t = crate::trace::atif(&store, id).unwrap();
+        atif_shape(&t).unwrap();
+        let steps = t["steps"].as_array().unwrap();
+        let user = steps.iter().find(|s| s["source"] == "user").unwrap();
+        assert_eq!(
+            user["extra"]["images"],
+            json!([{"mime": "image/png", "width": 4, "height": 2, "bytes": 33}])
+        );
+        let read = steps
+            .iter()
+            .find(|s| s["extra"]["images"].is_array() && s["source"] == "agent")
+            .unwrap();
+        assert_eq!(read["extra"]["images"][0]["call_id"], "c0");
+        assert_eq!(read["extra"]["images"][0]["images"][0]["width"], 8);
+        assert!(
+            !t.to_string()
+                .contains(&Image::new(&png(4, 2)).unwrap().base64()[..20])
+        );
+    }
+
+    #[tokio::test]
     async fn a_session_becomes_an_atif_trajectory() {
         let mut read = calls(
             &[("read", serde_json::json!({"path": "lib.rs"}))],
@@ -6225,7 +6563,7 @@ mod tests {
             panic!()
         };
         assert!(system.contains("You are a subagent"), "{system}");
-        let ChatMessage::User(task) = &read[0].messages[2] else {
+        let ChatMessage::User { text: task, .. } = &read[0].messages[2] else {
             panic!()
         };
         assert!(task.starts_with("Task from the main agent: Find\n\nGoal: What does b.txt say?\n\nThis is a read task"), "{task}");
@@ -6431,7 +6769,7 @@ mod tests {
             tool.parameters["properties"]["name"]["enum"],
             json!(["release"])
         );
-        let ChatMessage::User(project) = &first.messages[1] else {
+        let ChatMessage::User { text: project, .. } = &first.messages[1] else {
             panic!("{:?}", first.messages[1]);
         };
         assert!(
@@ -6482,7 +6820,7 @@ mod tests {
         let req = seen.lock().unwrap()[0].clone();
         // no skill the model may load: no skill tool
         assert!(req.tools.iter().all(|t| t.name != "skill"));
-        let Some(ChatMessage::User(sent)) = req.messages.last() else {
+        let Some(ChatMessage::User { text: sent, .. }) = req.messages.last() else {
             panic!("{:?}", req.messages.last());
         };
         assert_eq!(
@@ -6605,7 +6943,7 @@ mod tests {
             "{end:?}"
         );
         let first = seen.lock().unwrap()[0].clone();
-        let Some(ChatMessage::User(sent)) = first.messages.last() else {
+        let Some(ChatMessage::User { text: sent, .. }) = first.messages.last() else {
             panic!("{:?}", first.messages.last());
         };
         assert_eq!(
@@ -6626,7 +6964,7 @@ mod tests {
         );
         assert!(agent.messages().iter().any(|m| matches!(
             m,
-            ChatMessage::User(t) if t == "[ognivo] Not finished yet: a Stop hook does not let the turn end: run the tests first"
+            ChatMessage::User { text: t, .. } if t == "[ognivo] Not finished yet: a Stop hook does not let the turn end: run the tests first"
         )));
     }
 
@@ -6699,7 +7037,7 @@ mod tests {
         let sub = subs[0].lock().unwrap();
         let names: Vec<&str> = sub[0].tools.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, ["read", "grep", "glob"]);
-        let ChatMessage::User(brief) = sub[0].messages.last().unwrap() else {
+        let ChatMessage::User { text: brief, .. } = sub[0].messages.last().unwrap() else {
             panic!("{:?}", sub[0].messages.last());
         };
         assert!(
@@ -6824,7 +7162,7 @@ mod tests {
             tool.parameters["properties"]["name"]["enum"],
             json!(["mcp__echo__review"])
         );
-        let ChatMessage::User(project) = &first.messages[1] else {
+        let ChatMessage::User { text: project, .. } = &first.messages[1] else {
             panic!("{:?}", first.messages[1]);
         };
         assert!(
@@ -6845,7 +7183,7 @@ mod tests {
             "{end:?}"
         );
         let third = seen.lock().unwrap()[2].clone();
-        let Some(ChatMessage::User(sent)) = third.messages.last() else {
+        let Some(ChatMessage::User { text: sent, .. }) = third.messages.last() else {
             panic!("{:?}", third.messages.last());
         };
         assert_eq!(

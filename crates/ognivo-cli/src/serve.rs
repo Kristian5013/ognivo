@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
+use ognivo_models::image::{self, Image};
 use ognivo_protocol::{self as p, rpc};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -37,8 +38,9 @@ use tokio::sync::mpsc;
 use crate::session;
 use hub::Hub;
 
-/// A message longer than this ends its connection: requests are short, and so are answers.
-const MAX_MESSAGE: usize = 16 << 20;
+/// A message longer than this ends its connection: requests are short, but for the images
+/// of a message, which may have 32 MB together (43 MB in base64).
+const MAX_MESSAGE: usize = 64 << 20;
 
 #[derive(Debug, Args)]
 pub struct CoreArgs {
@@ -314,11 +316,14 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
         rpc::THREAD_TRAJECTORY => thread::trajectory(hub, parse(params)?),
         rpc::TURN_START => {
             let p: rpc::StartTurn = parse(params)?;
-            thread::command(hub, p.thread, |reply| thread::Command::Turn(p.text, reply)).await
+            let images = images(&p.images)?;
+            let command = |reply| thread::Command::Turn(p.text, images, reply);
+            thread::command(hub, p.thread, command).await
         }
         rpc::TURN_EDIT => {
             let p: rpc::EditTurn = parse(params)?;
-            let command = |reply| thread::Command::Edit(p.turn.0, p.text, reply);
+            let images = images(&p.images)?;
+            let command = |reply| thread::Command::Edit(p.turn.0, p.text, images, reply);
             thread::command(hub, p.thread, command).await
         }
         rpc::THREAD_DELETE => thread::delete(hub, parse(params)?).await,
@@ -354,6 +359,35 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
     }
 }
 
+/// The images of a new message as the model gets them, or why one cannot go (invalid params).
+/// The most it may hold fit in [`MAX_MESSAGE`].
+fn images(given: &[rpc::NewImage]) -> Result<Vec<Image>, RpcError> {
+    if given.len() > image::MAX_PER_MESSAGE {
+        return Err(RpcError::new(
+            -32602,
+            format!(
+                "{} images: a message may hold at most {}",
+                given.len(),
+                image::MAX_PER_MESSAGE
+            ),
+        ));
+    }
+    let images: Vec<Image> = given
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            Image::from_base64(&g.data)
+                .map_err(|e| RpcError::new(-32602, format!("image {}: {e}", i + 1)))
+        })
+        .collect::<Result<_, _>>()?;
+    match image::too_many(&images) {
+        Some(why) => Err(RpcError::new(-32602, why)),
+        None => Ok(images),
+    }
+}
+
+const _: () = assert!(image::MAX_MESSAGE_BYTES.div_ceil(3) * 4 + (1 << 20) < MAX_MESSAGE);
+
 /// How long `server/detect` waits for the server.
 const DETECT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -370,7 +404,13 @@ async fn detect(s: rpc::Server) -> Reply {
         let props = base.props().await?;
         if props.role.as_deref() != Some("router") {
             let found = doctor::detect_profile(&base, &props, &profiles).await?;
-            return Ok((found.map(|(p, _)| p), props.n_ctx, Vec::new(), None));
+            return Ok((
+                found.map(|(p, _)| p),
+                props.n_ctx,
+                props.vision,
+                Vec::new(),
+                None,
+            ));
         }
         let models = base.models().await?;
         let named = |m: &RouterModel| doctor::profile_by_name(&m.names(), &profiles);
@@ -392,17 +432,18 @@ async fn detect(s: rpc::Server) -> Reply {
             [one] => Some(*one),
             _ => None,
         });
-        let (found, window) = match chosen {
+        let (found, window, vision) = match chosen {
             Some(m) if m.status == "loaded" => {
                 let server = base.for_model(&m.id);
                 let props = server.props().await?;
                 let found = doctor::detect_profile(&server, &props, &profiles).await?;
-                (found.map(|(p, _)| p), props.n_ctx)
+                (found.map(|(p, _)| p), props.n_ctx, props.vision)
             }
-            Some(m) => (named(m), None),
-            None => (None, None),
+            Some(m) => (named(m), None, None),
+            None => (None, None, None),
         };
-        Ok::<_, ognivo_models::EngineError>((found, window, listed, chosen.map(|m| m.id.clone())))
+        let chosen = chosen.map(|m| m.id.clone());
+        Ok::<_, ognivo_models::EngineError>((found, window, vision, listed, chosen))
     })
     .await
     .map_err(|_| {
@@ -416,7 +457,7 @@ async fn detect(s: rpc::Server) -> Reply {
         )
     })?
     .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
-    let (p, window, models, model) = found;
+    let (p, window, vision, models, model) = found;
     reply(rpc::Detected {
         profile: p.map(|p| p.id.clone()),
         levels: p.map(|p| p.reasoning.levels.clone()).unwrap_or_default(),
@@ -425,6 +466,7 @@ async fn detect(s: rpc::Server) -> Reply {
         window,
         models,
         model,
+        vision,
     })
 }
 

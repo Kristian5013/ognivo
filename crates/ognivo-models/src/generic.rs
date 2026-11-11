@@ -33,14 +33,20 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::{EngineError, SamplerSpec, Usage};
 use crate::guard::Guard;
+use crate::image::Image;
 
 /// One message of the conversation, in OpenAI chat shape. The session store keeps it as
-/// `{"role", "content"}` with `reasoning`, `tool_calls` or `tool_call_id` where they apply.
+/// `{"role", "content"}` with `reasoning`, `tool_calls`, `tool_call_id` or `images` where
+/// they apply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(into = "StoredMessage", try_from = "StoredMessage")]
 pub enum ChatMessage {
     System(String),
-    User(String),
+    /// The user's message, or ognivo's note to the model, with the user's images.
+    User {
+        text: String,
+        images: Vec<Image>,
+    },
     Assistant {
         /// Text shown to the user (a Harmony preamble or the final answer); may be empty.
         content: String,
@@ -56,11 +62,40 @@ pub enum ChatMessage {
         /// the generation.
         tokens: Option<Vec<u32>>,
     },
-    /// One tool result, answering the assistant's call with id `tool_call_id`.
+    /// One tool result, answering the assistant's call with id `tool_call_id`: its text,
+    /// and the image file it read.
     Tool {
         tool_call_id: String,
         content: String,
+        images: Vec<Image>,
     },
+}
+
+impl ChatMessage {
+    /// A message of the user's, or a note of ognivo's, without images.
+    pub fn user(text: impl Into<String>) -> Self {
+        ChatMessage::User {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// A tool result without images.
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        ChatMessage::Tool {
+            tool_call_id: tool_call_id.into(),
+            content: content.into(),
+            images: Vec::new(),
+        }
+    }
+
+    /// The images the message holds.
+    pub fn images(&self) -> &[Image] {
+        match self {
+            ChatMessage::User { images, .. } | ChatMessage::Tool { images, .. } => images,
+            ChatMessage::System(_) | ChatMessage::Assistant { .. } => &[],
+        }
+    }
 }
 
 /// A tool call the model emitted, or one replayed back into history.
@@ -95,6 +130,8 @@ struct StoredMessage {
     tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tokens: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<Image>,
 }
 
 impl From<ChatMessage> for StoredMessage {
@@ -106,10 +143,14 @@ impl From<ChatMessage> for StoredMessage {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tokens: None,
+            images: Vec::new(),
         };
         match m {
             ChatMessage::System(content) => plain(Role::System, content),
-            ChatMessage::User(content) => plain(Role::User, content),
+            ChatMessage::User { text, images } => StoredMessage {
+                images,
+                ..plain(Role::User, text)
+            },
             ChatMessage::Assistant {
                 content,
                 reasoning,
@@ -124,8 +165,10 @@ impl From<ChatMessage> for StoredMessage {
             ChatMessage::Tool {
                 tool_call_id,
                 content,
+                images,
             } => StoredMessage {
                 tool_call_id: Some(tool_call_id),
+                images,
                 ..plain(Role::Tool, content)
             },
         }
@@ -138,7 +181,10 @@ impl TryFrom<StoredMessage> for ChatMessage {
     fn try_from(m: StoredMessage) -> Result<Self, String> {
         Ok(match m.role {
             Role::System => ChatMessage::System(m.content),
-            Role::User => ChatMessage::User(m.content),
+            Role::User => ChatMessage::User {
+                text: m.content,
+                images: m.images,
+            },
             Role::Assistant => ChatMessage::Assistant {
                 content: m.content,
                 reasoning: m.reasoning,
@@ -148,6 +194,7 @@ impl TryFrom<StoredMessage> for ChatMessage {
             Role::Tool => ChatMessage::Tool {
                 tool_call_id: m.tool_call_id.ok_or("a tool result without tool_call_id")?,
                 content: m.content,
+                images: m.images,
             },
         })
     }
@@ -248,7 +295,11 @@ pub fn chat_body(req: &ChatRequest) -> Value {
 fn message_json(m: &ChatMessage) -> Value {
     match m {
         ChatMessage::System(content) => json!({ "role": "system", "content": content }),
-        ChatMessage::User(content) => json!({ "role": "user", "content": content }),
+        // the images before the text, as the models' makers advise
+        ChatMessage::User { text, images } => json!({
+            "role": "user",
+            "content": content_json(images, text, false),
+        }),
         ChatMessage::Assistant {
             content,
             reasoning,
@@ -278,15 +329,35 @@ fn message_json(m: &ChatMessage) -> Value {
             }
             Value::Object(o)
         }
+        // what the call says of the image, then the image
         ChatMessage::Tool {
             tool_call_id,
             content,
+            images,
         } => json!({
             "role": "tool",
             "tool_call_id": tool_call_id,
-            "content": content,
+            "content": content_json(images, content, true),
         }),
     }
+}
+
+/// A message's content: its text alone, or with images the parts llama-server reads them
+/// from, each image a data URL. The server joins the parts into one text with its media
+/// marker where each image stands, and no line break next to one.
+fn content_json(images: &[Image], text: &str, text_first: bool) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    let mut parts: Vec<Value> = images
+        .iter()
+        .map(|i| json!({"type": "image_url", "image_url": {"url": i.data_url()}}))
+        .collect();
+    if !text.is_empty() {
+        let at = if text_first { 0 } else { parts.len() };
+        parts.insert(at, json!({"type": "text", "text": text}));
+    }
+    Value::Array(parts)
 }
 
 fn tool_json(t: &ToolDecl) -> Value {
@@ -608,7 +679,7 @@ mod tests {
     fn messages_are_stored_as_they_are_and_read_back() {
         let messages = [
             ChatMessage::System("be brief".into()),
-            ChatMessage::User("hi".into()),
+            ChatMessage::user("hi"),
             ChatMessage::Assistant {
                 content: String::new(),
                 reasoning: Some(String::new()),
@@ -625,10 +696,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 tokens: None,
             },
-            ChatMessage::Tool {
-                tool_call_id: "c1".into(),
-                content: "[read: a]".into(),
-            },
+            ChatMessage::tool("c1", "[read: a]"),
         ];
         let stored: Vec<String> = messages
             .iter()
@@ -654,6 +722,50 @@ mod tests {
         assert!(serde_json::from_str::<ChatMessage>(r#"{"role":"developer"}"#).is_err());
     }
 
+    #[test]
+    fn images_go_as_parts_the_users_before_the_text_a_results_after_it() {
+        let image = Image::new(&crate::image::tests::png(2, 2)).unwrap();
+        let url = image.data_url();
+        let user = ChatMessage::User {
+            text: "What is this?".into(),
+            images: vec![image.clone()],
+        };
+        assert_eq!(
+            message_json(&user),
+            json!({"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": url}},
+                {"type": "text", "text": "What is this?"},
+            ]})
+        );
+        let result = ChatMessage::Tool {
+            tool_call_id: "c1".into(),
+            content: "[read: a.png]".into(),
+            images: vec![image.clone()],
+        };
+        assert_eq!(
+            message_json(&result)["content"],
+            json!([
+                {"type": "text", "text": "[read: a.png]"},
+                {"type": "image_url", "image_url": {"url": url}},
+            ])
+        );
+        // no text, no text part; without images the content is the text
+        let bare = ChatMessage::User {
+            text: String::new(),
+            images: vec![image.clone()],
+        };
+        assert_eq!(message_json(&bare)["content"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            message_json(&ChatMessage::user("hi"))["content"],
+            json!("hi")
+        );
+        // the store keeps the images with the message, and reads them back
+        let stored = serde_json::to_value(&user).unwrap();
+        assert_eq!(stored["images"][0]["mime"], "image/png");
+        assert_eq!(serde_json::from_value::<ChatMessage>(stored).unwrap(), user);
+        assert_eq!(user.images(), [image]);
+    }
+
     fn sampler() -> SamplerSpec {
         SamplerSpec {
             temperature: 1.0,
@@ -675,7 +787,7 @@ mod tests {
     #[test]
     fn body_sets_explicit_sampling_and_string_tool_choice() {
         let req = ChatRequest {
-            messages: vec![ChatMessage::User("hi".into())],
+            messages: vec![ChatMessage::user("hi")],
             sampler: sampler(),
             template_kwargs: serde_json::from_value(json!({"reasoning_effort": "high"})).unwrap(),
             tools: vec![read_tool()],
@@ -710,7 +822,7 @@ mod tests {
     #[test]
     fn body_without_tools_omits_tool_fields() {
         let req = ChatRequest {
-            messages: vec![ChatMessage::User("hi".into())],
+            messages: vec![ChatMessage::user("hi")],
             sampler: sampler(),
             template_kwargs: Map::new(),
             tools: vec![],

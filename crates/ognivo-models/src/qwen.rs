@@ -140,6 +140,10 @@ pub enum Piece {
     Text(String),
     /// Ids the model generated, sent back as they came (§5.4).
     Tokens(Vec<TokenId>),
+    /// Where the next image of the conversation stands: the server's media marker in the
+    /// prompt's text, which llama.cpp's projector replaces with `<|vision_start|>`, the
+    /// image's embeddings and `<|vision_end|>` (§5.8).
+    Image,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -169,6 +173,10 @@ impl Prompt {
         }
     }
 
+    fn images(&mut self, n: usize) {
+        self.pieces.extend(std::iter::repeat_n(Piece::Image, n));
+    }
+
     /// The start of the assistant's next message, where generation begins: with reasoning
     /// off, an empty reasoning block, as the template writes it.
     pub(crate) fn assistant(&mut self, level: Level) {
@@ -185,7 +193,8 @@ impl Prompt {
     }
 
     /// The prompt as text with its special tokens written out, as the golden files hold it;
-    /// ids sent back as they came show as their number.
+    /// ids sent back as they came show as their number, an image as the template's
+    /// placeholder.
     pub fn display(&self) -> String {
         self.pieces
             .iter()
@@ -193,6 +202,10 @@ impl Prompt {
                 Piece::Special(s) => s.text(),
                 Piece::Text(t) => t.clone(),
                 Piece::Tokens(ids) => format!("⟨{} ids⟩", ids.len()),
+                Piece::Image => format!(
+                    "<|{}|><|{}|><|{}|>",
+                    "vision_start", "image_pad", "vision_end"
+                ),
             })
             .collect()
     }
@@ -206,9 +219,15 @@ pub struct Call<'a> {
 }
 
 /// A message of the conversation after the system message, as the template renders it.
+/// A message with images renders as llama-server's chat path renders its parts: the
+/// user's images before the text, a tool result's after it, and no line break next to an
+/// image.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Turn<'a> {
-    User(&'a str),
+    User {
+        text: &'a str,
+        images: usize,
+    },
     Assistant {
         reasoning: &'a str,
         content: &'a str,
@@ -217,7 +236,20 @@ pub enum Turn<'a> {
     /// An assistant message whose generated ids go back as they came: they follow the start
     /// of the message the model was given ([`Prompt::assistant`]).
     Replay(&'a [TokenId]),
-    Tool(&'a str),
+    Tool {
+        text: &'a str,
+        images: usize,
+    },
+}
+
+impl<'a> Turn<'a> {
+    pub fn user(text: &'a str) -> Self {
+        Turn::User { text, images: 0 }
+    }
+
+    pub fn tool(text: &'a str) -> Self {
+        Turn::Tool { text, images: 0 }
+    }
 }
 
 /// The conversation as the template renders it, ending where the model's next message
@@ -263,10 +295,17 @@ pub fn render(tools: &[ToolDecl], system: &str, turns: &[Turn<'_>], level: Level
     }
     for (i, turn) in turns.iter().enumerate() {
         match turn {
-            Turn::User(text) => {
+            // the template trims the content whole: around the images, the text keeps its
+            // side of them
+            Turn::User { text, images } => {
                 p.special(Special::ImStart);
                 p.text("user\n");
-                p.text(py_strip(text));
+                p.images(*images);
+                p.text(if *images > 0 {
+                    py_rstrip(text)
+                } else {
+                    py_strip(text)
+                });
                 p.special(Special::ImEnd);
                 p.text("\n");
             }
@@ -312,8 +351,8 @@ pub fn render(tools: &[ToolDecl], system: &str, turns: &[Turn<'_>], level: Level
                 p.tokens(sealed(ids));
                 p.text("\n");
             }
-            Turn::Tool(text) => {
-                let first = !matches!(i.checked_sub(1).map(|j| &turns[j]), Some(Turn::Tool(_)));
+            Turn::Tool { text, images } => {
+                let first = !matches!(i.checked_sub(1).map(|j| &turns[j]), Some(Turn::Tool { .. }));
                 if first {
                     p.special(Special::ImStart);
                     p.text("user");
@@ -321,10 +360,15 @@ pub fn render(tools: &[ToolDecl], system: &str, turns: &[Turn<'_>], level: Level
                 p.text("\n");
                 p.special(Special::ToolResponse);
                 p.text("\n");
-                p.text(py_strip(text));
+                if *images > 0 {
+                    p.text(py_lstrip(text));
+                    p.images(*images);
+                } else {
+                    p.text(py_strip(text));
+                }
                 p.text("\n");
                 p.special(Special::ToolResponseEnd);
-                if !matches!(turns.get(i + 1), Some(Turn::Tool(_))) {
+                if !matches!(turns.get(i + 1), Some(Turn::Tool { .. })) {
                     p.special(Special::ImEnd);
                     p.text("\n");
                 }
@@ -399,7 +443,19 @@ pub(crate) fn python_json(v: &Value) -> String {
 /// Python's `str.strip()`, which Jinja's `trim` is: Rust's whitespace and the four
 /// separators U+001C to U+001F.
 pub(crate) fn py_strip(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+    s.trim_matches(py_space)
+}
+
+fn py_lstrip(s: &str) -> &str {
+    s.trim_start_matches(py_space)
+}
+
+fn py_rstrip(s: &str) -> &str {
+    s.trim_end_matches(py_space)
+}
+
+fn py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
 }
 
 /// The closing of a parameter's value, which no string value holds.
@@ -675,8 +731,8 @@ mod tests {
         let turns: Vec<Turn> = messages[1..]
             .iter()
             .map(|m| match m["role"].as_str().unwrap() {
-                "user" => Turn::User(m["content"].as_str().unwrap()),
-                "tool" => Turn::Tool(m["content"].as_str().unwrap()),
+                "user" => Turn::user(m["content"].as_str().unwrap()),
+                "tool" => Turn::tool(m["content"].as_str().unwrap()),
                 _ => Turn::Assistant {
                     reasoning: m["reasoning_content"].as_str().unwrap_or_default(),
                     content: m["content"].as_str().unwrap_or_default(),
@@ -731,14 +787,87 @@ mod tests {
     }
 
     #[test]
+    fn images_stand_where_the_template_puts_them() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let sc: Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.join("evals/templates/scenarios/images.json")).unwrap(),
+        )
+        .unwrap();
+        let messages = sc["messages"].as_array().unwrap();
+        // a content of parts: its text, and how many images
+        let parts = |m: &Value| -> (String, usize) {
+            match &m["content"] {
+                Value::String(t) => (t.clone(), 0),
+                Value::Array(parts) => (
+                    parts.iter().filter_map(|p| p["text"].as_str()).collect(),
+                    parts.iter().filter(|p| p["type"] == "image_url").count(),
+                ),
+                _ => (String::new(), 0),
+            }
+        };
+        let contents: Vec<(String, usize)> = messages[1..].iter().map(parts).collect();
+        let turns: Vec<Turn> = messages[1..]
+            .iter()
+            .zip(&contents)
+            .map(|(m, (text, images))| match m["role"].as_str().unwrap() {
+                "user" => Turn::User {
+                    text,
+                    images: *images,
+                },
+                "tool" => Turn::Tool {
+                    text,
+                    images: *images,
+                },
+                _ => Turn::Assistant {
+                    reasoning: m["reasoning_content"].as_str().unwrap_or_default(),
+                    content: m["content"].as_str().unwrap_or_default(),
+                    calls: vec![Call {
+                        name: m["tool_calls"][0]["function"]["name"].as_str().unwrap(),
+                        arguments: m["tool_calls"][0]["function"]["arguments"]
+                            .as_object()
+                            .unwrap()
+                            .clone(),
+                    }],
+                },
+            })
+            .collect();
+        let system = messages[0]["content"].as_str().unwrap();
+        let p = render(&[], system, &turns, Level::Medium);
+        let golden = |dir: &str, file: &str| {
+            std::fs::read_to_string(
+                repo.join("profiles/templates")
+                    .join(dir)
+                    .join("golden")
+                    .join(file),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            p.display(),
+            golden(
+                "Qwen3.8-27B",
+                "images.think-medium-preserve.canonical.py-hf.txt"
+            )
+        );
+        assert_eq!(
+            p.display(),
+            golden(
+                "Qwen3.6-35B-A3B",
+                "images.think-preserve.canonical.py-hf.txt"
+            )
+        );
+        assert_eq!(p.pieces.iter().filter(|x| **x == Piece::Image).count(), 3);
+    }
+
+    #[test]
     fn levels_put_their_instructions_first_and_off_closes_the_reasoning() {
-        let p = render(&[], "Be brief.", &[Turn::User("hi")], Level::XHigh).display();
+        let p = render(&[], "Be brief.", &[Turn::user("hi")], Level::XHigh).display();
         assert!(
             p.contains("system\nReasoning effort is set to xhigh."),
             "{p}"
         );
         assert!(p.contains("final answer.\n\nBe brief."), "{p}");
-        let off = render(&[], "", &[Turn::User("hi")], Level::Off).display();
+        let off = render(&[], "", &[Turn::user("hi")], Level::Off).display();
         let end = format!(
             "assistant\n{}\n\n{}\n\n",
             Special::Think.text(),
@@ -754,10 +883,10 @@ mod tests {
             &[],
             "",
             &[
-                Turn::User("go"),
-                Turn::Tool("one"),
-                Turn::Tool("two"),
-                Turn::User("next"),
+                Turn::user("go"),
+                Turn::tool("one"),
+                Turn::tool("two"),
+                Turn::user("next"),
             ],
             Level::Medium,
         )
@@ -778,7 +907,7 @@ mod tests {
         let p = render(
             &[],
             "",
-            &[Turn::User("go"), Turn::Replay(&[7, 8])],
+            &[Turn::user("go"), Turn::Replay(&[7, 8])],
             Level::Medium,
         );
         let replay = p

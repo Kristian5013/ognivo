@@ -3,6 +3,7 @@ import { type Server, createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { crc32, deflateSync } from "node:zlib";
 
 import { _electron as electron, expect, test } from "@playwright/test";
 
@@ -12,8 +13,9 @@ import { gpuEnv } from "../gpu.js";
 // turn streams, its command waits for the user's yes in the thread, and its change is
 // reverted from the Changes panel; subagents show as lanes whose threads open; the
 // settings change the look; a plan comes first in plan mode, with its call shown as the
-// model writes it, and is carried out; the core quits once the window is gone. The model
-// is a fake llama-server that streams what llama-server streams; no GPU, no network.
+// model writes it, and is carried out; images go with a message and come with a read, and
+// a model without a projector takes none; the core quits once the window is gone. The
+// model is a fake llama-server that streams what llama-server streams; no GPU, no network.
 
 const main = fileURLToPath(new URL("../main.js", import.meta.url));
 const ognivo = fileURLToPath(new URL("../../../target/debug/ognivo", import.meta.url));
@@ -50,12 +52,25 @@ type Reply = object[] | Gated;
 
 const sse = (events: object[]) => events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("");
 
+/** What a fake llama-server is: with a projector, its model takes images; `bodies` gets
+ * the chat requests. */
+interface Serving {
+  vision?: boolean;
+  bodies?: Record<string, unknown>[];
+}
+
 /** A llama-server of one slot that answers the chat requests with `replies`, in order. */
-function fakeServer(replies: Reply[]): Promise<{ server: Server; url: string }> {
+function fakeServer(replies: Reply[], serving: Serving = {}): Promise<{ server: Server; url: string }> {
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/props")) {
       res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ default_generation_settings: { n_ctx: 4096 }, total_slots: 1 }));
+      res.end(
+        JSON.stringify({
+          default_generation_settings: { n_ctx: 4096 },
+          total_slots: 1,
+          modalities: { vision: Boolean(serving.vision) },
+        }),
+      );
       return;
     }
     if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
@@ -63,8 +78,11 @@ function fakeServer(replies: Reply[]): Promise<{ server: Server; url: string }> 
       res.end();
       return;
     }
-    req.resume();
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (part: string) => (body += part));
     req.on("end", () => {
+      serving.bodies?.push(JSON.parse(body) as Record<string, unknown>);
       const reply = replies.shift() ?? answer("Nothing more.");
       res.setHeader("content-type", "text/event-stream");
       if (Array.isArray(reply)) {
@@ -89,15 +107,40 @@ function fakeServer(replies: Reply[]): Promise<{ server: Server; url: string }> 
   );
 }
 
+/** A PNG of `width`×`height` in one colour. */
+function png(width: number, height: number, [r, g, b]: [number, number, number]): Buffer {
+  const part = (type: string, data: Buffer) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type), data])) >>> 0);
+    return Buffer.concat([length, Buffer.from(type), data, crc]);
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8; // bits a channel
+  header[9] = 2; // RGB
+  const row = Buffer.alloc(1 + width * 3);
+  for (let x = 0; x < width; x++) row.set([r, g, b], 1 + x * 3);
+  const pixels = Buffer.concat(Array.from({ length: height }, () => row));
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    part("IHDR", header),
+    part("IDAT", deflateSync(pixels)),
+    part("IEND", Buffer.alloc(0)),
+  ]);
+}
+
 /** The window on a core of its own, with a fake llama-server answering `replies`. */
-async function launch(replies: Reply[]) {
+async function launch(replies: Reply[], serving: Serving & { profile?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "ognivo-e2e-"));
   const project = join(dir, "proj");
   mkdirSync(project);
   writeFileSync(join(project, "README.md"), "a project\n");
   // a project with a build: an unverified answer is sent back once to run it
   writeFileSync(join(project, "Makefile"), "all:\n");
-  const { server, url } = await fakeServer(replies);
+  const { server, url } = await fakeServer(replies, serving);
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   delete env.ELECTRON_RUN_AS_NODE;
@@ -115,7 +158,7 @@ async function launch(replies: Reply[]) {
   await page.getByRole("heading", { name: "New session" }).waitFor({ timeout: 30_000 });
   await page.locator("#project").fill(project);
   await page.locator("#server").fill(url);
-  await page.locator("#profile").selectOption("gpt-oss-20b");
+  await page.locator("#profile").selectOption(serving.profile ?? "gpt-oss-20b");
   const close = async () => {
     await app.close();
     server.close();
@@ -407,6 +450,81 @@ test("the project's MCP server: trusted, its tool asks and answers", async () =>
     await panel.getByRole("listitem").filter({ hasText: /^local-echo/ }).getByRole("button", { name: "Remove" }).click();
     await expect(panel.getByText("local-echo", { exact: true })).toHaveCount(0, { timeout: 10_000 });
   } finally {
+    await close();
+  }
+});
+
+test("images: added and pasted with a message, read from a file, and refused without a projector", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const { page, project, close } = await launch(
+    [call("r1", "read", { file: "shot.png" }), answer("A red square, a green one, and the blue shot.")],
+    { vision: true, bodies, profile: "gemma-4-26b-a4b" },
+  );
+  writeFileSync(join(project, "shot.png"), png(48, 32, [40, 90, 220]));
+  const blind = await fakeServer([]);
+  try {
+    await page.getByRole("button", { name: "Start" }).click();
+    const composer = page.locator("textarea");
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+
+    // one from the button, one pasted: a WebP, which the server cannot read, goes as PNG
+    await page.getByLabel("Images to add").setInputFiles({ name: "red.png", mimeType: "image/png", buffer: png(64, 40, [220, 40, 40]) });
+    await expect(page.getByRole("img", { name: "Image 1 of the message" })).toBeVisible();
+    await composer.focus();
+    await page.evaluate(async () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 30;
+      canvas.height = 20;
+      const g = canvas.getContext("2d")!;
+      g.fillStyle = "#28c850";
+      g.fillRect(0, 0, 30, 20);
+      const webp = await new Promise<Blob>((resolve) => canvas.toBlob((b) => resolve(b!), "image/webp"));
+      const data = new DataTransfer();
+      data.items.add(new File([webp], "green.webp", { type: "image/webp" }));
+      const paste = new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true });
+      document.querySelector("textarea")!.dispatchEvent(paste);
+    });
+    await expect(page.getByRole("img", { name: "Image 2 of the message" })).toBeVisible();
+    await composer.fill("What are these?");
+    await page.screenshot({ path: "test-results/core-images-composer.png" });
+    await composer.press("Enter");
+
+    // the model got them before the text, and the message holds them
+    await expect(page.getByText("A red square, a green one, and the blue shot.")).toBeVisible({ timeout: 30_000 });
+    const sent = (bodies[0]!.messages as { role: string; content: unknown }[]).at(-1)!;
+    const parts = sent.content as { type: string; image_url?: { url: string }; text?: string }[];
+    expect(parts.map((p) => p.type)).toEqual(["image_url", "image_url", "text"]);
+    expect(parts[1]!.image_url!.url).toMatch(/^data:image\/png;base64,/);
+    expect(parts[2]!.text).toBe("What are these?");
+    await expect(page.getByRole("img", { name: "Image 1 of your message" })).toBeVisible();
+    await expect(page.getByRole("img", { name: "Image 1 of the message" })).toHaveCount(0);
+
+    // the file the call read is the image the model saw, after the call's text
+    const read = (bodies[1]!.messages as { role: string; content: unknown }[]).at(-1)!;
+    expect(read.role).toBe("tool");
+    expect((read.content as { type: string }[]).map((p) => p.type)).toEqual(["text", "image_url"]);
+    await page.getByRole("button", { name: /shot\.png/ }).first().click();
+    await expect(page.getByRole("img", { name: "Image 1 the call read" })).toBeVisible();
+    await page.screenshot({ path: "test-results/core-images.png" });
+
+    // an image whole, and Escape puts it away
+    await page.getByRole("img", { name: "Image 2 of your message" }).click();
+    const whole = page.getByRole("dialog", { name: "Image 2 of your message" });
+    await expect(whole).toBeVisible();
+    await page.screenshot({ path: "test-results/core-images-whole.png" });
+    await page.keyboard.press("Escape");
+    await expect(whole).toHaveCount(0);
+
+    // a session whose model has no projector takes no image, and says why
+    await page.getByRole("button", { name: "New session" }).click();
+    await page.locator("#server").fill(blind.url);
+    await page.getByRole("button", { name: "Start" }).click();
+    await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
+    const add = page.getByRole("button", { name: "+ Image" });
+    await expect(add).toBeDisabled();
+    await expect(add).toHaveAttribute("title", /--mmproj/);
+  } finally {
+    blind.server.close();
     await close();
   }
 });

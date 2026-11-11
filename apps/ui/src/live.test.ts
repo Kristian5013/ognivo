@@ -39,6 +39,8 @@ describe("the core's stream", () => {
     const s = store(11);
     const all = rows(s);
     expect(all[0]).toMatchObject({ kind: "user", text: expect.stringContaining("Say hello") });
+    // the user's screenshot, which the model saw before the text
+    expect(all[0]).toMatchObject({ images: [{ mime: "image/png", width: 2, height: 1, data: expect.any(String) }] });
     expect(all.at(-1)).toMatchObject({ kind: "end", end: "answer" });
     const items = all.flatMap((r) => (r.kind === "item" ? [r] : []));
     // nothing is left streaming or running
@@ -54,6 +56,49 @@ describe("the core's stream", () => {
     expect(s.generations.map((g) => g.index)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     // the edit is the session's change
     expect(s.changedFiles().map((f) => f.path)).toEqual(["main.rs"]);
+  });
+
+  it("gives a call's result the image file it read, and a turn of an older core no images", () => {
+    const s = new ThreadStore(
+      { id: "1", title: "", project: "", profile: "", model: "", server: "", system: "", conversations: {}, tools: [] },
+      { schedule: (flush) => flush() },
+    );
+    const picture = { mime: "image/png", data: "iVBORw0KGgo=", width: 8, height: 6 };
+    const item = {
+      id: 1,
+      turn: 1,
+      generation: 1,
+      kind: "tool_call" as const,
+      call_id: "c1",
+      tool: "read",
+      arguments: '{"path":"shot.png"}',
+      call: { name: "Read" as const, path: "shot.png", offset: null, limit: null },
+      changes: [],
+    };
+    const events: Event[] = [
+      { seq: 1, thread: 1, event: "turn_started", turn: 1, user: "look" },
+      { seq: 2, thread: 1, event: "item_started", item: { ...item, result: null } },
+      {
+        seq: 3,
+        thread: 1,
+        event: "item_completed",
+        item: {
+          ...item,
+          result: {
+            outcome: "ok",
+            text: "[read: shot.png — an image, PNG, 8×6, 1 KB; it follows]",
+            images: [picture],
+            exit_code: null,
+            duration_ms: 3,
+          },
+        },
+      },
+    ];
+    for (const e of events) for (const l of toLive(e)) s.apply(l);
+    const all = rows(s);
+    expect(all[0]).toMatchObject({ kind: "user", text: "look", images: [] });
+    const read = all[1]?.kind === "item" ? all[1].item : undefined;
+    expect(read?.kind === "tool" && read.result).toMatchObject({ outcome: "ok", images: [picture] });
   });
 
   it("keeps the turns taken back, out of the way, and marks where", () => {

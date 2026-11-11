@@ -13,7 +13,7 @@ use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, 
 use ognivo_core::approval::{Mode, ModeSwitch};
 use ognivo_core::journal::Reverted;
 use ognivo_core::protocol::Projector;
-use ognivo_models::{AnswerNow, DriverError};
+use ognivo_models::{AnswerNow, DriverError, Image};
 use ognivo_protocol::{self as p, rpc};
 use ognivo_store::SessionRow;
 use ognivo_tools::files;
@@ -40,6 +40,8 @@ pub struct ThreadHandle {
     context: rpc::Context,
     /// Its mode, which its agent and subagents read at each call.
     mode: ModeSwitch,
+    /// Whether its model takes images.
+    vision: bool,
     /// Its MCP servers as it started them.
     pub mcp: super::mcp::McpView,
 }
@@ -57,9 +59,9 @@ impl ThreadHandle {
 /// What a client asks of an open thread.
 #[derive(Debug)]
 pub enum Command {
-    Turn(String, oneshot::Sender<Reply>),
+    Turn(String, Vec<Image>, oneshot::Sender<Reply>),
     /// The conversation back to before this turn, and a turn with its message anew.
-    Edit(u32, String, oneshot::Sender<Reply>),
+    Edit(u32, String, Vec<Image>, oneshot::Sender<Reply>),
     Interrupt(oneshot::Sender<Reply>),
     AnswerNow(oneshot::Sender<Reply>),
     Changes(oneshot::Sender<Reply>),
@@ -73,8 +75,8 @@ impl Command {
     /// The answer to a command a running turn leaves no room for.
     fn busy(self) {
         let reply = match self {
-            Command::Turn(_, r)
-            | Command::Edit(_, _, r)
+            Command::Turn(_, _, r)
+            | Command::Edit(_, _, _, r)
             | Command::Interrupt(r)
             | Command::AnswerNow(r)
             | Command::Changes(r)
@@ -155,6 +157,7 @@ pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
                 answer_now: open.is_some_and(|h| h.answer_now),
                 context: open.map(|h| h.context),
                 mode: open.map(|h| wire_mode(h.mode.get())),
+                vision: open.map(|h| h.vision),
             }
         })
         .collect();
@@ -542,6 +545,7 @@ async fn open(
         window: s.opts.n_ctx,
     };
     let answer_now = s.answer_now.take();
+    let vision = s.opts.vision;
     s.opts.mode = ModeSwitch::new(core_mode(mode));
     let switch = s.opts.mode.clone();
     let rule_files = std::mem::take(&mut s.rule_files);
@@ -632,6 +636,7 @@ async fn open(
             answer_now: can_answer_now,
             context,
             mode: switch,
+            vision,
             mcp: mcp_view,
         },
     );
@@ -645,6 +650,7 @@ async fn open(
         answer_now,
         running,
         conversation,
+        vision,
     };
     tokio::spawn(actor.run(received));
     reply(rpc::Opened {
@@ -654,6 +660,7 @@ async fn open(
         answer_now: can_answer_now,
         context,
         mode,
+        vision,
     })
 }
 
@@ -739,6 +746,8 @@ struct Actor {
     /// The thread's turns that have not been taken back, oldest first: the last of them are
     /// those of the agent's conversation, which a `/clear` or a compaction starts anew.
     conversation: Vec<u32>,
+    /// Whether its model takes images.
+    vision: bool,
 }
 
 /// How a turn came out.
@@ -755,20 +764,24 @@ impl Actor {
                 break None;
             };
             let answer = match command {
-                Command::Turn(text, reply) => {
-                    let _ = reply.send(done());
-                    match self.turn(&text, &mut commands).await {
-                        Some(close) => break Some(close),
-                        None => continue,
-                    }
-                }
-                Command::Edit(turn, text, reply) => {
-                    if let Err(e) = self.rewind(turn) {
+                Command::Turn(text, images, reply) => {
+                    if let Err(e) = self.sees(&images) {
                         let _ = reply.send(Err(e));
                         continue;
                     }
                     let _ = reply.send(done());
-                    match self.turn(&text, &mut commands).await {
+                    match self.turn(&text, images, &mut commands).await {
+                        Some(close) => break Some(close),
+                        None => continue,
+                    }
+                }
+                Command::Edit(turn, text, images, reply) => {
+                    if let Err(e) = self.sees(&images).and_then(|()| self.rewind(turn)) {
+                        let _ = reply.send(Err(e));
+                        continue;
+                    }
+                    let _ = reply.send(done());
+                    match self.turn(&text, images, &mut commands).await {
                         Some(close) => break Some(close),
                         None => continue,
                     }
@@ -795,11 +808,23 @@ impl Actor {
         }
     }
 
+    /// Images go to a model that takes them; for one that does not, the turn does not start.
+    fn sees(&self, images: &[Image]) -> Result<(), RpcError> {
+        if images.is_empty() || self.vision {
+            return Ok(());
+        }
+        Err(RpcError::new(
+            rpc::error::UNSUPPORTED,
+            "the model of this thread reads no images: its llama-server runs without a projector (--mmproj)",
+        ))
+    }
+
     /// Runs a turn to its end, or until a client stops it; returns the answer of a close
     /// that came meanwhile.
     async fn turn(
         &mut self,
         text: &str,
+        images: Vec<Image>,
         commands: &mut mpsc::UnboundedReceiver<Command>,
     ) -> Option<oneshot::Sender<Reply>> {
         self.running.store(true, Ordering::SeqCst);
@@ -822,7 +847,7 @@ impl Actor {
                 drop(projector);
                 hub.emit(thread, out);
             };
-            let turn = self.agent.turn(text, &mut on);
+            let turn = self.agent.turn_with(text, images, &mut on);
             tokio::pin!(turn);
             loop {
                 tokio::select! {

@@ -1,6 +1,6 @@
 {"seq":1,"thread":11,"event":"thread_started","info":{"kind":"run","project":"/home/user/proj","profile":"gpt-oss-20b","level":"high","server":"http://127.0.0.1:8090","model":null,"parent":null}}
 {"seq":2,"thread":11,"event":"mode_changed","mode":"edit_automatically"}
-{"seq":3,"thread":11,"event":"turn_started","turn":1,"user":"Say hello instead of hi, and check the README says the same."}
+{"seq":3,"thread":11,"event":"turn_started","turn":1,"user":"Say hello instead of hi, and check the README says the same.","images":[{"mime":"image/png","data":"iVBORw0KGgoAAAANSUhEUgAAAAIAAAAB","width":2,"height":1}]}
 {"seq":4,"thread":11,"event":"item_started","item":{"id":1,"turn":1,"generation":null,"kind":"instructions","files":["AGENTS.md"],"skipped":[]}}
 {"seq":5,"thread":11,"event":"item_completed","item":{"id":1,"turn":1,"generation":null,"kind":"instructions","files":["AGENTS.md"],"skipped":[]}}
 {"seq":6,"thread":11,"event":"item_started","item":{"id":2,"turn":1,"generation":1,"kind":"reasoning","text":""}}

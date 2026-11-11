@@ -4,10 +4,13 @@ import { Virtuoso } from "react-virtuoso";
 import { Streamdown } from "streamdown";
 
 import { ending, seconds } from "../format.ts";
+import { fromPicture, imageFiles } from "../images.ts";
 import type { VoidItem } from "../model.ts";
 import type { Row, ThreadStore } from "../store.ts";
+import { useAttachments } from "./composer.tsx";
 import { Follow, tail } from "./follow.tsx";
-import { SubagentCard, ThreadNavContext } from "./subagent.tsx";
+import { Pictures } from "./pictures.tsx";
+import { SubagentCard, type ThreadNav, ThreadNavContext } from "./subagent.tsx";
 import { DraftCard, ToolCard } from "./tool.tsx";
 
 function Chevron({ open }: { open: boolean }) {
@@ -95,77 +98,114 @@ function Void({ item }: { item: VoidItem }) {
   );
 }
 
+/** A message of the user's written anew: its text and its images, which may go, and more
+ * may come by a paste. */
+function Rewrite({
+  row,
+  first,
+  edit,
+  done,
+}: {
+  row: Extract<Row, { kind: "user" }>;
+  first: string;
+  edit: NonNullable<ThreadNav["edit"]>;
+  done: () => void;
+}) {
+  const nav = useContext(ThreadNavContext);
+  const [text, setText] = useState(first);
+  const [error, setError] = useState<string>();
+  const [sending, setSending] = useState(false);
+  const images = useAttachments(nav?.vision, row.images.map(fromPicture));
+  const empty = !text.trim() && images.attached.length === 0;
+  const send = () => {
+    if (empty || sending || images.reading > 0) return;
+    setSending(true);
+    setError(undefined);
+    edit(row.turn, text, images.attached)
+      .then(done)
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
+      .finally(() => setSending(false));
+  };
+  return (
+    <form
+      className="mt-5 rounded-lg border border-spark/50 bg-raised p-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        send();
+      }}
+    >
+      {images.attached.length > 0 && (
+        <div className="mb-2">
+          <Pictures pictures={images.attached} label="of the message" size="h-16" onRemove={images.remove} />
+        </div>
+      )}
+      <textarea
+        autoFocus
+        aria-label="The message, written anew"
+        value={text}
+        rows={Math.min(12, text.split("\n").length + 1)}
+        onChange={(e) => setText(e.target.value)}
+        onPaste={(e) => {
+          const pasted = imageFiles(e.clipboardData.files);
+          if (pasted.length === 0) return;
+          if (!e.clipboardData.types.includes("text/plain")) e.preventDefault();
+          images.add(pasted);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") done();
+          if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+            e.preventDefault();
+            send();
+          }
+        }}
+        className="composer block w-full resize-y rounded-md border border-border bg-panel px-3 py-2 leading-5 outline-none"
+      />
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
+        <span className="min-w-0 flex-1 text-muted-foreground">
+          The turns from this one on leave the conversation; what they changed in files stays. Ctrl+Enter sends.
+        </span>
+        {error && <span className="w-full text-err">{error}</span>}
+        {images.error && <span className="w-full text-err">{images.error}</span>}
+        <button
+          type="button"
+          onClick={done}
+          className="rounded border border-border px-2 py-0.5 hover:bg-panel"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={sending || empty || nav?.busy || images.reading > 0}
+          className="rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90 disabled:opacity-40"
+        >
+          Send
+        </button>
+      </div>
+    </form>
+  );
+}
+
 /** The user's message; on the core, written anew from here, the turns after it leave the
  * conversation. */
 function UserMessage({ row, dropped }: { row: Extract<Row, { kind: "user" }>; dropped: boolean }) {
   const nav = useContext(ThreadNavContext);
-  const [text, setText] = useState<string>();
-  const [error, setError] = useState<string>();
-  const [sending, setSending] = useState(false);
+  const [writing, setWriting] = useState(false);
   const edit = nav?.edit;
-  if (text !== undefined && edit) {
-    const send = () => {
-      if (!text.trim() || sending) return;
-      setSending(true);
-      setError(undefined);
-      edit(row.turn, text)
-        .then(() => setText(undefined))
-        .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-        .finally(() => setSending(false));
-    };
-    return (
-      <form
-        className="mt-5 rounded-lg border border-spark/50 bg-raised p-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          send();
-        }}
-      >
-        <textarea
-          autoFocus
-          aria-label="The message, written anew"
-          value={text}
-          rows={Math.min(12, text.split("\n").length + 1)}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setText(undefined);
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-              e.preventDefault();
-              send();
-            }
-          }}
-          className="composer block w-full resize-y rounded-md border border-border bg-panel px-3 py-2 leading-5 outline-none"
-        />
-        <div className="mt-2 flex flex-wrap items-center gap-2 text-[12px]">
-          <span className="min-w-0 flex-1 text-muted-foreground">
-            The turns from this one on leave the conversation; what they changed in files stays. Ctrl+Enter sends.
-          </span>
-          {error && <span className="w-full text-err">{error}</span>}
-          <button
-            type="button"
-            onClick={() => setText(undefined)}
-            className="rounded border border-border px-2 py-0.5 hover:bg-panel"
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            disabled={sending || !text.trim() || nav?.busy}
-            className="rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90 disabled:opacity-40"
-          >
-            Send
-          </button>
-        </div>
-      </form>
-    );
+  if (writing && edit) {
+    return <Rewrite row={row} first={row.text} edit={edit} done={() => setWriting(false)} />;
   }
   return (
     <div className="group/user relative mt-5 rounded-lg bg-raised px-4 py-3">
-      <Streamdown className="leading-6">{row.text}</Streamdown>
+      {row.images.length > 0 && (
+        <div className="mb-2">
+          <Pictures pictures={row.images} label="of your message" />
+        </div>
+      )}
+      {row.text && <Streamdown className="leading-6">{row.text}</Streamdown>}
       {edit && !dropped && !nav?.busy && (
         <button
           type="button"
-          onClick={() => setText(row.text)}
+          onClick={() => setWriting(true)}
           className="absolute top-2 right-2 rounded border border-border bg-panel px-2 py-0.5 text-[12px] text-muted-foreground opacity-0 group-hover/user:opacity-100 hover:text-foreground focus:opacity-100"
         >
           Edit

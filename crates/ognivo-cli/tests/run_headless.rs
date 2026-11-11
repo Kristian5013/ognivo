@@ -6,7 +6,7 @@ mod common;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use common::{HANG, answer_stream, call_stream, fake_server};
+use common::{HANG, answer_stream, call_stream, fake_seeing_server, fake_server};
 use serde_json::{Value, json};
 
 #[tokio::test]
@@ -369,4 +369,77 @@ async fn events_are_the_run_in_the_clients_model() {
         (Some("answer"), Some("It says one."))
     );
     assert_eq!(kinds.iter().filter(|k| **k == "generation").count(), 2);
+}
+
+/// `ognivo run --image` in `dir/proj` against `url`: its exit, stdout and stderr.
+async fn run_with_image(url: String, dir: &std::path::Path) -> std::process::Output {
+    let bin = env!("CARGO_BIN_EXE_ognivo");
+    let dir = dir.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let mut child = Command::new(bin)
+            .args([
+                "run",
+                "--url",
+                &url,
+                "--profile",
+                "gemma-4-26b-a4b",
+                "--data-dir",
+            ])
+            .arg(dir.join("data"))
+            .arg("--cwd")
+            .arg(dir.join("proj"))
+            .args(["--image", "shot.png"])
+            .current_dir(dir.join("proj"))
+            .env("HOME", &dir)
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"What is on it?")
+            .unwrap();
+        child.wait_with_output().unwrap()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn an_image_goes_with_the_prompt_to_a_model_that_sees() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("proj")).unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    png.extend(3u32.to_be_bytes());
+    png.extend(2u32.to_be_bytes());
+    std::fs::write(dir.path().join("proj/shot.png"), &png).unwrap();
+
+    let (url, bodies) = fake_seeing_server(vec![answer_stream("A dot.")]).await;
+    let out = run_with_image(url, dir.path()).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "exit {:?}\n{stderr}", out.status);
+    let bodies = bodies.lock().unwrap().clone();
+    let user = bodies[0]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(user["content"][0]["type"], "image_url");
+    assert_eq!(
+        user["content"][1],
+        json!({"type": "text", "text": "What is on it?"})
+    );
+
+    // a model whose server runs no projector gets no image, and the run says why
+    let (blind, bodies) = fake_server(Vec::new()).await;
+    let out = run_with_image(blind, dir.path()).await;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("--image: the model reads no images: its llama-server runs without a projector (--mmproj)"), "{stderr}");
+    assert!(bodies.lock().unwrap().is_empty());
 }

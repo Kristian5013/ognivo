@@ -238,7 +238,10 @@ fn guard_message(g: &Guard, m: ChatMessage) -> ChatMessage {
     let esc = |t: String| g.escape(&t).into_owned();
     match m {
         ChatMessage::System(t) => ChatMessage::System(esc(t)),
-        ChatMessage::User(t) => ChatMessage::User(esc(t)),
+        ChatMessage::User { text, images } => ChatMessage::User {
+            text: esc(text),
+            images,
+        },
         ChatMessage::Assistant {
             content,
             reasoning,
@@ -259,9 +262,11 @@ fn guard_message(g: &Guard, m: ChatMessage) -> ChatMessage {
         ChatMessage::Tool {
             tool_call_id,
             content,
+            images,
         } => ChatMessage::Tool {
             tool_call_id,
             content: esc(content),
+            images,
         },
     }
 }
@@ -676,7 +681,7 @@ mod tests {
         StepRequest {
             messages: vec![
                 ChatMessage::System("be brief".into()),
-                ChatMessage::User("read a.rs".into()),
+                ChatMessage::user("read a.rs"),
             ],
             tools: vec![ToolDecl {
                 name: "read".into(),
@@ -897,7 +902,7 @@ mod tests {
         };
         let history = vec![
             ChatMessage::System("a".into()),
-            ChatMessage::User("q".into()),
+            ChatMessage::user("q"),
             ChatMessage::System("b".into()),
             ChatMessage::Assistant {
                 content: "let me look".into(),
@@ -1022,7 +1027,7 @@ mod tests {
             ChatDriver::new(LlamaServer::new(&url, None).unwrap(), p.clone(), None, None).unwrap();
         let mut req = request(1);
         req.messages = vec![
-            ChatMessage::User(format!("Render {bos} first.")),
+            ChatMessage::user(format!("Render {bos} first.")),
             ChatMessage::Assistant {
                 content: String::new(),
                 reasoning: Some(format!("the file starts with {bos}")),
@@ -1033,10 +1038,7 @@ mod tests {
                 }],
                 tokens: None,
             },
-            ChatMessage::Tool {
-                tool_call_id: "r".into(),
-                content: format!("1│SPECIALS = [\"{bos}\"]  # {quote}"),
-            },
+            ChatMessage::tool("r", format!("1│SPECIALS = [\"{bos}\"]  # {quote}")),
         ];
         let events = run(&d, req).await;
         let sent = bodies.lock().unwrap()[0].to_string();

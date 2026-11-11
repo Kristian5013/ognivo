@@ -11,7 +11,11 @@ seq: number, thread: ThreadId, } & ({ "event": "thread_started", info: ThreadInf
 /**
  * The user's message, as the user wrote it; for a subagent, its task.
  */
-user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
+user: string, 
+/**
+ * The images of the user's message, which the model sees before its text.
+ */
+images?: Array<Image>, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
 /**
  * Why it ended so, when it did not end with an answer.
  */
@@ -29,7 +33,11 @@ export type EventKind = { "event": "thread_started", info: ThreadInfo, } | { "ev
 /**
  * The user's message, as the user wrote it; for a subagent, its task.
  */
-user: string, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
+user: string, 
+/**
+ * The images of the user's message, which the model sees before its text.
+ */
+images?: Array<Image>, } | { "event": "item_started", item: Item, } | { "event": "item_delta", item: ItemId, delta: Delta, } | { "event": "item_completed", item: Item, } | { "event": "generation", generation: Generation, } | { "event": "thread_rewound", turn: TurnId, } | { "event": "turn_completed", turn: TurnId, end: TurnEnd, 
 /**
  * Why it ended so, when it did not end with an answer.
  */
@@ -236,6 +244,10 @@ export type ToolResult = { outcome: Outcome,
  */
 text: string, 
 /**
+ * The image file it read, which the model got after the text.
+ */
+images?: Array<Image>, 
+/**
  * A command's exit code; `None` for a command a signal killed, and for other tools.
  */
 exit_code: number | null, duration_ms: number, };
@@ -313,6 +325,16 @@ tool: string | null,
  */
 field: string | null, text: string, };
 
+export type Image = { 
+/**
+ * `image/png`, `image/jpeg`, `image/gif` or `image/bmp`.
+ */
+mime: string, 
+/**
+ * Its bytes in base64.
+ */
+data: string, width: number, height: number, };
+
 export type Initialize = { 
 /**
  * The client and its version, e.g. `ognivo-desktop 0.0.1`.
@@ -381,7 +403,11 @@ context: Context | null,
 /**
  * Open: its mode.
  */
-mode: Mode | null, };
+mode: Mode | null, 
+/**
+ * Open: whether its model takes images.
+ */
+vision: boolean | null, };
 
 export type Context = { 
 /**
@@ -469,7 +495,11 @@ notes: Array<string>,
 /**
  * On the Native path: `turn/answer_now` ends the model's reasoning.
  */
-answer_now: boolean, context: Context, mode: Mode, };
+answer_now: boolean, context: Context, mode: Mode, 
+/**
+ * Whether its model takes images (`/props`): `turn/start` refuses them otherwise.
+ */
+vision: boolean, };
 
 export type SetMode = { thread: ThreadId, mode: Mode, };
 
@@ -499,9 +529,24 @@ export type StartTurn = { thread: ThreadId,
 /**
  * The user's message.
  */
-text: string, };
+text: string, 
+/**
+ * Its images, which the model sees before the text: at most 8, each PNG, JPEG, GIF
+ * or BMP of at most 10 MB, and only for a model that takes images.
+ */
+images?: Array<NewImage>, };
 
-export type EditTurn = { thread: ThreadId, turn: TurnId, text: string, };
+export type EditTurn = { thread: ThreadId, turn: TurnId, text: string, 
+/**
+ * The images of the message written anew, as `turn/start` takes them.
+ */
+images?: Array<NewImage>, };
+
+export type NewImage = { 
+/**
+ * Its bytes in base64, or a data URL of them.
+ */
+data: string, };
 
 export type Changes = { files: Array<ChangedFile>, 
 /**
@@ -646,7 +691,12 @@ models: Array<RoutedModel>,
  * The router's model the rest is of; `None` when the router runs several, or none,
  * and the params name none of its models.
  */
-model: string | null, };
+model: string | null, 
+/**
+ * Whether the model takes images: the server runs it with its projector (`--mmproj`).
+ * `None` where the server does not say, as for a router's model not loaded.
+ */
+vision: boolean | null, };
 
 export type RoutedModel = { 
 /**

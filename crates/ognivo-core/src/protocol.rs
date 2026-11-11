@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use ognivo_models::Image;
 use ognivo_protocol::{self as p, ItemBody};
 use ognivo_tools::projection::Call;
 
@@ -147,7 +148,7 @@ impl Projector {
     pub fn event(&mut self, e: AgentEvent) -> Out {
         let mut out = Vec::new();
         match e {
-            AgentEvent::TurnStarted { user } => {
+            AgentEvent::TurnStarted { user, images } => {
                 self.turn += 1;
                 self.turn_open = true;
                 self.emit(
@@ -155,6 +156,7 @@ impl Projector {
                     p::EventKind::TurnStarted {
                         turn: p::TurnId(self.turn),
                         user,
+                        images: wire_images(&images),
                     },
                 );
             }
@@ -240,13 +242,17 @@ impl Projector {
                     });
                 }
             }
-            AgentEvent::ToolFinished { id, result, .. } => {
+            AgentEvent::ToolFinished {
+                id, result, images, ..
+            } => {
                 if self.running.as_ref() == Some(&id) {
                     self.running = None;
                 }
                 if let Some((mut item, began)) = self.calls.remove(&id) {
                     if let ItemBody::ToolCall { result: slot, .. } = &mut item.body {
-                        *slot = Some(result_of(&result, began.elapsed().as_millis() as u64));
+                        let mut r = result_of(&result, began.elapsed().as_millis() as u64);
+                        r.images = wire_images(&images);
+                        *slot = Some(r);
                     }
                     self.emit(&mut out, p::EventKind::ItemCompleted { item });
                 }
@@ -502,6 +508,7 @@ impl Projector {
                 *result = Some(p::ToolResult {
                     outcome: p::Outcome::Skipped,
                     text: "[ognivo] stopped with the turn".into(),
+                    images: Vec::new(),
                     exit_code: None,
                     duration_ms: began.elapsed().as_millis() as u64,
                 });
@@ -708,9 +715,23 @@ fn result_of(text: &str, duration_ms: u64) -> p::ToolResult {
     p::ToolResult {
         outcome,
         text: text.to_owned(),
+        images: Vec::new(),
         exit_code,
         duration_ms,
     }
+}
+
+/// Images as the clients get them: with their bytes, which they show.
+fn wire_images(images: &[Image]) -> Vec<p::Image> {
+    images
+        .iter()
+        .map(|i| p::Image {
+            mime: i.mime().to_owned(),
+            data: i.base64().to_owned(),
+            width: i.width(),
+            height: i.height(),
+        })
+        .collect()
 }
 
 fn end_of(end: &str) -> p::TurnEnd {
@@ -781,6 +802,7 @@ mod tests {
             id: id.into(),
             tool: tool.into(),
             result: result.into(),
+            images: Vec::new(),
         }
     }
 
@@ -801,11 +823,20 @@ mod tests {
         }
     }
 
+    /// A screenshot of 2×1 pixels: a PNG's header, which is all ognivo reads of it.
+    fn screenshot() -> Image {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(2u32.to_be_bytes());
+        png.extend(1u32.to_be_bytes());
+        Image::new(&png).unwrap()
+    }
+
     fn turn() -> Vec<AgentEvent> {
         let brief = "Task from the main agent: Check the README\n\nGoal: What greeting does it show?\n\nThis is a read task: change no file, with commands neither.";
         vec![
             AgentEvent::TurnStarted {
                 user: "Say hello instead of hi, and check the README says the same.".into(),
+                images: vec![screenshot()],
             },
             AgentEvent::Instructions {
                 files: vec![Given {
@@ -934,7 +965,7 @@ mod tests {
                 brief: brief.into(),
                 level: Some("medium".into()),
             },
-            sub(0, AgentEvent::TurnStarted { user: brief.into() }),
+            sub(0, AgentEvent::TurnStarted { user: brief.into(), images: Vec::new() }),
             sub(
                 0,
                 AgentEvent::Reasoning {
@@ -1168,7 +1199,10 @@ mod tests {
     #[test]
     fn a_turn_stopped_from_outside_completes_what_is_open() {
         let mut projector = Projector::new(p::ThreadId(1), info());
-        projector.event(AgentEvent::TurnStarted { user: "go".into() });
+        projector.event(AgentEvent::TurnStarted {
+            user: "go".into(),
+            images: Vec::new(),
+        });
         projector.event(AgentEvent::Reasoning {
             text: "thinking".into(),
         });
@@ -1236,7 +1270,10 @@ mod tests {
             allowed,
         };
         let mut projector = Projector::new(p::ThreadId(11), info());
-        projector.event(AgentEvent::TurnStarted { user: "go".into() });
+        projector.event(AgentEvent::TurnStarted {
+            user: "go".into(),
+            images: Vec::new(),
+        });
         assert_eq!(projector.asking(None, "shell", "cargo test"), None);
         projector.event(ask(None, None));
         assert_eq!(
@@ -1256,7 +1293,13 @@ mod tests {
                 brief: String::new(),
                 level: None,
             });
-            projector.event(sub(index, AgentEvent::TurnStarted { user: "go".into() }));
+            projector.event(sub(
+                index,
+                AgentEvent::TurnStarted {
+                    user: "go".into(),
+                    images: Vec::new(),
+                },
+            ));
         }
         projector.event(sub(1, ask(Some("Suite b"), None)));
         assert_eq!(
@@ -1272,7 +1315,10 @@ mod tests {
     #[test]
     fn a_thread_picked_up_again_numbers_on() {
         let mut projector = Projector::resumed(p::ThreadId(11), info(), 3, 40, 12);
-        let out = projector.event(AgentEvent::TurnStarted { user: "go".into() });
+        let out = projector.event(AgentEvent::TurnStarted {
+            user: "go".into(),
+            images: Vec::new(),
+        });
         assert!(matches!(
             out[0].1,
             p::EventKind::TurnStarted {

@@ -3,21 +3,74 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 
 import { type Budget, estimateTokens, mentionAt, sessionFiles } from "../context.ts";
 import { count } from "../format.ts";
+import {
+  type Attachment,
+  MAX_IMAGES,
+  MAX_MESSAGE_BYTES,
+  aboutBytes,
+  attach,
+  imageFiles,
+  imageTokens,
+} from "../images.ts";
 import { MODES, modeInfo, nextMode } from "../modes.ts";
 import profiles from "../profiles.json";
 import type * as P from "../protocol.ts";
 import type { ThreadStore } from "../store.ts";
+import { Pictures } from "./pictures.tsx";
 
 const BUDGETS: Record<string, { context: Budget } | undefined> = profiles;
 
 /** What a composer on the core does: sends the message (Enter; Shift+Enter is a new
- * line), and stops the running turn. */
+ * line) with its images, and stops the running turn. */
 export interface Sending {
-  send: (text: string) => Promise<void>;
+  send: (text: string, images?: Attachment[]) => Promise<void>;
   stop: () => void;
   running: boolean;
   /** On the Native path: ends the model's reasoning, and the answer comes. */
   answerNow?: () => void;
+  /** The thread's model takes images: a message may hold them. */
+  vision?: boolean;
+}
+
+/** Why a message cannot hold images. */
+export const NO_VISION =
+  "The model of this thread reads no images: its llama-server runs without a projector (--mmproj)";
+
+/** The images of a message as the composer holds them: added by a paste, a drop or the
+ * button, each read by the window first; `error` says what could not be added. */
+export function useAttachments(vision: boolean | undefined, initial: Attachment[] = []) {
+  const [attached, setAttached] = useState<Attachment[]>(initial);
+  const [reading, setReading] = useState(0);
+  const [error, setError] = useState<string>();
+  const add = (files: File[]) => {
+    if (files.length === 0) return;
+    if (!vision) {
+      setError(NO_VISION);
+      return;
+    }
+    const room = MAX_IMAGES - attached.length - reading;
+    if (files.length > room) setError(`A message may hold at most ${MAX_IMAGES} images`);
+    const taken = files.slice(0, Math.max(0, room));
+    if (taken.length === 0) return;
+    setError(undefined);
+    setReading((n) => n + taken.length);
+    for (const f of taken) {
+      attach(f, f.name || "a pasted image")
+        .then(
+          (a) =>
+            setAttached((list) => {
+              const bytes = list.reduce((n, b) => n + b.bytes, a.bytes);
+              if (bytes <= MAX_MESSAGE_BYTES) return [...list, a];
+              setError(`${a.name}: the images of a message may have ${aboutBytes(MAX_MESSAGE_BYTES)} together`);
+              return list;
+            }),
+          (e: unknown) => setError(e instanceof Error ? e.message : String(e)),
+        )
+        .finally(() => setReading((n) => n - 1));
+    }
+  };
+  const remove = (i: number) => setAttached((list) => list.filter((_, j) => j !== i));
+  return { attached, setAttached, reading, error, setError, add, remove };
 }
 
 /** The thread's mode, and a menu of the others; Shift+Tab in the composer goes to the
@@ -120,17 +173,23 @@ export function Composer({
   const [closed, setClosed] = useState(false);
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const area = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
+  const images = useAttachments(sending?.vision);
+  const empty = !text.trim() && images.attached.length === 0;
 
   const submit = () => {
-    if (!sending || busy || sending.running || !text.trim()) return;
+    if (!sending || busy || sending.running || empty || images.reading > 0) return;
     setBusy(true);
     setError(undefined);
     sending
-      .send(text)
+      .send(text, images.attached)
       .then(() => {
         setText("");
         setCaret(0);
+        images.setAttached([]);
+        images.setError(undefined);
       })
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setBusy(false));
@@ -154,7 +213,8 @@ export function Composer({
   };
 
   const named = [...new Set([...text.matchAll(/@([\w./-]+)/g)].map((m) => m[1]!))].filter((p) => files.has(p));
-  const own = estimateTokens(text);
+  const own =
+    estimateTokens(text) + images.attached.reduce((n, a) => n + imageTokens(a.width, a.height), 0);
   const known = named.reduce((n, p) => n + (files.get(p) ?? 0), 0);
   const unread = named.filter((p) => files.get(p) === undefined);
   const last = store.generations.at(-1);
@@ -168,8 +228,34 @@ export function Composer({
   const over = budget !== undefined && after > budget.compactsAt;
 
   return (
-    <div className="relative border-t border-border px-6 py-3">
+    <div
+      className={`relative border-t border-border px-6 py-3 ${dragging ? "bg-raised/60" : ""}`}
+      onDragOver={(e) => {
+        if (!sending || ![...e.dataTransfer.types].includes("Files")) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!sending) return;
+        e.preventDefault();
+        setDragging(false);
+        images.add(imageFiles(e.dataTransfer.files));
+      }}
+    >
       <div className="mx-auto max-w-3xl">
+        {(images.attached.length > 0 || images.reading > 0) && (
+          <div className="mb-2 flex flex-wrap items-center gap-2" aria-label="Images of the message">
+            <Pictures pictures={images.attached} label="of the message" size="h-16" onRemove={images.remove} />
+            {images.reading > 0 && (
+              <span role="status" className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span className="spinner" aria-hidden /> reading {images.reading === 1 ? "an image" : `${images.reading} images`}
+              </span>
+            )}
+          </div>
+        )}
         {mention && matches.length > 0 && (
           <Command
             shouldFilter={false}
@@ -210,6 +296,14 @@ export function Composer({
             setClosed(false);
           }}
           onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+          onPaste={(e) => {
+            if (!sending) return;
+            const pasted = imageFiles(e.clipboardData.files);
+            if (pasted.length === 0) return;
+            // an image copied from a page may come with its text: that is pasted as usual
+            if (!e.clipboardData.types.includes("text/plain")) e.preventDefault();
+            images.add(pasted);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Tab" && e.shiftKey && mode && onMode && !(mention && matches.length > 0)) {
               e.preventDefault();
@@ -239,6 +333,35 @@ export function Composer({
         />
         <div className="mt-1 flex flex-wrap items-center gap-x-3 text-[11px] text-muted-foreground">
           {mode && onMode && <ModePicker mode={mode} onMode={onMode} />}
+          {sending && (
+            <>
+              <button
+                type="button"
+                disabled={!sending.vision}
+                onClick={() => picker.current?.click()}
+                title={
+                  sending.vision
+                    ? "Add images the model sees with the message (or paste or drop them here)"
+                    : NO_VISION
+                }
+                className="rounded border border-border px-2 py-0.5 hover:bg-raised disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                + Image
+              </button>
+              <input
+                ref={picker}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                aria-label="Images to add"
+                onChange={(e) => {
+                  images.add(imageFiles(e.currentTarget.files));
+                  e.currentTarget.value = "";
+                }}
+              />
+            </>
+          )}
           <span>
             ≈ {count(own)} tokens{known ? ` + ${count(known)} in files` : ""}
             {unread.length ? ` + ${unread.length === 1 ? "a file" : `${unread.length} files`} not read yet` : ""}
@@ -250,6 +373,7 @@ export function Composer({
             </span>
           )}
           {error && <span className="text-err">{error}</span>}
+          {images.error && <span className="text-err">{images.error}</span>}
           <span className="ml-auto">counts are estimates: 4 bytes a token</span>
           {sending &&
             (sending.running ? (
@@ -275,7 +399,7 @@ export function Composer({
             ) : (
               <button
                 type="button"
-                disabled={busy || !text.trim()}
+                disabled={busy || empty || images.reading > 0}
                 onClick={submit}
                 className="rounded-md bg-spark px-3 py-0.5 font-medium text-background hover:opacity-90 disabled:bg-raised disabled:text-muted-foreground"
               >

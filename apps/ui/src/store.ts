@@ -11,7 +11,7 @@
 // draft's place: the generation's calls start in the order they were written. A draft
 // whose generation ran nothing stays, as not run.
 
-import type { Generation, Item, Thread, ToolItem, ToolResult } from "./model.ts";
+import type { Generation, Item, Picture, Thread, ToolItem, ToolResult } from "./model.ts";
 
 /** A call the model is writing: its tool and each argument as far as it came, in the
  * order they came, by ognivo's names (`path`, `content`, `old`, `new`, `patch`, ...). */
@@ -28,7 +28,7 @@ export interface Draft {
 export type DraftState = "writing" | "written" | "void";
 
 export type LiveEvent =
-  | { type: "turn_started"; index: number; user: string }
+  | { type: "turn_started"; index: number; user: string; images?: Picture[] }
   | { type: "item_started"; item: Item }
   /** More text for a reasoning or message item. */
   | { type: "item_delta"; id: string; text: string }
@@ -42,7 +42,7 @@ export type LiveEvent =
   | { type: "draft"; generation: number; index: number; tool?: string; field?: string; text: string };
 
 export type Row =
-  | { kind: "user"; key: string; turn: number; text: string }
+  | { kind: "user"; key: string; turn: number; text: string; images: Picture[] }
   /** `live` while it streams, or runs. */
   | { kind: "item"; key: string; item: Item; open: boolean; live: boolean }
   | { kind: "end"; key: string; turn: number; end: string; why?: string }
@@ -101,7 +101,7 @@ export class ThreadStore {
     const { turns, generations, ...info } = thread;
     const store = new ThreadStore(info, opts);
     for (const turn of turns) {
-      store.apply({ type: "turn_started", index: turn.index, user: turn.user });
+      store.apply({ type: "turn_started", index: turn.index, user: turn.user, images: turn.images });
       for (const item of turn.items) {
         store.apply({ type: "item_started", item });
         store.apply({ type: "item_completed", id: item.id });
@@ -145,7 +145,7 @@ export class ThreadStore {
     switch (e.type) {
       case "turn_started":
         this.turn = e.index;
-        this.add({ kind: "user", key: `u${e.index}`, turn: e.index, text: e.user });
+        this.add({ kind: "user", key: `u${e.index}`, turn: e.index, text: e.user, images: e.images ?? [] });
         return;
       case "item_started":
         if (this.takeDraft(e.item)) return;

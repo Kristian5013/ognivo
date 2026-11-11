@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 use std::time::Duration;
 
+use ognivo_models::image::{self, Image};
 use ognivo_models::{ChatMessage, FinishReason, Finished, Outcome};
 use ognivo_store::{JournalChanges, NewSession, SavedJournal, SessionId, Store, StoreError};
 use serde::{Deserialize, Serialize};
@@ -220,7 +221,7 @@ impl Session {
         self.flush();
         self.conversation += 1;
         let text = |m: Option<&ChatMessage>| match m {
-            Some(ChatMessage::System(t) | ChatMessage::User(t)) => Some(t.clone()),
+            Some(ChatMessage::System(t) | ChatMessage::User { text: t, .. }) => Some(t.clone()),
             _ => None,
         };
         let mut event = json!({
@@ -338,7 +339,7 @@ impl Session {
     }
 
     /// A turn begins with the user's message; the first one names the session.
-    pub(crate) fn user(&mut self, text: &str) {
+    pub(crate) fn user(&mut self, text: &str, images: &[Image]) {
         self.flush();
         self.turns += 1;
         if self.failed {
@@ -354,7 +355,14 @@ impl Session {
             .collect();
         let r = self.store.begin_turn(self.id, self.turns, &title);
         self.ok(r);
-        self.append(json!({"type": "user", "text": text}));
+        let mut event = json!({"type": "user", "text": text});
+        // the conversation keeps the images; the log, what they are
+        if !images.is_empty()
+            && let Ok(described) = image::described(images, serde_json::value::Serializer)
+        {
+            event["images"] = described;
+        }
+        self.append(event);
         let r = self.store.index(self.id, self.conversation, "user", text);
         self.ok(r);
     }

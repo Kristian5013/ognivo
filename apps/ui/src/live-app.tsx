@@ -16,6 +16,7 @@ import { ThreadView } from "./components/thread.tsx";
 import { type Budget, compaction, contextChoices, contextSize, windowChoice } from "./context.ts";
 import { type Ask, type Core, CoreError } from "./core.ts";
 import { count, ending } from "./format.ts";
+import type { Picture } from "./model.ts";
 import { DEFAULT_MODE, isMode, modeInfo } from "./modes.ts";
 import profiles from "./profiles.json";
 import * as P from "./protocol.ts";
@@ -589,6 +590,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
   const [native, setNative] = useState(new Set<number>());
   /** The context each thread opened here works with. */
   const [contexts, setContexts] = useState(new Map<number, P.Context>());
+  /** Whether each open thread's model takes images, as the core opened it. */
+  const [vision, setVision] = useState(new Map<number, boolean>());
   const [panel, setPanel] = useState<Panel>();
   const [generation, setGeneration] = useState<number>();
   const [error, setError] = useState<string>();
@@ -623,6 +626,7 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
 
   const opened = (o: P.Opened) => {
     threads.setMode(o.thread, o.mode);
+    setVision((v) => new Map(v).set(o.thread, o.vision));
     setNotes((n) => new Map(n).set(o.thread, o.notes));
     setContexts((c) => new Map(c).set(o.thread, o.context));
     setOpen((s) => new Set(s).add(o.thread));
@@ -696,6 +700,8 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
     }
   };
 
+  // the thread's model takes images: as the core opened it here, or as the list says
+  const seeing = selected !== undefined && (vision.get(selected) ?? summary?.vision ?? false);
   // a subagent's lane opens its thread; a message of the user's is written anew
   const nav = useMemo(
     () => ({
@@ -704,10 +710,14 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       edit:
         selected === undefined || parent
           ? undefined
-          : (turn: number, text: string) => onCore(selected, () => core.call("turn/edit", { thread: selected, turn, text })),
+          : (turn: number, text: string, images: Picture[]) =>
+              onCore(selected, () =>
+                core.call("turn/edit", { thread: selected, turn, text, images: images.map((i) => ({ data: i.data })) }),
+              ),
       busy: running,
+      vision: seeing,
     }),
-    [threads, core, selected, parent, running, settings],
+    [threads, core, selected, parent, running, settings, seeing],
   );
 
   const sending: Sending | undefined =
@@ -715,7 +725,11 @@ export function LiveApp({ core, threads }: { core: Core; threads: Threads }) {
       ? undefined
       : {
           running,
-          send: (text) => onCore(selected, () => core.call("turn/start", { thread: selected, text })),
+          send: (text, images = []) =>
+            onCore(selected, () =>
+              core.call("turn/start", { thread: selected, text, images: images.map((i) => ({ data: i.data })) }),
+            ),
+          vision: seeing,
           stop: () => void core.call("turn/interrupt", { thread: selected }).catch((e: unknown) => setError(message(e))),
           answerNow:
             native.has(selected) || summary?.answer_now

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{HANG, answer_stream, call_stream, fake_router, fake_server};
+use common::{HANG, answer_stream, call_stream, fake_router, fake_seeing_server, fake_server};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines};
 use tokio::net::UnixStream;
@@ -783,6 +783,146 @@ async fn a_thread_plans_in_plan_mode_and_carries_the_plan_out_once_switched() {
         std::fs::read_to_string(root.join("plan.txt")).unwrap(),
         "one\n"
     );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// A PNG of `width`×`height`, in base64: its header, which is all ognivo reads of it.
+fn png(width: u32, height: u32) -> (Vec<u8>, String) {
+    let mut b = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+    b.extend(width.to_be_bytes());
+    b.extend(height.to_be_bytes());
+    b.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(&b);
+    (b, data)
+}
+
+#[tokio::test]
+async fn images_reach_a_model_that_sees_and_a_thread_whose_model_does_not_refuses_them() {
+    let (url, bodies) = fake_seeing_server(vec![
+        call_stream("r1", "read", r#"{"file":"shot.png"}"#),
+        answer_stream("A cat, twice."),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    let (shot, _) = png(8, 6);
+    std::fs::write(root.join("shot.png"), &shot).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let mut params = start(&root, &url);
+    params["profile"] = json!("gemma-4-26b-a4b");
+    let opened = a.ok("thread/start", params).await;
+    assert_eq!(opened["vision"], true);
+    let thread = opened["thread"].clone();
+
+    // what is not an image, or too many, is refused before a turn starts
+    let e = a
+        .call(
+            "turn/start",
+            json!({"thread": thread, "text": "see", "images": [{"data": "not base64!"}]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e["code"].as_i64(), e["message"].as_str()),
+        (Some(-32602), Some("image 1: not base64"))
+    );
+    let (_, data) = png(4, 2);
+    let many: Vec<Value> = (0..9).map(|_| json!({"data": data})).collect();
+    let e = a
+        .call(
+            "turn/start",
+            json!({"thread": thread, "text": "see", "images": many}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], -32602, "{e}");
+
+    // the user's image goes with the message, and the image file the call reads with its
+    // result
+    let url_of = format!("data:image/png;base64,{data}");
+    a.ok(
+        "turn/start",
+        json!({"thread": thread, "text": "What is it?", "images": [{"data": url_of}]}),
+    )
+    .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    let started = got.iter().find(|m| event(m, "turn_started")).unwrap();
+    assert_eq!(
+        started["params"]["images"],
+        json!([{"mime": "image/png", "data": data, "width": 4, "height": 2}])
+    );
+    let read = got
+        .iter()
+        .find(|m| event(m, "item_completed") && m["params"]["item"]["call"]["name"] == "Read")
+        .unwrap_or_else(|| panic!("{got:#?}"));
+    let result = &read["params"]["item"]["result"];
+    assert_eq!(result["images"][0]["width"], 8);
+    assert!(
+        result["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("PNG, 8×6, 33 bytes; it follows]"),
+        "{result}"
+    );
+    let bodies = bodies.lock().unwrap().clone();
+    let user = bodies[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|m| m["role"] == "user")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        user["content"],
+        json!([
+            {"type": "image_url", "image_url": {"url": url_of}},
+            {"type": "text", "text": "What is it?"},
+        ])
+    );
+    let tool = bodies[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(
+        tool["content"][1]["image_url"]["url"],
+        format!("data:image/png;base64,{}", png(8, 6).1)
+    );
+
+    // a thread whose server runs no projector takes none
+    let (blind, _) = fake_server(Vec::new()).await;
+    let mut params = start(&root, &blind);
+    params["profile"] = json!("gemma-4-26b-a4b");
+    let opened = a.ok("thread/start", params).await;
+    assert_eq!(opened["vision"], false);
+    let e = a
+        .call(
+            "turn/start",
+            json!({"thread": opened["thread"], "text": "see", "images": [{"data": data}]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(e["code"], -32005, "{e}");
+    assert!(e["message"].as_str().unwrap().contains("--mmproj"), "{e}");
+    let listed = a
+        .ok("thread/list", json!({"project": null, "limit": 10}))
+        .await;
+    let seeing: Vec<&Value> = listed["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| &t["vision"])
+        .collect();
+    assert_eq!(seeing, [&json!(false), &json!(true)]);
     child.kill().unwrap();
     child.wait().unwrap();
 }

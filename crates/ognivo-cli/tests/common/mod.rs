@@ -54,7 +54,14 @@ pub fn sse(events: &[Value]) -> String {
 /// Serves `/props` (n_ctx 4096, one slot) whenever asked and `responses` to the chat
 /// requests in order; returns its URL and the bodies of the chat requests.
 pub async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let (url, bodies, _) = serve(None, responses).await;
+    let (url, bodies, _) = serve(None, responses, false).await;
+    (url, bodies)
+}
+
+/// [`fake_server`] with a projector: its model takes images.
+#[allow(dead_code)]
+pub async fn fake_seeing_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let (url, bodies, _) = serve(None, responses, true).await;
     (url, bodies)
 }
 
@@ -64,7 +71,7 @@ pub async fn fake_router(
     models: Value,
     responses: Vec<String>,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
-    serve(Some(models), responses).await
+    serve(Some(models), responses, false).await
 }
 
 fn json_response(v: &Value) -> String {
@@ -78,6 +85,7 @@ fn json_response(v: &Value) -> String {
 async fn serve(
     router: Option<Value>,
     responses: Vec<String>,
+    vision: bool,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -109,9 +117,11 @@ async fn serve(
                 Some(models) if head.starts_with("GET /models") => {
                     json_response(&json!({"data": models, "object": "list"}))
                 }
-                None if head.starts_with("GET /props") => json_response(
-                    &json!({"default_generation_settings": {"n_ctx": 4096}, "total_slots": 1}),
-                ),
+                None if head.starts_with("GET /props") => json_response(&json!({
+                    "default_generation_settings": {"n_ctx": 4096},
+                    "total_slots": 1,
+                    "modalities": {"vision": vision},
+                })),
                 _ => {
                     seen.lock()
                         .unwrap()

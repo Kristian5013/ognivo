@@ -264,6 +264,7 @@ pub fn options(root: &Path, p: &ModelProfile) -> AgentOptions {
         agents: Default::default(),
         only: None,
         mode: Default::default(),
+        vision: false,
     }
 }
 

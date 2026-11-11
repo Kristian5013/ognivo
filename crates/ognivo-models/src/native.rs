@@ -26,6 +26,13 @@
 //! yet (class B, §5.4); the next chunk's text shows their bytes, and the vocabulary their ids
 //! (`put_back`). A stream that still lost ids (fewer than `predicted_n`) goes back as its
 //! text, mended from the server's; one whose text cannot show them fails the step.
+//!
+//! A step whose conversation holds images (Qwen, with a projector loaded) goes as text:
+//! llama-server reads images on `/completion` only with a prompt string, which it tokenizes
+//! with special parsing, its media marker where each image stands (§5.8). Control tokens are
+//! written out, the model's ids as their text, and content is guarded as on the Generic path
+//! (§5.3): U+2060 after the first character of every guarded string and of the marker, and
+//! what the model writes back restored.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,6 +51,7 @@ use crate::generic::ToolDecl;
 use crate::generic::{
     Channel, ChatMessage, ExecutableCalls, FinishReason, Outcome, ToolCall, is_context_exceeded,
 };
+use crate::guard::Guard;
 use crate::harmony::parse::{self, CONTROL, End, Event, Kind, Reader};
 use crate::harmony::{self, Effort, Message, Namespace, Piece, Prompt, Special, System, Tool};
 use crate::llama::LlamaServer;
@@ -102,6 +110,8 @@ pub struct NativeDriver {
     slot: Option<u32>,
     /// The profile's guarded strings, cut in every content text (§5.3).
     guarded: Arc<Vec<String>>,
+    /// The same strings broken in the content of a prompt that goes as text (§5.8).
+    guard: Arc<Guard>,
     learnt: Arc<Mutex<Learnt>>,
     /// The server's vocabulary, which the drivers on that server and model share.
     vocabulary: Arc<SharedVocabulary>,
@@ -350,6 +360,7 @@ impl NativeDriver {
             format,
             slot,
             guarded: Arc::new(profile.tokens.guarded().map(str::to_owned).collect()),
+            guard: Arc::new(Guard::new(&profile.tokens)),
             profile: Arc::new(profile),
             learnt: Arc::default(),
             answer_now: AnswerNow::default(),
@@ -527,9 +538,14 @@ impl NativeDriver {
         let mut names = HashMap::new();
         let all = callable(req);
         for (i, m) in req.messages.iter().enumerate() {
+            if !m.images().is_empty() {
+                return Err(DriverError::InvalidRequest(
+                    "gpt-oss reads no images: the history holds one".into(),
+                ));
+            }
             match m {
                 ChatMessage::System(_) => {}
-                ChatMessage::User(t) => p.message(&Message::user(t), functions),
+                ChatMessage::User { text, .. } => p.message(&Message::user(text), functions),
                 ChatMessage::Assistant {
                     content,
                     reasoning,
@@ -570,6 +586,7 @@ impl NativeDriver {
                 ChatMessage::Tool {
                     tool_call_id,
                     content,
+                    ..
                 } => {
                     let name = names.get(tool_call_id.as_str()).ok_or_else(|| {
                         DriverError::InvalidRequest(format!(
@@ -614,8 +631,16 @@ impl NativeDriver {
         for (m, replay) in req.messages.iter().zip(replayed) {
             match m {
                 ChatMessage::System(_) => {}
-                ChatMessage::User(t) => turns.push(qwen::Turn::User(t)),
-                ChatMessage::Tool { content, .. } => turns.push(qwen::Turn::Tool(content)),
+                ChatMessage::User { text, images } => turns.push(qwen::Turn::User {
+                    text,
+                    images: images.len(),
+                }),
+                ChatMessage::Tool {
+                    content, images, ..
+                } => turns.push(qwen::Turn::Tool {
+                    text: content,
+                    images: images.len(),
+                }),
                 ChatMessage::Assistant {
                     tokens: Some(ids), ..
                 } if replay => turns.push(qwen::Turn::Replay(ids)),
@@ -696,7 +721,7 @@ impl NativeDriver {
             .iter()
             .map(|piece| match piece {
                 Chunk::Text(t) => cut(t, &self.guarded),
-                Chunk::Control(_) | Chunk::Tokens(_) => Vec::new(),
+                Chunk::Control(_) | Chunk::Tokens(_) | Chunk::Image => Vec::new(),
             })
             .collect();
         let new: Vec<&str> = {
@@ -754,9 +779,100 @@ impl NativeDriver {
                         out.extend_from_slice(&l.texts[*t]);
                     }
                 }
+                Chunk::Image => {
+                    return Err(DriverError::InvalidRequest(
+                        "an image stands in a prompt of ids".into(),
+                    ));
+                }
             }
         }
         Ok(out)
+    }
+
+    /// A prompt with images as the text llama-server reads it with them (§5.8): control
+    /// tokens written out, the model's ids as their text, content guarded, the marker for
+    /// each image.
+    async fn text_of(
+        &self,
+        p: &[Chunk],
+        guard: &Guard,
+        marker: &str,
+    ) -> Result<String, DriverError> {
+        let mut out = String::new();
+        for chunk in p {
+            match chunk {
+                Chunk::Control(id) => out.push_str(&self.control_text(*id).await?),
+                Chunk::Text(t) => out.push_str(&guard.escape(t)),
+                Chunk::Tokens(ids) => out.push_str(&self.text_of_ids(ids, guard).await?),
+                Chunk::Image => out.push_str(marker),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Ids as the text of a prompt that goes as text: control tokens written out, the rest
+    /// as their bytes, guarded.
+    async fn text_of_ids(&self, ids: &[TokenId], guard: &Guard) -> Result<String, DriverError> {
+        let pieces = self.pieces(ids).await.map_err(failure)?;
+        let mut out = String::new();
+        let mut run = Vec::new();
+        for (id, piece) in ids.iter().zip(pieces) {
+            if *id >= self.format.control() {
+                out.push_str(&guard.escape(&String::from_utf8_lossy(&run)));
+                run.clear();
+                out.push_str(&self.control_text(*id).await?);
+            } else {
+                run.extend(piece);
+            }
+        }
+        out.push_str(&guard.escape(&String::from_utf8_lossy(&run)));
+        Ok(out)
+    }
+
+    /// A control token's text: the format's own, or else the server's.
+    async fn control_text(&self, id: TokenId) -> Result<String, DriverError> {
+        let own = match self.format {
+            Format::Harmony(_) => Special::from_id(id).map(Special::text),
+            Format::Qwen(_) => qwen::Special::from_id(id).map(qwen::Special::text),
+        };
+        match own {
+            Some(t) => Ok(t),
+            None => self.server.detokenize(&[id]).await.map_err(failure),
+        }
+    }
+
+    /// The prompt of a step whose conversation holds images, as text, and the guard of its
+    /// content; `None` without images. The server's media marker is asked for each such
+    /// step: llama-server draws a new one at each start.
+    async fn media(&self, req: &StepRequest, p: &[Chunk]) -> Result<Option<Media>, DriverError> {
+        let images: Vec<String> = req
+            .messages
+            .iter()
+            .flat_map(ChatMessage::images)
+            .map(|i| i.base64().to_owned())
+            .collect();
+        if images.is_empty() {
+            return Ok(None);
+        }
+        let marked = p.iter().filter(|c| matches!(c, Chunk::Image)).count();
+        if marked != images.len() {
+            return Err(DriverError::InvalidRequest(format!(
+                "the prompt marks {marked} images of the {} the history holds",
+                images.len()
+            )));
+        }
+        let marker = match self.server.props().await {
+            Ok(props) => props.media_marker,
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| DEFAULT_MEDIA_MARKER.to_owned());
+        let guard = Arc::new(self.guard.with(&marker));
+        let text = self.text_of(p, &guard, &marker).await?;
+        Ok(Some(Media {
+            text,
+            images,
+            guard,
+        }))
     }
 
     async fn start(
@@ -765,9 +881,14 @@ impl NativeDriver {
     ) -> Result<BoxStream<'static, Result<DriverEvent, DriverError>>, DriverError> {
         self.learn_ahead();
         let prompt = self.prompt(&req).await?;
-        let ids = self.ids(&prompt).await?;
+        let media = self.media(&req, &prompt).await?;
+        let ids = match &media {
+            Some(_) => Vec::new(),
+            None => self.ids(&prompt).await?,
+        };
         self.warm(&req, &ids).await;
-        let call_id = format!("call_{:08x}_{}", req.seed, ids.len());
+        let length = media.as_ref().map_or(ids.len(), |m| m.text.len());
+        let call_id = format!("call_{:08x}_{length}", req.seed);
         let sampler = SamplerSpec {
             seed: Some(req.seed),
             ..SamplerSpec::from(self.profile.sampling.main)
@@ -784,9 +905,13 @@ impl NativeDriver {
             constraint: constraint.clone(),
             banned: Vec::new(),
         };
+        let mut body = engine::completion_body(&completion);
+        if let Some(m) = &media {
+            body["prompt"] = m.prompt("");
+        }
         let payloads = self
             .server
-            .completion_stream(&engine::completion_body(&completion), None)
+            .completion_stream(&body, None)
             .await
             .map_err(failure)?;
         let g = Generation {
@@ -803,6 +928,7 @@ impl NativeDriver {
             seed: req.seed,
             call_id,
             prompt: ids,
+            media,
             sampler,
             max_tokens: req.max_tokens,
             continued: 0,
@@ -885,9 +1011,13 @@ impl NativeDriver {
             constraint: g.constraint.clone(),
             banned: Vec::new(),
         };
+        let mut body = engine::completion_body(&completion);
+        if let Some(m) = &g.media {
+            body["prompt"] = m.prompt(&self.text_of_ids(&ids, &m.guard).await?);
+        }
         let payloads = self
             .server
-            .completion_stream(&engine::completion_body(&completion), None)
+            .completion_stream(&body, None)
             .await
             .map_err(failure)?;
         g.events = engine::terminated(payloads);
@@ -1159,6 +1289,8 @@ struct Generation {
     call_id: String,
     /// The step's prompt, which every request of the step continues.
     prompt: Vec<TokenId>,
+    /// In its place, the prompt of a step with images, as text.
+    media: Option<Media>,
     sampler: SamplerSpec,
     max_tokens: u32,
     /// Requests that continued the step.
@@ -1307,7 +1439,7 @@ impl Generation {
         let tokens =
             (k.clean && !self.lost && matches!(k.outcome, Outcome::Calls(_) | Outcome::Answer))
                 .then(|| self.reader.ids().to_vec());
-        Finished {
+        self.restored(Finished {
             content: k.content,
             reasoning: k.reasoning,
             outcome: k.outcome,
@@ -1315,7 +1447,60 @@ impl Generation {
             usage: self.counts.usage(),
             seed: self.seed,
             tokens,
-        }
+        })
+    }
+
+    /// What the model wrote, as the tools must get it: after a prompt that went as text,
+    /// with the guarded strings it copied from there whole again (§5.8).
+    fn restored(&self, mut f: Finished) -> Finished {
+        let Some(m) = &self.media else {
+            return f;
+        };
+        let g = &m.guard;
+        f.content = g.restore(&f.content).into_owned();
+        f.reasoning = g.restore(&f.reasoning).into_owned();
+        let calls = |calls: &[ToolCall]| -> Vec<ToolCall> {
+            calls
+                .iter()
+                .map(|c| {
+                    let arguments = match serde_json::from_str::<Value>(&c.arguments) {
+                        Ok(mut v) => {
+                            if g.restore_json(&mut v) {
+                                v.to_string()
+                            } else {
+                                c.arguments.clone()
+                            }
+                        }
+                        Err(_) => g.restore(&c.arguments).into_owned(),
+                    };
+                    ToolCall {
+                        arguments,
+                        ..c.clone()
+                    }
+                })
+                .collect()
+        };
+        f.outcome = match f.outcome {
+            Outcome::Calls(c) => Outcome::Calls(ExecutableCalls::checked(calls(c.calls()))),
+            Outcome::Truncated { partial } => Outcome::Truncated {
+                partial: calls(&partial),
+            },
+            Outcome::Repeating {
+                partial,
+                channel,
+                sample,
+            } => Outcome::Repeating {
+                partial: calls(&partial),
+                channel,
+                sample: g.restore(&sample).into_owned(),
+            },
+            Outcome::Malformed { calls: c, reason } => Outcome::Malformed {
+                calls: calls(&c),
+                reason,
+            },
+            Outcome::Answer => Outcome::Answer,
+        };
+        f
     }
 
     /// A generation the repetition guard stopped: nothing in it may run.
@@ -1328,7 +1513,7 @@ impl Generation {
             Outcome::Calls(c) => c.calls().to_vec(),
             Outcome::Answer | Outcome::Repeating { .. } => Vec::new(),
         };
-        Finished {
+        self.restored(Finished {
             outcome: Outcome::Repeating {
                 partial,
                 channel,
@@ -1340,7 +1525,33 @@ impl Generation {
             usage: self.counts.usage(),
             seed: self.seed,
             tokens: None,
-        }
+        })
+    }
+}
+
+/// The marker of upstream llama.cpp before it drew one at each start and named it in
+/// `/props` (`mtmd_default_marker`).
+const DEFAULT_MEDIA_MARKER: &str = "<__media__>";
+
+/// The prompt of a step whose conversation holds images, as llama-server reads it with
+/// them (§5.8).
+#[derive(Debug, Clone)]
+struct Media {
+    /// The prompt as text, the media marker where each image stands.
+    text: String,
+    /// The images in base64, in the order of the markers.
+    images: Vec<String>,
+    /// The guard of its content: the profile's guarded strings and the marker.
+    guard: Arc<Guard>,
+}
+
+impl Media {
+    /// The `prompt` of a request, its text continued with `more`.
+    fn prompt(&self, more: &str) -> Value {
+        json!({
+            "prompt_string": format!("{}{more}", self.text),
+            "multimodal_data": self.images,
+        })
     }
 }
 
@@ -1402,12 +1613,13 @@ impl Format {
 }
 
 /// A piece of a prompt in either format: a control token by id, text tokenized as content,
-/// or ids the model generated, sent back as they came.
+/// ids the model generated, sent back as they came, or where an image stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Chunk {
     Control(TokenId),
     Text(String),
     Tokens(Vec<TokenId>),
+    Image,
 }
 
 fn chunks_of_harmony(p: Prompt) -> Vec<Chunk> {
@@ -1428,6 +1640,7 @@ fn chunks_of_qwen(p: qwen::Prompt) -> Vec<Chunk> {
             qwen::Piece::Special(s) => Chunk::Control(s.id()),
             qwen::Piece::Text(t) => Chunk::Text(t),
             qwen::Piece::Tokens(ids) => Chunk::Tokens(ids),
+            qwen::Piece::Image => Chunk::Image,
         })
         .collect()
 }
@@ -1858,6 +2071,7 @@ fn cut<'a>(text: &'a str, guarded: &[String]) -> Vec<&'a str> {
 mod tests {
     use super::*;
     use crate::generic::ToolDecl;
+    use crate::image::Image;
     use crate::profile;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1957,6 +2171,9 @@ mod tests {
         }
         out
     }
+
+    /// The media marker of the fake server's start.
+    const MARKER: &str = "<__media_test__>";
 
     /// One answer of the fake server's `/completion`: the ids to stream, how the stream
     /// ends, and how many ids the server says it generated.
@@ -2097,6 +2314,20 @@ mod tests {
                             }
                         }
                     };
+                    if head.starts_with("GET /props") {
+                        let body = json!({
+                            "modalities": {"vision": true},
+                            "media_marker": MARKER,
+                        })
+                        .to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        sock.write_all(response.as_bytes()).await.unwrap();
+                        sock.shutdown().await.unwrap();
+                        return;
+                    }
                     let body: Value = serde_json::from_slice(&body).unwrap();
                     let whole = body["content"].as_array().is_some_and(|c| c.len() > 1000);
                     let response = if head.starts_with("POST /tokenize")
@@ -2143,12 +2374,16 @@ mod tests {
                             body.len()
                         )
                     } else {
-                        let prompt: Vec<TokenId> = body["prompt"]
-                            .as_array()
-                            .unwrap()
-                            .iter()
-                            .map(|v| v.as_u64().unwrap() as TokenId)
-                            .collect();
+                        // a prompt with images goes as text: its ids are the server's own
+                        let prompt: Vec<TokenId> = match body["prompt"]["prompt_string"].as_str() {
+                            Some(text) => tokenize(text),
+                            None => body["prompt"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .map(|v| v.as_u64().unwrap() as TokenId)
+                                .collect(),
+                        };
                         seen.lock().unwrap().push(prompt);
                         kept.lock().unwrap().push(body.clone());
                         let c = queue.lock().unwrap().next().expect("a completion");
@@ -2312,7 +2547,7 @@ mod tests {
         let text: String = (0x20u8..0x7f).map(char::from).collect::<String>().repeat(2);
         let long = format!("«channel»final«message»{text}«return»");
         let (url, _, _, _, asked) = fake_server_all(vec![answer(&long), answer(&long)]).await;
-        let start = vec![ChatMessage::User("Say it.".into())];
+        let start = vec![ChatMessage::user("Say it.")];
         let f = finished(&run(&driver(&url), request(start.clone(), 7)).await);
         assert_eq!(f.content, text);
         // the vocabulary in parts, and not one request for the ids of the stream
@@ -2334,7 +2569,7 @@ mod tests {
         let d = driver(&url);
         let start = vec![
             ChatMessage::System("Be brief.".into()),
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
         ];
         let events = run(&d, request(start, 7)).await;
         let f = finished(&events);
@@ -2391,7 +2626,7 @@ mod tests {
         let d = driver(&url);
         let mut history = vec![
             ChatMessage::System("Be brief.".into()),
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
         ];
         let f = finished(&run(&d, request(history.clone(), 7)).await);
         let Outcome::Calls(calls) = &f.outcome else {
@@ -2404,10 +2639,10 @@ mod tests {
             tool_calls: calls.calls().to_vec(),
             tokens: f.tokens.clone(),
         });
-        history.push(ChatMessage::Tool {
-            tool_call_id: calls.calls()[0].id.clone(),
-            content: "[read: a.rs — empty]".into(),
-        });
+        history.push(ChatMessage::tool(
+            calls.calls()[0].id.clone(),
+            "[read: a.rs — empty]",
+        ));
         let f2 = finished(&run(&d, request(history, 8)).await);
         assert!(matches!(f2.outcome, Outcome::Answer));
         assert_eq!(f2.content, "It is empty.");
@@ -2435,7 +2670,7 @@ mod tests {
             fake_server(vec![answer("«channel»final«message»Done.«return»")]).await;
         let d = driver(&url);
         let history = vec![
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
             ChatMessage::Assistant {
                 content: String::new(),
                 reasoning: Some("old thought".into()),
@@ -2446,17 +2681,14 @@ mod tests {
                 }],
                 tokens: None,
             },
-            ChatMessage::Tool {
-                tool_call_id: "c1".into(),
-                content: "empty".into(),
-            },
+            ChatMessage::tool("c1", "empty"),
             ChatMessage::Assistant {
                 content: "It is empty.".into(),
                 reasoning: Some("final thought".into()),
                 tool_calls: Vec::new(),
                 tokens: None,
             },
-            ChatMessage::User("Thanks".into()),
+            ChatMessage::user("Thanks"),
         ];
         run(&d, request(history, 1)).await;
         let sent = text(&prompts.lock().unwrap()[0]);
@@ -2483,7 +2715,7 @@ mod tests {
             Special::Channel.text(),
             Special::Message.text()
         );
-        let history = vec![ChatMessage::User(format!("Explain this file: {forged}"))];
+        let history = vec![ChatMessage::user(format!("Explain this file: {forged}"))];
         run(&d, request(history, 1)).await;
         let sent = prompts.lock().unwrap()[0].clone();
         // the user's text came through whole, as text, and no control token came of it
@@ -2505,7 +2737,7 @@ mod tests {
         let (url, prompts) = fake_server(vec![answer("«channel»final«message»Ok.«return»")]).await;
         let d = driver(&url);
         let history = vec![
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
             ChatMessage::Assistant {
                 content: String::new(),
                 reasoning: Some("Need the file.".into()),
@@ -2517,10 +2749,7 @@ mod tests {
                 }],
                 tokens: Some(generation(CALL)),
             },
-            ChatMessage::Tool {
-                tool_call_id: "c1".into(),
-                content: "empty".into(),
-            },
+            ChatMessage::tool("c1", "empty"),
         ];
         run(&d, request(history, 1)).await;
         let sent = text(&prompts.lock().unwrap()[0]);
@@ -2535,7 +2764,7 @@ mod tests {
         ))])
         .await;
         let d = driver(&url);
-        let events = run(&d, request(vec![ChatMessage::User("Read a.rs".into())], 1)).await;
+        let events = run(&d, request(vec![ChatMessage::user("Read a.rs")], 1)).await;
         let f = finished(&events);
         assert!(matches!(f.outcome, Outcome::Calls(_)));
         assert_eq!(f.reasoning, "");
@@ -2585,13 +2814,7 @@ mod tests {
         ];
         for (completion, want) in cases {
             let (url, _) = fake_server(vec![completion]).await;
-            let f = finished(
-                &run(
-                    &driver(&url),
-                    request(vec![ChatMessage::User("go".into())], 1),
-                )
-                .await,
-            );
+            let f = finished(&run(&driver(&url), request(vec![ChatMessage::user("go")], 1)).await);
             let got = match f.outcome {
                 Outcome::Truncated { .. } => "truncated",
                 Outcome::Malformed { .. } => "malformed",
@@ -2622,7 +2845,7 @@ mod tests {
         ])
         .await;
         let d = qwen_driver(&url, None);
-        let user = ChatMessage::User("What is n?".into());
+        let user = ChatMessage::user("What is n?");
         let f = finished(&run(&d, request(vec![user.clone()], 1)).await);
         assert_eq!(f.content, "n = λ/4.");
         assert_eq!(f.reasoning, "n = λ/4, where λ is the level.");
@@ -2636,7 +2859,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 tokens: f.tokens.clone(),
             },
-            ChatMessage::User("And λ?".into()),
+            ChatMessage::user("And λ?"),
         ];
         run(&d, request(history, 2)).await;
         let sent = prompts.lock().unwrap()[1].clone();
@@ -2682,7 +2905,7 @@ mod tests {
         ])
         .await;
         let d = driver(&url);
-        let user = ChatMessage::User("Sizes?".into());
+        let user = ChatMessage::user("Sizes?");
         let f = finished(&run(&d, request(vec![user.clone()], 1)).await);
         assert!(matches!(f.outcome, Outcome::Answer));
         assert_eq!(
@@ -2705,10 +2928,7 @@ mod tests {
                 tool_calls: calls.calls().to_vec(),
                 tokens: f.tokens.clone(),
             },
-            ChatMessage::Tool {
-                tool_call_id: calls.calls()[0].id.clone(),
-                content: "empty".into(),
-            },
+            ChatMessage::tool(calls.calls()[0].id.clone(), "empty"),
         ];
         run(&d, request(history, 3)).await;
         let sent = text(&prompts.lock().unwrap()[2]);
@@ -2728,7 +2948,7 @@ mod tests {
             ..answer(fixture)
         }])
         .await;
-        let user = ChatMessage::User("Price?".into());
+        let user = ChatMessage::user("Price?");
         let f = finished(&run(&driver(&url), request(vec![user], 1)).await);
         assert_eq!(f.content, "It costs 5\u{20AC}");
         assert_eq!(f.tokens, None);
@@ -2747,11 +2967,7 @@ mod tests {
             ..answer(fixture)
         }])
         .await;
-        let events = run(
-            &driver(&url),
-            request(vec![ChatMessage::User("Sizes?".into())], 1),
-        )
-        .await;
+        let events = run(&driver(&url), request(vec![ChatMessage::user("Sizes?")], 1)).await;
         assert!(matches!(
             events.last(),
             Some(Err(DriverError::Engine(EngineError::Protocol(e)))) if e.contains("does not show")
@@ -2767,7 +2983,7 @@ mod tests {
         let (url, _) = fake_server(vec![odd]).await;
         let events = run(
             &driver(&url),
-            request(vec![ChatMessage::User("Read a.rs".into())], 1),
+            request(vec![ChatMessage::user("Read a.rs")], 1),
         )
         .await;
         assert!(matches!(
@@ -2850,7 +3066,7 @@ mod tests {
         let last = "«channel»final«message»391«return»";
         let (url, prompts) = fake_server(vec![answer(bare), answer(last)]).await;
         let d = driver(&url);
-        let f = finished(&run(&d, request(vec![ChatMessage::User("17 * 23?".into())], 1)).await);
+        let f = finished(&run(&d, request(vec![ChatMessage::user("17 * 23?")], 1)).await);
         assert!(matches!(f.outcome, Outcome::Answer));
         assert_eq!(f.content, "391");
         assert_eq!(f.reasoning, "The answer is 391.");
@@ -2887,7 +3103,7 @@ mod tests {
         // 40 tokens for the step: 30 of reasoning at most
         let req = StepRequest {
             max_tokens: 40,
-            ..request(vec![ChatMessage::User("go".into())], 1)
+            ..request(vec![ChatMessage::user("go")], 1)
         };
         let f = finished(&run(&d, req).await);
         assert_eq!(f.content, "Done.");
@@ -2911,7 +3127,7 @@ mod tests {
         .await;
         let d = driver(&url);
         d.answer_now().press();
-        let f = finished(&run(&d, request(vec![ChatMessage::User("go".into())], 1)).await);
+        let f = finished(&run(&d, request(vec![ChatMessage::user("go")], 1)).await);
         assert_eq!((f.reasoning.as_str(), f.content.as_str()), ("L", "Now."));
         // the press is spent
         assert!(!d.answer_now.take());
@@ -2926,7 +3142,7 @@ mod tests {
         ])
         .await;
         let d = driver(&url);
-        run(&d, request(vec![ChatMessage::User("go".into())], 1)).await;
+        run(&d, request(vec![ChatMessage::user("go")], 1)).await;
         {
             let bodies = bodies.lock().unwrap();
             // the first request and the one that continues it
@@ -2942,7 +3158,7 @@ mod tests {
             fake_server_bodies(vec![answer("«channel»final«message»Ok.«return»")]).await;
         let req = StepRequest {
             tools: Vec::new(),
-            ..request(vec![ChatMessage::User("go".into())], 1)
+            ..request(vec![ChatMessage::user("go")], 1)
         };
         run(&driver(&url), req).await;
         assert!(bodies.lock().unwrap()[0].get("grammar").is_none());
@@ -2966,7 +3182,7 @@ mod tests {
             tools: vec![exec.clone()],
             ..request(messages, 1)
         };
-        let f = finished(&run(&d, req(vec![ChatMessage::User("list".into())])).await);
+        let f = finished(&run(&d, req(vec![ChatMessage::user("list")])).await);
         let Outcome::Calls(calls) = &f.outcome else {
             panic!("{:?}", f.outcome)
         };
@@ -2981,7 +3197,7 @@ mod tests {
         assert!(!sent.contains("namespace functions"));
         // a call without its ids goes back as the reference renders it, by its own name
         let history = vec![
-            ChatMessage::User("list".into()),
+            ChatMessage::user("list"),
             ChatMessage::Assistant {
                 content: String::new(),
                 reasoning: None,
@@ -2992,10 +3208,7 @@ mod tests {
                 }],
                 tokens: None,
             },
-            ChatMessage::Tool {
-                tool_call_id: "c1".into(),
-                content: "a.rs b.rs".into(),
-            },
+            ChatMessage::tool("c1", "a.rs b.rs"),
         ];
         run(&d, req(history)).await;
         let sent = text(&prompts.lock().unwrap()[1]);
@@ -3012,13 +3225,7 @@ mod tests {
     async fn a_step_goes_on_twice_at_most() {
         let bare = "«channel»analysis«message»Hmm.«return»";
         let (url, prompts) = fake_server(vec![answer(bare), answer(bare), answer(bare)]).await;
-        let f = finished(
-            &run(
-                &driver(&url),
-                request(vec![ChatMessage::User("go".into())], 1),
-            )
-            .await,
-        );
+        let f = finished(&run(&driver(&url), request(vec![ChatMessage::user("go")], 1)).await);
         // neither a call nor an answer: the agent tells the model so
         assert!(matches!(f.outcome, Outcome::Answer));
         assert_eq!(f.content, "");
@@ -3059,11 +3266,11 @@ mod tests {
             .iter()
             .map(|m| match m["role"].as_str().unwrap() {
                 "system" => ChatMessage::System(m["content"].as_str().unwrap().into()),
-                "user" => ChatMessage::User(m["content"].as_str().unwrap().into()),
-                "tool" => ChatMessage::Tool {
-                    tool_call_id: m["tool_call_id"].as_str().unwrap().into(),
-                    content: m["content"].as_str().unwrap().into(),
-                },
+                "user" => ChatMessage::user(m["content"].as_str().unwrap()),
+                "tool" => ChatMessage::tool(
+                    m["tool_call_id"].as_str().unwrap(),
+                    m["content"].as_str().unwrap(),
+                ),
                 _ => ChatMessage::Assistant {
                     content: m["content"].as_str().unwrap_or_default().into(),
                     reasoning: m["reasoning_content"].as_str().map(str::to_owned),
@@ -3133,7 +3340,7 @@ mod tests {
         let d = qwen_driver(&url, None);
         let start = vec![
             ChatMessage::System("Be brief.".into()),
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
         ];
         let events = run(&d, request(start, 7)).await;
         let f = finished(&events);
@@ -3153,7 +3360,7 @@ mod tests {
         let want = qwen::render(
             &[read_tool()],
             "Be brief.",
-            &[qwen::Turn::User("Read a.rs")],
+            &[qwen::Turn::user("Read a.rs")],
             qwen::Level::Medium,
         );
         assert_eq!(text(&sent), want.display());
@@ -3183,7 +3390,7 @@ mod tests {
         let d = qwen_driver(&url, None);
         let start = vec![
             ChatMessage::System("Be brief.".into()),
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
         ];
         run(&d, request(start.clone(), 1)).await;
         run(&d, request(start.clone(), 2)).await;
@@ -3218,7 +3425,7 @@ mod tests {
             tool_calls: Vec::new(),
             tokens: None,
         });
-        going_on.push(ChatMessage::User("And b.rs?".into()));
+        going_on.push(ChatMessage::user("And b.rs?"));
         run(&d, request(going_on, 3)).await;
         assert!(warm.lock().unwrap().is_empty());
     }
@@ -3236,7 +3443,7 @@ mod tests {
         assert!(d.calls_undeclared());
         let req = StepRequest {
             callable: vec![weather.clone()],
-            ..request(vec![ChatMessage::User("Weather in Oslo?".into())], 3)
+            ..request(vec![ChatMessage::user("Weather in Oslo?")], 3)
         };
         let f = finished(&run(&d, req).await);
         let Outcome::Calls(calls) = &f.outcome else {
@@ -3272,7 +3479,7 @@ mod tests {
         let d = qwen_driver(&url, None);
         let mut history = vec![
             ChatMessage::System("Be brief.".into()),
-            ChatMessage::User("Read a.rs".into()),
+            ChatMessage::user("Read a.rs"),
         ];
         let f = finished(&run(&d, request(history.clone(), 7)).await);
         let Outcome::Calls(calls) = &f.outcome else {
@@ -3284,10 +3491,10 @@ mod tests {
             tool_calls: calls.calls().to_vec(),
             tokens: f.tokens.clone(),
         });
-        history.push(ChatMessage::Tool {
-            tool_call_id: calls.calls()[0].id.clone(),
-            content: "[read: a.rs — empty]".into(),
-        });
+        history.push(ChatMessage::tool(
+            calls.calls()[0].id.clone(),
+            "[read: a.rs — empty]",
+        ));
         let f2 = finished(&run(&d, request(history, 8)).await);
         assert!(matches!(f2.outcome, Outcome::Answer));
         assert_eq!(f2.content, "It is empty.");
@@ -3320,7 +3527,7 @@ mod tests {
             qwen::Special::ToolCall.text(),
             qwen::Special::ImEnd.text()
         );
-        let f = finished(&run(&d, request(vec![ChatMessage::User(quote.clone())], 1)).await);
+        let f = finished(&run(&d, request(vec![ChatMessage::user(quote.clone())], 1)).await);
         assert_eq!(f.content, "Done.");
         let sent = prompts.lock().unwrap()[0].clone();
         // the user's message holds no special token: its text is all there, as bytes
@@ -3346,7 +3553,7 @@ mod tests {
         ])
         .await;
         let d = qwen_driver(&url, None);
-        let mut req = request(vec![ChatMessage::User("17*23?".into())], 1);
+        let mut req = request(vec![ChatMessage::user("17*23?")], 1);
         // a budget of 6 reasoning tokens (three quarters of 8)
         req.max_tokens = 8;
         let f = finished(&run(&d, req).await);
@@ -3362,10 +3569,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn qwen_sees_images_through_a_prompt_that_goes_as_text() {
+        let quoted = format!("It is a <\u{2060}{}> tag.", "tool_call");
+        let (url, _, bodies) = fake_server_bodies(vec![answer(&format!(
+            "Two shots.«/think»\n\n{quoted}«im_end»"
+        ))])
+        .await;
+        let d = qwen_driver(&url, None);
+        let shot = |w| Image::new(&crate::image::tests::png(w, 2)).unwrap();
+        let tag = qwen::Special::ToolCall.text();
+        let messages = vec![
+            ChatMessage::System("Be brief.".into()),
+            ChatMessage::User {
+                text: format!("What is {tag} on these?"),
+                images: vec![shot(2), shot(3)],
+            },
+        ];
+        let f = finished(&run(&d, request(messages, 1)).await);
+        // what the model copied from the guarded prompt comes back whole
+        assert_eq!(f.content, format!("It is a {tag} tag."));
+        assert!(matches!(f.outcome, Outcome::Answer));
+        let body = bodies.lock().unwrap()[0].clone();
+        let prompt = body["prompt"]["prompt_string"].as_str().unwrap();
+        assert_eq!(
+            body["prompt"]["multimodal_data"],
+            json!([shot(2).base64(), shot(3).base64()])
+        );
+        // control tokens are written out, the images stand before the text, and the
+        // content's own control token text is broken
+        let start = qwen::Special::ImStart.text();
+        assert!(prompt.starts_with(&format!("{start}system\n")), "{prompt}");
+        let user = format!(
+            "{start}user\n{MARKER}{MARKER}What is <\u{2060}{} on these?{}\n",
+            &tag[1..],
+            qwen::Special::ImEnd.text()
+        );
+        assert!(prompt.contains(&user), "{prompt}");
+        assert!(prompt.ends_with(&format!(
+            "{start}assistant\n{}\n",
+            qwen::Special::Think.text()
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_step_with_images_goes_on_as_text_and_a_marker_in_content_is_broken() {
+        let (url, _, bodies) = fake_server_bodies(vec![
+            answer("abcdefghijklmnop«/think»never«im_end»"),
+            answer("A cat.«im_end»"),
+        ])
+        .await;
+        let d = qwen_driver(&url, None);
+        let image = Image::new(&crate::image::tests::png(4, 4)).unwrap();
+        let messages = vec![
+            ChatMessage::user("Look."),
+            ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: Some("Read it.".into()),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: r#"{"path":"cat.png"}"#.into(),
+                }],
+                tokens: None,
+            },
+            ChatMessage::Tool {
+                tool_call_id: "c1".into(),
+                content: format!("[read: cat.png] {MARKER}"),
+                images: vec![image.clone()],
+            },
+        ];
+        let mut req = request(messages, 1);
+        req.max_tokens = 8;
+        let f = finished(&run(&d, req).await);
+        assert_eq!(f.content, "A cat.");
+        let bodies = bodies.lock().unwrap();
+        let first = bodies[0]["prompt"]["prompt_string"].as_str().unwrap();
+        // the marker in the result's text cannot stand for an image: one marker, the image's
+        let broken = format!("<\u{2060}{}", &MARKER[1..]);
+        assert_eq!(first.matches(MARKER).count(), 1);
+        assert!(
+            first.contains(&format!("[read: cat.png] {broken}{MARKER}\n")),
+            "{first}"
+        );
+        // the reasoning past its budget ends, and the next request goes on from the text
+        let second = &bodies[1]["prompt"];
+        let ended = format!("{first}abcdefg\n{}\n\n", qwen::Special::ThinkEnd.text());
+        assert_eq!(second["prompt_string"], json!(ended));
+        assert_eq!(second["multimodal_data"], json!([image.base64()]));
+    }
+
+    #[tokio::test]
+    async fn gpt_oss_reads_no_images() {
+        let (url, _) = fake_server(Vec::new()).await;
+        let d = driver(&url);
+        let messages = vec![ChatMessage::User {
+            text: "What is this?".into(),
+            images: vec![Image::new(&crate::image::tests::png(2, 2)).unwrap()],
+        }];
+        match run(&d, request(messages, 1)).await.last() {
+            Some(Err(DriverError::InvalidRequest(why))) => {
+                assert!(why.contains("gpt-oss reads no images"), "{why}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn with_qwen_reasoning_off_the_generation_begins_with_the_answer() {
         let (url, prompts) = fake_server(vec![answer("It is 391.«im_end»")]).await;
         let d = qwen_driver(&url, Some("off"));
-        let f = finished(&run(&d, request(vec![ChatMessage::User("17*23?".into())], 1)).await);
+        let f = finished(&run(&d, request(vec![ChatMessage::user("17*23?")], 1)).await);
         assert!(matches!(f.outcome, Outcome::Answer));
         assert_eq!(
             (f.content.as_str(), f.reasoning.as_str()),

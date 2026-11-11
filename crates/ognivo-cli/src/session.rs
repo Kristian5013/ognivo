@@ -16,6 +16,7 @@ use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_core::skills::{self, Scope, Skills};
+use ognivo_models::image::{self, Image};
 use ognivo_models::llama::{LlamaServer, RouterModel};
 use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
@@ -121,6 +122,28 @@ pub fn tokens(text: &str) -> Result<u32, String> {
     }
     u32::try_from(n).map_err(|_| format!("{text}: too many tokens"))
 }
+
+/// An image file for a message of the user's (`run --image`, `/image` in `chat`); the
+/// bytes of one past the limit are not read.
+pub fn image_file(path: &Path) -> Result<Image, String> {
+    let shown = path.display();
+    let size = std::fs::metadata(path)
+        .map_err(|e| format!("{shown}: {e}"))?
+        .len();
+    if size > image::MAX_BYTES as u64 {
+        return Err(format!(
+            "{shown}: {}, over the {} an image may have",
+            image::about_bytes(usize::try_from(size).unwrap_or(usize::MAX)),
+            image::about_bytes(image::MAX_BYTES)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("{shown}: {e}"))?;
+    Image::new(&bytes).map_err(|e| format!("{shown}: {e}"))
+}
+
+/// Why the model gets no images: what to start its server with.
+pub const NO_VISION: &str =
+    "the model reads no images: its llama-server runs without a projector (--mmproj)";
 
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
 #[derive(Debug)]
@@ -515,6 +538,8 @@ impl SessionArgs {
             .ok()
             .and_then(Result::ok);
         let n_ctx = props.as_ref().and_then(|p| p.n_ctx);
+        // the model takes images where its server runs a projector
+        let vision = props.as_ref().and_then(|p| p.vision).unwrap_or(false);
         let context = compact::session(measured, self.context, n_ctx);
         // the server's slots, which the session's agents and other sessions take turns at
         let router = Router::new(
@@ -618,6 +643,7 @@ impl SessionArgs {
                 agents,
                 only: None,
                 mode: Default::default(),
+                vision,
             },
             mcp,
             mcp_tools: self.mcp_tools,

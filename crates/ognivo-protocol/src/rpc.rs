@@ -127,6 +127,9 @@ pub struct ThreadSummary {
     pub context: Option<Context>,
     /// Open: its mode.
     pub mode: Option<Mode>,
+    /// Open: whether its model takes images.
+    #[serde(default)]
+    pub vision: Option<bool>,
 }
 
 /// The context a thread works with, in tokens.
@@ -173,6 +176,10 @@ pub struct Detected {
     /// The router's model the rest is of; `None` when the router runs several, or none,
     /// and the params name none of its models.
     pub model: Option<String>,
+    /// Whether the model takes images: the server runs it with its projector (`--mmproj`).
+    /// `None` where the server does not say, as for a router's model not loaded.
+    #[serde(default)]
+    pub vision: Option<bool>,
 }
 
 /// A model of llama-server's router.
@@ -237,6 +244,9 @@ pub struct Opened {
     pub answer_now: bool,
     pub context: Context,
     pub mode: Mode,
+    /// Whether its model takes images (`/props`): `turn/start` refuses them otherwise.
+    #[serde(default)]
+    pub vision: bool,
 }
 
 /// `thread/mode`: the open thread's mode, from its agent's next call on, while a turn runs
@@ -280,6 +290,18 @@ pub struct StartTurn {
     pub thread: ThreadId,
     /// The user's message.
     pub text: String,
+    /// Its images, which the model sees before the text: at most 8, each PNG, JPEG, GIF
+    /// or BMP of at most 10 MB, and only for a model that takes images.
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub images: Vec<NewImage>,
+}
+
+/// An image of a new message of the user's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct NewImage {
+    /// Its bytes in base64, or a data URL of them.
+    pub data: String,
 }
 
 /// `turn/edit`: the conversation goes back to before `turn`, whose message becomes `text`,
@@ -290,6 +312,10 @@ pub struct EditTurn {
     pub thread: ThreadId,
     pub turn: crate::TurnId,
     pub text: String,
+    /// The images of the message written anew, as `turn/start` takes them.
+    #[serde(default)]
+    #[ts(as = "Option<_>", optional)]
+    pub images: Vec<NewImage>,
 }
 
 /// What the agent changed and nobody reviewed yet: its edit journal (§8).

@@ -13,7 +13,7 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
     case "thread_started":
       return [];
     case "turn_started":
-      return [{ type: "turn_started", index: e.turn, user: e.user }];
+      return [{ type: "turn_started", index: e.turn, user: e.user, images: e.images ?? [] }];
     case "item_started":
       return [{ type: "item_started", item: toItem(e.item, offset) }];
     case "item_delta":
@@ -139,6 +139,7 @@ function toResult(r: P.ToolResult): ToolResult {
   return {
     outcome: r.outcome === "skipped" ? "error" : r.outcome,
     text: r.text,
+    ...(r.images?.length ? { images: r.images } : {}),
     exit: r.exit_code ?? undefined,
     seconds: r.duration_ms / 1000,
   };

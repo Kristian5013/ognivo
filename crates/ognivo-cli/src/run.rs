@@ -24,10 +24,11 @@ use clap::{Args, ValueEnum};
 use ognivo_core::agent::{AgentEvent, AllowAll, Approver, NoUser, TurnEnd};
 use ognivo_core::protocol::{Out, Projector};
 use ognivo_core::verify;
+use ognivo_models::image;
 use ognivo_protocol as wire;
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::session::{Failure, SessionArgs};
+use crate::session::{Failure, SessionArgs, image_file};
 use crate::view::{compacted, given, kilo, not_read};
 
 #[derive(Debug, Args)]
@@ -52,6 +53,10 @@ pub struct RunArgs {
     /// Write the run's trajectory in ATIF (Harbor's trajectory.json) to this file at the end
     #[arg(long, value_name = "FILE")]
     atif: Option<PathBuf>,
+    /// An image the model sees before the prompt, PNG, JPEG, GIF or BMP; again for more.
+    /// Only for a model whose server runs its projector (--mmproj)
+    #[arg(long = "image", value_name = "FILE")]
+    images: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -94,6 +99,26 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         Ok(s) => s,
         Err(f) => return fail(f),
     };
+    if a.images.len() > image::MAX_PER_MESSAGE {
+        return fail(Failure::usage(format!(
+            "{} images: a message may hold at most {}",
+            a.images.len(),
+            image::MAX_PER_MESSAGE
+        )));
+    }
+    if !a.images.is_empty() && !s.opts.vision {
+        return fail(Failure::usage(format!(
+            "--image: {}",
+            crate::session::NO_VISION
+        )));
+    }
+    let images: Vec<_> = match a.images.iter().map(|p| image_file(p)).collect() {
+        Ok(images) => images,
+        Err(why) => return fail(Failure::usage(format!("--image {why}"))),
+    };
+    if let Some(why) = image::too_many(&images) {
+        return fail(Failure::usage(format!("--image: {why}")));
+    }
     for p in &s.rule_problems {
         eprintln!("· not a rule: {p}");
     }
@@ -182,7 +207,7 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     let mut term = signal(SignalKind::terminate())?;
     let mut int = signal(SignalKind::interrupt())?;
     let end = {
-        let turn = agent.turn(&prompt, &mut on);
+        let turn = agent.turn_with(&prompt, images, &mut on);
         tokio::pin!(turn);
         tokio::select! {
             end = &mut turn => Ok(end),

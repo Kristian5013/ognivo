@@ -61,6 +61,10 @@ pub enum EventKind {
         turn: TurnId,
         /// The user's message, as the user wrote it; for a subagent, its task.
         user: String,
+        /// The images of the user's message, which the model sees before its text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<_>", optional)]
+        images: Vec<Image>,
     },
     ItemStarted {
         item: Item,
@@ -138,6 +142,18 @@ pub struct CallDraft {
     /// `new`, `patch`, `command`, ...); `None` with the first event of a call.
     pub field: Option<String>,
     pub text: String,
+}
+
+/// An image the model sees (docs/architecture.md §5.8): of the user's message, or the image
+/// file a call read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Image {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/bmp`.
+    pub mime: String,
+    /// Its bytes in base64.
+    pub data: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -324,6 +340,10 @@ pub struct ToolResult {
     pub outcome: Outcome,
     /// The result as the model got it.
     pub text: String,
+    /// The image file it read, which the model got after the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<_>", optional)]
+    pub images: Vec<Image>,
     /// A command's exit code; `None` for a command a signal killed, and for other tools.
     pub exit_code: Option<i32>,
     #[ts(type = "number")]

@@ -17,8 +17,8 @@
 //! turn stops after [`MAX_IDLE`] compactions in a row with nothing new read or changed
 //! between them: then the files the work needs do not fit the context together.
 
-use ognivo_models::ChatMessage;
 use ognivo_models::profile::ContextBudget;
+use ognivo_models::{ChatMessage, Image};
 
 use crate::journal::FileChange;
 
@@ -77,8 +77,10 @@ pub fn estimate(messages: &[ChatMessage]) -> u64 {
 }
 
 fn bytes(m: &ChatMessage) -> u64 {
+    // an image counts as the tokens its projector makes of it
+    let images: u64 = m.images().iter().map(Image::tokens).sum();
     let n = match m {
-        ChatMessage::System(t) | ChatMessage::User(t) => t.len(),
+        ChatMessage::System(t) | ChatMessage::User { text: t, .. } => t.len(),
         ChatMessage::Assistant {
             content,
             reasoning,
@@ -94,7 +96,7 @@ fn bytes(m: &ChatMessage) -> u64 {
         }
         ChatMessage::Tool { content, .. } => content.len(),
     };
-    n as u64
+    n as u64 + images * BYTES_PER_TOKEN
 }
 
 /// Where the kept steps begin: at the earliest of the turn's last steps that fit in
@@ -268,10 +270,7 @@ mod tests {
                 }],
                 tokens: None,
             },
-            ChatMessage::Tool {
-                tool_call_id: id.into(),
-                content: result.into(),
-            },
+            ChatMessage::tool(id, result),
         ]
     }
 
@@ -287,22 +286,35 @@ mod tests {
     }
 
     #[test]
+    fn an_image_counts_as_the_tokens_its_projector_makes() {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        png.extend(1280u32.to_be_bytes());
+        png.extend(720u32.to_be_bytes());
+        let image = Image::new(&png).unwrap();
+        let m = ChatMessage::User {
+            text: "x".repeat(400),
+            images: vec![image.clone(), image],
+        };
+        assert_eq!(estimate(&[m]), 400 / BYTES_PER_TOKEN + 2 * 900);
+    }
+
+    #[test]
     fn the_last_steps_are_kept_as_far_as_they_fit() {
         let mut m = vec![
             ChatMessage::System("s".into()),
-            ChatMessage::User("old request".into()),
+            ChatMessage::user("old request"),
             ChatMessage::Assistant {
                 content: "old answer".into(),
                 reasoning: None,
                 tool_calls: Vec::new(),
                 tokens: None,
             },
-            ChatMessage::User("fix it".into()),
+            ChatMessage::user("fix it"),
         ];
         // the turn has no step yet: nothing to keep
         assert_eq!(kept_from(&m, 3, 1000), 4);
         m.extend(step("a", &"x".repeat(3000)));
-        m.push(ChatMessage::User("[ognivo] a note".into()));
+        m.push(ChatMessage::user("[ognivo] a note"));
         m.extend(step("b", "short"));
         m.extend(step("c", "short"));
         // all three fit

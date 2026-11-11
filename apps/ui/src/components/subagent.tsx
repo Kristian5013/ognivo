@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useSyncExternalStore } from "react";
 
 import { summary } from "../format.ts";
-import type { SubagentItem } from "../model.ts";
+import type { Picture, SubagentItem } from "../model.ts";
 import type { ThreadStore } from "../store.ts";
 
 /** What a thread's rows can do on the core: lead to a subagent's thread, and write a turn's
@@ -9,10 +9,13 @@ import type { ThreadStore } from "../store.ts";
 export interface ThreadNav {
   store(thread: number): ThreadStore | undefined;
   open(thread: number): void;
-  /** Takes the conversation back to before `turn` and sends `text` in its place. */
-  edit?(turn: number, text: string): Promise<void>;
+  /** Takes the conversation back to before `turn` and sends `text`, with `images`, in its
+   * place. */
+  edit?(turn: number, text: string, images: Picture[]): Promise<void>;
   /** A turn runs: nothing is written anew meanwhile. */
   busy?: boolean;
+  /** The thread's model takes images. */
+  vision?: boolean;
 }
 
 export const ThreadNavContext = createContext<ThreadNav | undefined>(undefined);

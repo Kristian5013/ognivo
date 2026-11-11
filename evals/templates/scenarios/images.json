@@ -1,0 +1,67 @@
+{
+ "messages": [
+  {
+   "role": "system",
+   "content": "Be brief."
+  },
+  {
+   "role": "user",
+   "content": [
+    {
+     "type": "image_url",
+     "image_url": {
+      "url": "data:image/png;base64,AAAA"
+     }
+    },
+    {
+     "type": "image_url",
+     "image_url": {
+      "url": "data:image/png;base64,AAAA"
+     }
+    },
+    {
+     "type": "text",
+     "text": "What changed between these two?  "
+    }
+   ]
+  },
+  {
+   "role": "assistant",
+   "reasoning_content": "Need the third.",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_c",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "path": "c.png"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_c",
+   "content": [
+    {
+     "type": "text",
+     "text": "  [read: c.png — PNG, 2×2]"
+    },
+    {
+     "type": "image_url",
+     "image_url": {
+      "url": "data:image/png;base64,AAAA"
+     }
+    }
+   ]
+  },
+  {
+   "role": "user",
+   "content": "And now?"
+  }
+ ],
+ "tools": []
+}

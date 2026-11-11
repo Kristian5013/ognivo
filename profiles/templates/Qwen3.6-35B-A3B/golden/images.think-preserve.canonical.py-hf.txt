@@ -1,0 +1,24 @@
+<|im_start|>system
+Be brief.<|im_end|>
+<|im_start|>user
+<|vision_start|><|image_pad|><|vision_end|><|vision_start|><|image_pad|><|vision_end|>What changed between these two?<|im_end|>
+<|im_start|>assistant
+<think>
+Need the third.
+</think>
+
+<tool_call>
+<function=read>
+<parameter=path>
+c.png
+</parameter>
+</function>
+</tool_call><|im_end|>
+<|im_start|>user
+<tool_response>
+[read: c.png — PNG, 2×2]<|vision_start|><|image_pad|><|vision_end|>
+</tool_response><|im_end|>
+<|im_start|>user
+And now?<|im_end|>
+<|im_start|>assistant
+<think>

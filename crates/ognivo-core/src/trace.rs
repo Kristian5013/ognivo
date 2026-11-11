@@ -5,13 +5,13 @@
 //! - The system prompt of a conversation is a `system` step (again only when it changed),
 //!   a compaction's note is one too, with the compaction in its `extra`, and so is every
 //!   note ognivo gave the model.
-//! - The user's messages are `user` steps.
+//! - The user's messages are `user` steps, with what their images were in `extra`.
 //! - Each generation is an `agent` step: its text, its reasoning, the calls that ran and
 //!   their results as the observation, its tokens as metrics (`prompt_tokens` counts the
 //!   cached ones too, as ATIF has it). Its `extra` holds why it ran (`step`, or `summary`
 //!   for a compaction), what came of it, the seed, a sha256 of what it was asked, its
-//!   timing, calls it made that did not run, and the changes, questions and instruction
-//!   files of its calls.
+//!   timing, calls it made that did not run, and the changes, questions, instruction files
+//!   and images of its calls.
 //! - The root's `extra.ognivo` holds the session: its project, profile and level, how each
 //!   turn ended and the counters. On the Generic path there are no token ids.
 
@@ -150,7 +150,12 @@ impl Builder {
             }
             "user" => {
                 self.agent = None;
-                self.push(json!({"source": "user", "message": d["text"]}), at);
+                let mut step = json!({"source": "user", "message": d["text"]});
+                // what its images were: the log keeps no bytes
+                if d["images"].is_array() {
+                    step["extra"] = json!({"images": d["images"]});
+                }
+                self.push(step, at);
             }
             "notice" => {
                 self.agent = None;
@@ -174,6 +179,10 @@ impl Builder {
                     match step["observation"]["results"].as_array_mut() {
                         Some(results) => results.push(result),
                         None => step["observation"] = json!({"results": [result]}),
+                    }
+                    if d["images"].is_array() {
+                        let read = json!({"call_id": d["id"], "images": d["images"]});
+                        self.attach("images", read);
                     }
                 }
             }

@@ -5,6 +5,7 @@ import type { ToolItem } from "../model.ts";
 import type { Draft, DraftState } from "../store.ts";
 import { EditDiff } from "./diff.tsx";
 import { Follow } from "./follow.tsx";
+import { Pictures } from "./pictures.tsx";
 
 function Status({ item }: { item: ToolItem }) {
   const r = item.result;
@@ -52,6 +53,14 @@ function pretty(text: string): string {
 function Body({ item }: { item: ToolItem }) {
   const call = item.call;
   if (item.result && item.result.outcome !== "ok") return <Text text={item.result.text} />;
+  // the image file it read, as the model saw it
+  if (item.result?.images?.length) {
+    return (
+      <div className="px-3 py-2">
+        <Pictures pictures={item.result.images} label="the call read" />
+      </div>
+    );
+  }
   if (call?.name === "Edit") return <EditDiff path={call.path} before={call.old} after={call.new} />;
   if (call?.name === "Write") return <Text text={call.content} />;
   if (call?.name === "ApplyPatch") return <Text text={call.patch} />;

@@ -23,11 +23,28 @@ export type Call =
   /** The skill tool: a skill of the user or the project, loaded for the model. */
   | { name: "Skill"; skill: string; arguments?: string };
 
+/** An image the model sees: of the user's message, or the image file a call read. */
+export interface Picture {
+  /** `image/png`, `image/jpeg`, `image/gif` or `image/bmp`. */
+  mime: string;
+  /** Its bytes in base64. */
+  data: string;
+  width: number;
+  height: number;
+}
+
+/** A picture as an `<img>` takes it. */
+export function pictureUrl(p: Pick<Picture, "mime" | "data">): string {
+  return `data:${p.mime};base64,${p.data}`;
+}
+
 export interface ToolResult {
   /** `refused` when it needed an approval it did not get, `error` when it failed. */
   outcome: "ok" | "error" | "refused";
   /** The result as the model got it. */
   text: string;
+  /** The image file it read, which the model got after the text. */
+  images?: Picture[];
   /** Bash: the exit code, `undefined` when the command was killed or timed out. */
   exit?: number;
   seconds?: number;
@@ -41,6 +58,8 @@ export interface StoredMessage {
   reasoning?: string;
   tool_calls?: { id: string; name: string; arguments: string }[];
   tool_call_id?: string;
+  /** The user's images, or the image file a call read. */
+  images?: { mime: string; data: string }[];
 }
 
 /** A tool as the model is offered it. */
@@ -134,6 +153,8 @@ export type Item = ReasoningItem | MessageItem | ToolItem | NoticeItem | VoidIte
 export interface Turn {
   index: number;
   user: string;
+  /** The images of the user's message, which the model saw before its text. */
+  images?: Picture[];
   items: Item[];
   /** How the turn ended: `answer`, `step_limit`, `time_limit`, `stuck` or `error`. */
   end?: string;
