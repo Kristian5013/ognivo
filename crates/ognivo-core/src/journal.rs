@@ -403,7 +403,7 @@ mod tests {
     impl Project {
         fn new() -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let root = fs::canonicalize(dir.path()).unwrap();
+            let root = ognivo_os::canonicalize(dir.path()).unwrap();
             fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
             Self {
                 _dir: dir,

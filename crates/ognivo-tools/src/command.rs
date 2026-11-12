@@ -1021,10 +1021,11 @@ fn tool(words: &[&str], root: &Path, cwd: &Path) -> Effect {
     effect_of(words)
 }
 
-/// `arg` against `cwd`, through symlinks when the path exists.
+/// `arg` against `cwd`, through symlinks when the path exists; on Windows a path as Git
+/// Bash writes it, `/c/Users/me`, is the OS's `C:\Users\me`.
 fn resolve(cwd: &Path, arg: &str) -> PathBuf {
-    let joined = cwd.join(arg);
-    std::fs::canonicalize(&joined).unwrap_or_else(|_| normalize(&joined))
+    let joined = cwd.join(ognivo_os::shell::native(arg));
+    ognivo_os::canonicalize(&joined).unwrap_or_else(|_| normalize(&joined))
 }
 
 /// Short options the getopt way: allowed one-letter flags together (`-la`, `-rn`), the last
@@ -1298,6 +1299,12 @@ mod tests {
         }
     }
 
+    /// A case the fixture has what it needs for: its links to `/etc` and `/dev/zero` are
+    /// Unix's.
+    fn on_this_os(cmd: &&str) -> bool {
+        cfg!(unix) || !(cmd.contains("etc-link") || cmd.contains("zero"))
+    }
+
     /// A throwaway project: src/lib.rs, a symlink to /etc and a FIFO-like non-file.
     fn project(name: &str) -> Fixture {
         let base =
@@ -1305,9 +1312,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("src")).unwrap();
         std::fs::write(base.join("src/lib.rs"), "fn main() {}\n").unwrap();
-        std::os::unix::fs::symlink("/etc", base.join("etc-link")).unwrap();
-        std::os::unix::fs::symlink("/dev/zero", base.join("zero")).unwrap();
-        let root = std::fs::canonicalize(&base).unwrap();
+        // links need a privilege on Windows; the cases on them are Unix's (`unix_only`)
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", base.join("etc-link")).unwrap();
+            std::os::unix::fs::symlink("/dev/zero", base.join("zero")).unwrap();
+        }
+        let root = ognivo_os::canonicalize(&base).unwrap();
         Fixture {
             dir: base,
             ctx: ExecContext {
@@ -1378,7 +1389,10 @@ mod tests {
             "grep --exclude-from=list main src",
             "sort -rnk2 -o out.txt src/lib.rs",
             "git diff --output=patch.txt",
-        ] {
+        ]
+        .into_iter()
+        .filter(on_this_os)
+        {
             assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
         }
     }
@@ -1428,7 +1442,10 @@ mod tests {
             "sed -n '1p' etc-link/passwd",
             "sed -n '1p' zero",
             "sed",
-        ] {
+        ]
+        .into_iter()
+        .filter(on_this_os)
+        {
             assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
         }
     }
@@ -1454,7 +1471,7 @@ mod tests {
         // how Qwen runs a test: from the root, by its absolute path, with the exit status
         let qwen = format!(
             "cd {} && bash scripts/run.sh; echo \"EXIT:$?\"",
-            f.ctx.root.display()
+            ognivo_os::shell::bash_path(&f.ctx.root).to_string_lossy()
         );
         assert_eq!(c(&qwen), Effect::ExecutesProjectCode, "{qwen}");
         for cmd in [
@@ -1467,7 +1484,10 @@ mod tests {
             "/usr/bin/cat src/lib.rs",
             "./zero",
             "node - < tool.py",
-        ] {
+        ]
+        .into_iter()
+        .filter(on_this_os)
+        {
             assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
         }
     }
@@ -1511,7 +1531,10 @@ mod tests {
             "npm run --prefix ../other x",
             "pytest --rootdir ..",
             "pytest /tmp/elsewhere",
-        ] {
+        ]
+        .into_iter()
+        .filter(on_this_os)
+        {
             assert_eq!(c(cmd), Effect::SideEffects, "{cmd}");
         }
     }

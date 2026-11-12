@@ -238,13 +238,24 @@ fn silent(edit: &FileEdit<'_>, root: &Path) -> bool {
             _ => return false,
         }
     }
-    let protected = names.iter().any(|n| PROTECTED_DIRS.contains(n))
-        || names.last().is_some_and(|n| PROTECTED_FILES.contains(n))
-        || PROTECTED_PREFIXES.iter().any(|p| names.starts_with(p));
+    // `.GIT` is `.git` where the OS's names match in any case
+    let same = |a: &str, b: &str| {
+        if ognivo_os::PATHS_IGNORE_CASE {
+            a.eq_ignore_ascii_case(b)
+        } else {
+            a == b
+        }
+    };
+    let among = |n: &str, list: &[&str]| list.iter().any(|x| same(n, x));
+    let protected = names.iter().any(|n| among(n, PROTECTED_DIRS))
+        || names.last().is_some_and(|n| among(n, PROTECTED_FILES))
+        || PROTECTED_PREFIXES
+            .iter()
+            .any(|p| names.len() >= p.len() && names.iter().zip(p.iter()).all(|(n, x)| same(n, x)));
     if protected {
         return false;
     }
-    if names.last() == Some(&"pyproject.toml") {
+    if names.last().is_some_and(|n| same(n, "pyproject.toml")) {
         return !tool_tables_change(edit.before, edit.after);
     }
     true
@@ -271,7 +282,7 @@ mod tests {
 
     #[test]
     fn owner_rules() {
-        let root = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let root = ognivo_os::canonicalize(std::env::current_dir().unwrap()).unwrap();
         let ctx = ExecContext {
             cwd: root.clone(),
             root,

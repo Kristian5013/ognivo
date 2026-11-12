@@ -719,7 +719,8 @@ mod tests {
             .unwrap_err();
         let text = e.to_string();
         assert!(
-            text.contains("error sending request for url") && text.contains("refused"),
+            text.contains("error sending request for url")
+                && (text.contains("refused") || text.contains("os error 10061")),
             "{text}"
         );
     }

@@ -13,10 +13,14 @@ use std::time::Duration;
 
 use ognivo_mcp::{Gateway, ServerConfig, Transport, oauth};
 
+/// Python as the OS names it: Windows has `python`, and a `python3` there may be the
+/// Microsoft Store's stand-in.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 /// The script, with tokens of `lifetime` seconds, and its URL.
 fn server(lifetime: u32) -> (Child, String) {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oauth_server.py");
-    let mut child = Command::new("python3")
+    let mut child = Command::new(PYTHON)
         .arg("-I")
         .arg(&script)
         .args(["--lifetime", &lifetime.to_string()])
@@ -69,7 +73,6 @@ const CALL: Duration = Duration::from_secs(10);
 
 #[tokio::test]
 async fn a_sign_in_is_asked_for_kept_used_and_forgotten() {
-    use std::os::unix::fs::PermissionsExt as _;
     let (mut child, url) = server(3600);
     let home = tempfile::tempdir().unwrap();
     let dir = oauth::credentials_dir(home.path());
@@ -91,8 +94,12 @@ async fn a_sign_in_is_asked_for_kept_used_and_forgotten() {
         .unwrap();
     assert!(oauth::signed_in(&dir, &docs));
     let file = oauth::credentials_file(&dir, "docs");
-    let mode = std::fs::metadata(&file).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
     let kept = std::fs::read_to_string(&file).unwrap();
     assert!(kept.contains(&url) && kept.contains("tok-1"), "{kept}");
 

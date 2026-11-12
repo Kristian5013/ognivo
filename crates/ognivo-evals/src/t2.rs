@@ -333,6 +333,7 @@ impl Scenario {
                 std::fs::create_dir_all(dir)?;
             }
             std::fs::write(&path, text)?;
+            #[cfg(unix)]
             if rel.ends_with(".sh") {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
@@ -507,7 +508,8 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
             let server = ognivo_mcp::ServerConfig {
                 name: MCP_SERVER.into(),
                 transport: ognivo_mcp::Transport::Stdio {
-                    command: "python3".into(),
+                    // Windows names it `python`
+                    command: if cfg!(windows) { "python" } else { "python3" }.into(),
                     args: vec![
                         "-I".into(),
                         t.mcp_server.display().to_string(),

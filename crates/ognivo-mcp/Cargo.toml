@@ -11,10 +11,10 @@ publish.workspace = true
 [dependencies]
 async-trait = "0.1.92"
 futures.workspace = true
+ognivo-os.workspace = true
 process-wrap = { version = "=10.0.1", features = ["tokio1"] }
 reqwest.workspace = true
 rmcp = { version = "=3.7.0", default-features = false, features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
-rustix = { workspace = true, features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

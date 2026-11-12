@@ -173,13 +173,8 @@ pub struct Gateway {
 impl Drop for Gateway {
     /// Ends the servers at once, as ognivo may be on its way out: `npx` and its node too.
     fn drop(&mut self) {
-        for pid in &self.groups {
-            if let Some(pid) = i32::try_from(*pid)
-                .ok()
-                .and_then(rustix::process::Pid::from_raw)
-            {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::TERM);
-            }
+        for root in &self.groups {
+            ognivo_os::end_tree(*root);
         }
     }
 }
@@ -400,11 +395,11 @@ async fn connect(s: &ServerConfig, signed: Option<&Path>) -> Result<Up, Failed> 
     };
     let (client, group) = match &s.transport {
         Transport::Stdio { command, args, env } => {
-            let mut cmd = tokio::process::Command::new(command);
+            let mut cmd = tokio::process::Command::new(ognivo_os::program(command));
             cmd.args(args).envs(env);
             let mut wrap = process_wrap::tokio::CommandWrap::from(cmd);
             // `npx` and its node go together
-            wrap.wrap(process_wrap::tokio::ProcessGroup::leader());
+            ognivo_os::tree_wrap(&mut wrap);
             let (process, _) = TokioChildProcess::builder(wrap)
                 .stderr(Stdio::null())
                 .spawn()

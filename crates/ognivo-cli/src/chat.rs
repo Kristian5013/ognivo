@@ -8,7 +8,6 @@
 //! Exit codes: 0 `/exit` or ^D; 2 bad usage; 3 the server failed at the start; 143 SIGTERM.
 
 use std::collections::HashSet;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -25,10 +24,8 @@ use ognivo_core::verify::{self, Verification};
 use ognivo_models::DriverError;
 use ognivo_models::image::{self, Image};
 use ognivo_tools::files;
-use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot};
 
 use ognivo_store::{SessionRow, Store};
@@ -64,9 +61,16 @@ const HELP: &str = "\
                  asks), edit (edits apply at once, the default), plan (it reads and plans,
                  nothing changes) or auto (no questions but protected files and rules)
 /exit            quit; so does ^D
-A line that ends in \\ goes on in the next one; \"\"\" on a line of its own starts and ends a block.
-^C stops the running turn, and the conversation goes on.
-^\\ ends the model's reasoning where it stands and asks for the answer (with --native).";
+A line that ends in \\ goes on in the next one; \"\"\" on a line of its own starts and ends a block.";
+
+/// [`HELP`], and the keys that stop a turn and answer now: `^C` and `^\`, or on Windows
+/// Ctrl+C and Ctrl+Break.
+fn help() -> String {
+    let (stop, answer) = ognivo_os::signal::KEYS;
+    format!(
+        "{HELP}\n{stop} stops the running turn, and the conversation goes on.\n{answer} ends the model's reasoning where it stands and asks for the answer (with --native)."
+    )
+}
 
 /// Items named in a list of what is unreviewed; the rest are counted.
 const SUMMARY_FILES: usize = 3;
@@ -101,7 +105,7 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
     let n_ctx = s.opts.n_ctx;
     let (context_note, context_warning) = s.context_notes();
     let screen = Screen::new(Style::detect());
-    let terminal = tcgetattr(std::io::stdin()).ok();
+    let terminal = ognivo_os::TerminalMode::save();
     let input = Input::spawn(s.opts.data_dir.join("chat_history"));
     let (stop, mut stopped) = mpsc::unbounded_channel();
     let approver = Ask {
@@ -326,18 +330,21 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             Paint::Dim,
         );
     }
+    let (stop_key, answer_key) = ognivo_os::signal::KEYS;
     screen.line(
-        if answer_now.is_some() {
-            "/help · ^C stops a turn · ^\\ answers now · ^D quits"
+        &if answer_now.is_some() {
+            format!("/help · {stop_key} stops a turn · {answer_key} answers now · ^D quits")
         } else {
-            "/help · ^C stops a turn · ^D quits"
+            format!("/help · {stop_key} stops a turn · ^D quits")
         },
         Paint::Dim,
     );
-    let mut int = signal(SignalKind::interrupt())?;
-    let mut term = signal(SignalKind::terminate())?;
-    // ^\ in a line-mode terminal: the reasoning ends, and the answer comes (Native path)
-    let mut quit = signal(SignalKind::quit())?;
+    let mut int = ognivo_os::signal::interrupt()?;
+    let mut term = ognivo_os::signal::terminate()?;
+    let term_name = term.name();
+    // ^\ in a line-mode terminal, Ctrl+Break on Windows: the reasoning ends, and the
+    // answer comes (Native path)
+    let mut quit = ognivo_os::signal::quit()?;
     // the images `/image` attached, which go with the next message
     let mut images: Vec<Image> = Vec::new();
     loop {
@@ -351,13 +358,13 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
             entry = read_entry(&input, &screen) => entry,
             _ = term.recv() => {
                 agent.close();
-                return Ok(terminated(terminal.as_ref()));
+                return Ok(terminated(terminal.as_ref(), term_name));
             }
         };
         let text = match entry {
             Entry::Message(text) => text,
             Entry::Help => {
-                screen.line(HELP, Paint::Plain);
+                screen.line(&help(), Paint::Plain);
                 for line in commands_help(&agent) {
                     screen.line(&printable(&line), Paint::Plain);
                 }
@@ -434,9 +441,9 @@ pub async fn chat(a: ChatArgs) -> anyhow::Result<ExitCode> {
         view.finish();
         let unanswered = match outcome {
             Outcome::Terminated => {
-                agent.abandon_turn("ognivo was stopped by SIGTERM.");
+                agent.abandon_turn(&format!("ognivo was stopped by {term_name}."));
                 agent.close();
-                return Ok(terminated(terminal.as_ref()));
+                return Ok(terminated(terminal.as_ref(), term_name));
             }
             Outcome::Stopped => {
                 agent.abandon_turn("The user stopped the last turn.");
@@ -859,11 +866,11 @@ fn why(end: &TurnEnd, max_steps: u32) -> String {
 }
 
 /// SIGTERM: the terminal gets back the mode it had, even if the line editor holds it.
-fn terminated(terminal: Option<&Termios>) -> ExitCode {
+fn terminated(terminal: Option<&ognivo_os::TerminalMode>, by: &str) -> ExitCode {
     if let Some(t) = terminal {
-        let _ = tcsetattr(std::io::stdin(), OptionalActions::Now, t);
+        t.restore();
     }
-    println!("\n· stopped by SIGTERM");
+    println!("\n· stopped by {by}");
     ExitCode::from(143)
 }
 
@@ -908,7 +915,8 @@ async fn read_entry(input: &Input, screen: &Screen) -> Entry {
             Read::Interrupted if interrupted => return Entry::Exit,
             Read::Interrupted => {
                 interrupted = true;
-                screen.line("(^C again or ^D quits)", Paint::Dim);
+                let again = format!("({} again or ^D quits)", ognivo_os::signal::KEYS.0);
+                screen.line(&again, Paint::Dim);
             }
             Read::Eof => return Entry::Exit,
         }
@@ -1232,10 +1240,9 @@ fn save(editor: &mut DefaultEditor, path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::OpenOptions::new()
+    ognivo_os::private_file()
         .create(true)
         .append(true)
-        .mode(0o600)
         .open(path)?;
     editor.save_history(path).map_err(std::io::Error::other)
 }

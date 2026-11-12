@@ -6,15 +6,24 @@
 mod common;
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use common::{HANG, answer_stream, call_stream, fake_router, fake_seeing_server, fake_server};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines};
-use tokio::net::UnixStream;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines, ReadHalf, WriteHalf};
+
+/// The core's socket for a test's directory: a Unix socket in it, or on Windows a pipe
+/// named after it.
+fn socket(dir: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let name = dir.file_name().unwrap().to_string_lossy();
+        PathBuf::from(format!(r"\\.\pipe\ognivo-test-{name}"))
+    } else {
+        dir.join("run/core.sock")
+    }
+}
 
 fn core(dir: &Path, idle: &str) -> Child {
     core_with(dir, idle, &[])
@@ -24,10 +33,11 @@ fn core(dir: &Path, idle: &str) -> Child {
 fn core_with(dir: &Path, idle: &str, env: &[(&str, &Path)]) -> Child {
     Command::new(env!("CARGO_BIN_EXE_ognivo"))
         .args(["core", "--idle", idle, "--socket"])
-        .arg(dir.join("run/core.sock"))
+        .arg(socket(dir))
         .arg("--data-dir")
         .arg(dir.join("data"))
         .env("HOME", dir)
+        .env("USERPROFILE", dir)
         .envs(env.iter().copied())
         .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::null())
@@ -39,8 +49,8 @@ fn core_with(dir: &Path, idle: &str, env: &[(&str, &Path)]) -> Child {
 
 /// A client of the core, as the GUI is one.
 struct Client {
-    read: Lines<BufReader<OwnedReadHalf>>,
-    write: OwnedWriteHalf,
+    read: Lines<BufReader<ReadHalf<ognivo_os::ipc::Client>>>,
+    write: WriteHalf<ognivo_os::ipc::Client>,
     next: u64,
     /// Messages not taken yet.
     pending: VecDeque<Value>,
@@ -52,7 +62,7 @@ impl Client {
     async fn connect(socket: &Path) -> Self {
         let began = Instant::now();
         let stream = loop {
-            match UnixStream::connect(socket).await {
+            match ognivo_os::ipc::connect(socket).await {
                 Ok(s) => break s,
                 Err(_) if began.elapsed() < Duration::from_secs(20) => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -60,7 +70,7 @@ impl Client {
                 Err(e) => panic!("{}: {e}", socket.display()),
             }
         };
-        let (read, write) = stream.into_split();
+        let (read, write) = tokio::io::split(stream);
         Self {
             read: BufReader::new(read).lines(),
             write,
@@ -166,8 +176,8 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     std::fs::create_dir(&root).unwrap();
     // a project with a build: the unverified answer is sent back once to run it
     std::fs::write(root.join("Makefile"), "all:\n").unwrap();
-    let root = root.canonicalize().unwrap();
-    let socket = dir.path().join("run/core.sock");
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let socket = socket(dir.path());
     let mut child = core(dir.path(), "1");
     let mut a = Client::connect(&socket).await;
 
@@ -544,6 +554,8 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     assert!(!socket.exists());
 }
 
+// it stops the core with SIGTERM, which Windows has not
+#[cfg(unix)]
 #[tokio::test]
 async fn the_projects_allow_rules_count_once_a_client_trusts_them() {
     let (url, _) = fake_server(vec![
@@ -560,9 +572,9 @@ async fn the_projects_allow_rules_count_once_a_client_trusts_them() {
         r#"{"permissions": {"allow": ["Bash(touch:*)"]}}"#,
     )
     .unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
     let mut child = core(dir.path(), "30");
-    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut a = Client::connect(&socket(dir.path())).await;
     a.ok("initialize", json!({"client": "test", "protocol": 1}))
         .await;
     // the start waits for the answer, so it goes on another task
@@ -611,7 +623,7 @@ async fn the_projects_allow_rules_count_once_a_client_trusts_them() {
     assert!(status.success(), "{status:?}");
     assert!(!dir.path().join("run/core.sock").exists());
     let mut core = core(dir.path(), "30");
-    let mut b = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut b = Client::connect(&socket(dir.path())).await;
     let list = b
         .ok("thread/list", json!({"project": root, "limit": null}))
         .await;
@@ -632,9 +644,9 @@ async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir(&root).unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
     let mut child = core(dir.path(), "30");
-    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut a = Client::connect(&socket(dir.path())).await;
     a.ok("initialize", json!({"client": "test", "protocol": 1}))
         .await;
     let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
@@ -737,9 +749,9 @@ async fn a_thread_plans_in_plan_mode_and_carries_the_plan_out_once_switched() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir(&root).unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
     let mut child = core(dir.path(), "30");
-    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut a = Client::connect(&socket(dir.path())).await;
     a.ok("initialize", json!({"client": "test", "protocol": 1}))
         .await;
     let mut params = start(&root, &url);
@@ -808,11 +820,11 @@ async fn images_reach_a_model_that_sees_and_a_thread_whose_model_does_not_refuse
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir(&root).unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
     let (shot, _) = png(8, 6);
     std::fs::write(root.join("shot.png"), &shot).unwrap();
     let mut child = core(dir.path(), "30");
-    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut a = Client::connect(&socket(dir.path())).await;
     a.ok("initialize", json!({"client": "test", "protocol": 1}))
         .await;
     let mut params = start(&root, &url);
@@ -927,6 +939,8 @@ async fn images_reach_a_model_that_sees_and_a_thread_whose_model_does_not_refuse
     child.wait().unwrap();
 }
 
+// the browser and the OAuth server are Python under /bin/sh
+#[cfg(unix)]
 #[tokio::test]
 async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
     let (mut mcp, mcp_url) = common::oauth_server();
@@ -938,9 +952,9 @@ async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
     let browser = common::browser(dir.path());
     let root = dir.path().join("proj");
     std::fs::create_dir_all(&root).unwrap();
-    let root = root.canonicalize().unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
     let mut child = core_with(dir.path(), "30", &[("BROWSER", &browser)]);
-    let mut a = Client::connect(&dir.path().join("run/core.sock")).await;
+    let mut a = Client::connect(&socket(dir.path())).await;
     a.ok("initialize", json!({"client": "test", "protocol": 1}))
         .await;
     a.send(json!({"jsonrpc": "2.0", "id": 100, "method": "thread/start", "params": start(&root, &url)}))
@@ -999,7 +1013,7 @@ async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
     assert_eq!(files["files"][0]["path"], "~/.ognivo/mcp.json", "{files}");
     assert_eq!(files["files"][0]["servers"][0]["name"], "docs", "{files}");
     assert_eq!(files["files"][1]["scope"], "project", "{files}");
-    let echo = json!({"command": "python3", "args": ["-I", "echo.py"]});
+    let echo = json!({"command": common::PYTHON, "args": ["-I", "echo.py"]});
     let set =
         |value: Value| json!({"project": root, "scope": "project", "name": "echo", "value": value});
     a.ok("mcp/config/set", set(echo.clone())).await;

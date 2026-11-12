@@ -27,7 +27,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{ErrorKind, Read as _};
 use std::ops::Range;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -269,7 +268,7 @@ impl Instructions {
             }
             Err(e) => return found.skip(self.shown(path), &e.to_string()),
         };
-        let Ok(real) = fs::canonicalize(path) else {
+        let Ok(real) = ognivo_os::canonicalize(path) else {
             return;
         };
         let shown = self.shown(if by.is_some() { &real } else { path });
@@ -355,11 +354,11 @@ impl Instructions {
 
     fn shown(&self, path: &Path) -> String {
         if let Ok(rel) = path.strip_prefix(&self.root) {
-            return rel.display().to_string();
+            return ognivo_os::slashed(rel);
         }
         match self.user.home.as_deref().map(|h| path.strip_prefix(h)) {
-            Some(Ok(rel)) => format!("~/{}", rel.display()),
-            _ => path.display().to_string(),
+            Some(Ok(rel)) => format!("~/{}", ognivo_os::slashed(rel)),
+            _ => ognivo_os::slashed(path),
         }
     }
 }
@@ -444,11 +443,10 @@ impl Found {
     }
 }
 
-/// Whether the user or root owns a file, and the link to it if it is one.
+/// Whether the user or root owns a file, and the link to it if it is one
+/// ([`ognivo_os::owned_by_user`]).
 fn owned(path: &Path, meta: &fs::Metadata) -> bool {
-    let me = rustix::process::getuid().as_raw();
-    let ok = |uid: u32| uid == me || uid == 0;
-    ok(meta.uid()) && fs::symlink_metadata(path).is_ok_and(|link| ok(link.uid()))
+    ognivo_os::owned_by_user(path, meta)
 }
 
 /// The `@path` mentions of a text that may be imports, found the way Claude Code finds
@@ -617,6 +615,7 @@ fn and_list(items: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -624,7 +623,7 @@ mod tests {
     /// A home directory with a project in it, `home/proj`, a git work tree.
     fn tree() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let home = fs::canonicalize(dir.path()).unwrap();
+        let home = ognivo_os::canonicalize(dir.path()).unwrap();
         let root = home.join("proj");
         fs::create_dir_all(root.join(".git")).unwrap();
         (dir, home, root)
@@ -696,6 +695,8 @@ mod tests {
         assert!(at("from .claude") < at("mine only"));
     }
 
+    // links need a privilege on Windows
+    #[cfg(unix)]
     #[test]
     fn links_imports_and_copies_of_a_file_add_nothing() {
         let (_dir, home, root) = tree();
@@ -757,6 +758,8 @@ mod tests {
         );
     }
 
+    // links need a privilege on Windows
+    #[cfg(unix)]
     #[test]
     fn a_project_file_reaches_nothing_outside_the_project() {
         let (_dir, home, root) = tree();

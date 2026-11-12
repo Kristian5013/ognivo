@@ -5,7 +5,8 @@
 // Electron's GPU process loaded libnvidia-eglcore and rendered on the RTX while the
 // screen hangs on the Intel. With __EGL_VENDOR_LIBRARY_FILENAMES set to Mesa's vendor
 // file only Mesa loads. It has to be in the environment before Electron starts: Chromium
-// forks the GPU process from a zygote that exists before main.js runs.
+// forks the GPU process from a zygote that exists before main.js runs. An installed window
+// gets it from packaging/launch, which reads the screens the same way.
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 

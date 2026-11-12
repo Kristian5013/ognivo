@@ -1,0 +1,18 @@
+#!/bin/sh
+# ognivo's AppImage: the window, or with one of ognivo's commands (chat, run, doctor, ...)
+# ognivo itself.
+#
+# Chromium's sandbox in the window needs unprivileged user namespaces. Ubuntu 23.10 and
+# newer keep them from programs without an AppArmor profile, and an AppImage cannot carry
+# the setuid helper that the .deb installs: there, the .deb is the package to use.
+here=$(dirname "$(readlink -f "$0")")
+app="$here/usr/lib/ognivo"
+case "${1:-}" in
+    doctor | run | chat | sessions | core | mcp | help | -h | --help | -V | --version)
+        exec "$app/resources/ognivo" "$@"
+        ;;
+esac
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2> /dev/null)" = 1 ]; then
+    echo "ognivo: this system keeps Chromium's sandbox from user namespaces; if the window does not start, install the .deb" >&2
+fi
+exec "$app/launch" "$@"

@@ -330,14 +330,8 @@ impl Inner {
             return Some(None);
         };
         let path = dir.join(format!("{}-{slot}.lock", self.keys[endpoint]));
-        let opened = {
-            use std::os::unix::fs::DirBuilderExt as _;
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .and_then(|()| File::options().create(true).append(true).open(&path))
-        };
+        let opened = ognivo_os::private_dir(dir)
+            .and_then(|()| File::options().create(true).append(true).open(&path));
         match opened.map(|f| (f.try_lock(), f)) {
             Ok((Ok(()), file)) => Some(Some(file)),
             Ok((Err(TryLockError::WouldBlock), _)) => None,
@@ -733,7 +727,8 @@ mod tests {
         let h = r.health();
         assert_eq!(h[..2], [Health::Up, Health::Loading]);
         assert!(
-            matches!(&h[2], Health::Down(why) if why.contains("refused")),
+            // Windows says it in the system's language: its code is the same
+            matches!(&h[2], Health::Down(why) if why.contains("refused") || why.contains("os error 10061")),
             "{:?}",
             h[2]
         );

@@ -8,12 +8,16 @@ use std::time::Duration;
 
 use ognivo_mcp::{Gateway, ServerConfig, Transport};
 
+/// Python as the OS names it: Windows has `python`, and a `python3` there may be the
+/// Microsoft Store's stand-in.
+const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 fn echo() -> ServerConfig {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo.py");
     ServerConfig {
         name: "echo".into(),
         transport: Transport::Stdio {
-            command: "python3".into(),
+            command: PYTHON.into(),
             args: vec!["-I".into(), script.display().to_string()],
             env: BTreeMap::new(),
         },
@@ -110,7 +114,7 @@ async fn a_server_of_the_initialize_era_starts_lists_and_answers() {
 async fn a_server_over_streamable_http_gets_its_headers() {
     use std::io::BufRead as _;
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/http_echo.py");
-    let mut child = std::process::Command::new("python3")
+    let mut child = std::process::Command::new(PYTHON)
         .arg("-I")
         .arg(&script)
         .stdout(std::process::Stdio::piped())

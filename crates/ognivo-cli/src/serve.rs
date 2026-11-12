@@ -1,7 +1,8 @@
 //! `ognivo core`: the core the GUI talks to (docs/architecture.md §3), one per user and data
-//! directory. It listens on a Unix socket that only its user can open,
-//! `$XDG_RUNTIME_DIR/ognivo/core.sock`, and speaks JSON-RPC 2.0 there, one message a line
-//! (`ognivo_protocol::rpc`). There is no TCP listener.
+//! directory. It listens where only its user can talk to it ([`ognivo_os::ipc`]): a Unix
+//! socket, `$XDG_RUNTIME_DIR/ognivo/core.sock`, or on Windows a named pipe, which
+//! `core.pipe` in the data directory names; and speaks JSON-RPC 2.0 there, one message a
+//! line (`ognivo_protocol::rpc`). There is no TCP listener.
 //!
 //! - Each thread is a session of the store, run as `ognivo chat` runs one: its agent, its
 //!   edit journal, its questions, which go to the clients as requests of the core.
@@ -9,7 +10,8 @@
 //!   keeps them all but the text deltas (`wire`), so a client that comes back or opens a
 //!   thread later reads them there.
 //! - The core quits when no client has been there and no turn has run for `--idle`
-//!   seconds, or on SIGTERM. Its threads are kept in the store and can be picked up again.
+//!   seconds, or on SIGTERM (on Windows when its console closes). Its threads are kept in
+//!   the store and can be picked up again.
 //!
 //! Exit codes: 0 idle or SIGTERM; 1 another core runs; 2 bad usage.
 
@@ -18,21 +20,18 @@ mod mcp;
 mod thread;
 
 use std::io::ErrorKind;
-use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Args;
 use ognivo_models::image::{self, Image};
+use ognivo_os::ipc::{self, Address, Listen};
 use ognivo_protocol::{self as p, rpc};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
-use tokio::net::unix::OwnedReadHalf;
-use tokio::net::{UnixListener, UnixStream};
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc;
 
 use crate::session;
@@ -44,7 +43,9 @@ const MAX_MESSAGE: usize = 64 << 20;
 
 #[derive(Debug, Args)]
 pub struct CoreArgs {
-    /// The socket to listen on; $XDG_RUNTIME_DIR/ognivo/core.sock by default
+    /// The socket to listen on; $XDG_RUNTIME_DIR/ognivo/core.sock by default. On Windows a
+    /// named pipe (\\.\pipe\NAME); by default a new one each start, which core.pipe in the
+    /// data directory names
     #[arg(long)]
     socket: Option<PathBuf>,
     /// Where sessions and logs go; ~/.ognivo/data by default
@@ -83,7 +84,12 @@ pub async fn serve(a: CoreArgs) -> anyhow::Result<ExitCode> {
         Ok(d) => d,
         Err(f) => return fail(f.message, f.code),
     };
-    let socket = match a.socket.clone().map_or_else(default_socket, Ok) {
+    let socket = match a
+        .socket
+        .clone()
+        .map(Address::at)
+        .map_or_else(|| Address::default_for(&data_dir), Ok)
+    {
         Ok(s) => s,
         Err(e) => return fail(e, 2),
     };
@@ -102,34 +108,32 @@ pub async fn serve(a: CoreArgs) -> anyhow::Result<ExitCode> {
     if lock.try_lock().is_err() {
         return fail(format!("another core runs on {}", data_dir.display()), 1);
     }
-    let listener = match listen(&socket) {
+    let mut listener = match ipc::listen(&socket) {
         Ok(l) => l,
         Err(Listen::Taken) => {
-            return fail(format!("another core listens at {}", socket.display()), 1);
+            return fail(
+                format!("another core listens at {}", socket.path().display()),
+                1,
+            );
         }
-        Err(Listen::Failed(e)) => return fail(format!("{}: {e}", socket.display()), 2),
+        Err(Listen::Failed(e)) => {
+            return fail(format!("{}: {e}", socket.path().display()), 2);
+        }
     };
     let hub = match Hub::new(data_dir) {
         Ok(hub) => Arc::new(hub),
         Err(f) => return fail(f.message, f.code),
     };
-    eprintln!("ognivo core: listening at {}", socket.display());
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
+    eprintln!("ognivo core: listening at {}", socket.path().display());
+    let mut term = ognivo_os::signal::terminate()?;
+    let mut int = ognivo_os::signal::interrupt()?;
     let idle = idle(hub.clone(), Duration::from_secs(a.idle));
     tokio::pin!(idle);
-    let uid = rustix::process::getuid().as_raw();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
-                // the socket's mode keeps others out; this is the check that does not rely on it
-                match stream.peer_cred() {
-                    Ok(cred) if cred.uid() == uid => {
-                        tokio::spawn(connection(hub.clone(), stream));
-                    }
-                    _ => {}
-                }
+                let Ok(stream) = accepted else { continue };
+                tokio::spawn(connection(hub.clone(), stream));
             }
             _ = &mut idle => {
                 eprintln!("ognivo core: idle, quitting");
@@ -140,44 +144,8 @@ pub async fn serve(a: CoreArgs) -> anyhow::Result<ExitCode> {
         }
     }
     hub.shutdown().await;
-    let _ = std::fs::remove_file(&socket);
+    listener.close();
     Ok(ExitCode::SUCCESS)
-}
-
-/// `$XDG_RUNTIME_DIR/ognivo/core.sock`.
-fn default_socket() -> Result<PathBuf, String> {
-    match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
-        Some(dir) => Ok(PathBuf::from(dir).join("ognivo/core.sock")),
-        None => Err("XDG_RUNTIME_DIR is not set; pass --socket".into()),
-    }
-}
-
-enum Listen {
-    /// A core answers there.
-    Taken,
-    Failed(std::io::Error),
-}
-
-/// Binds the socket, readable and writable by the user only, in a directory only the user
-/// can enter. A socket file nobody answers at is a dead core's, and goes.
-fn listen(path: &Path) -> Result<UnixListener, Listen> {
-    if let Some(dir) = path.parent() {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(Listen::Failed)?;
-    }
-    if path.exists() {
-        if std::os::unix::net::UnixStream::connect(path).is_ok() {
-            return Err(Listen::Taken);
-        }
-        std::fs::remove_file(path).map_err(Listen::Failed)?;
-    }
-    let listener = UnixListener::bind(path).map_err(Listen::Failed)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .map_err(Listen::Failed)?;
-    Ok(listener)
 }
 
 /// Ends once the core has had no client and no running turn for `idle`.
@@ -197,8 +165,8 @@ async fn idle(hub: Arc<Hub>, idle: Duration) {
 }
 
 /// One client: its requests, each answered when it is done, and its answers to the core's.
-async fn connection(hub: Arc<Hub>, stream: UnixStream) {
-    let (read, mut write) = stream.into_split();
+async fn connection(hub: Arc<Hub>, stream: ipc::Connection) {
+    let (read, mut write) = tokio::io::split(stream);
     let (out, mut lines) = mpsc::unbounded_channel::<String>();
     let client = hub.connect(out);
     let writer = tokio::spawn(async move {
@@ -254,7 +222,7 @@ async fn connection(hub: Arc<Hub>, stream: UnixStream) {
 
 /// The next line into `buf`, without its end; `false` at the end of the stream.
 async fn read_message(
-    read: &mut BufReader<OwnedReadHalf>,
+    read: &mut (impl AsyncBufRead + Unpin),
     buf: &mut Vec<u8>,
 ) -> std::io::Result<bool> {
     buf.clear();

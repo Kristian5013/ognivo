@@ -1,0 +1,5 @@
+# Text files are LF in every work tree, Windows' too: the tests compare templates, their
+# golden files and recordings byte for byte, and git on Windows would write CRLF.
+* text=auto eol=lf
+*.zst binary
+*.ico binary

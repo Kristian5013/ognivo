@@ -367,10 +367,13 @@ pub fn for_skill(
 }
 
 /// The globs a path rule matches: the path, and what is under it when it has no wildcards.
+/// globset reads a candidate path with `/` for each separator, so the globs have `/` too;
+/// on Windows `//c/Users/me` (Git Bash's spelling, Claude Code's on Windows) is
+/// `C:/Users/me`, and names match in any case, as Windows' do.
 fn path_globs(spec: &str, places: &Places) -> Result<Vec<GlobMatcher>, String> {
-    let escaped = |p: &Path| globset::escape(&p.display().to_string());
+    let escaped = |p: &Path| globset::escape(&ognivo_os::slashed(p));
     let full = if let Some(rest) = spec.strip_prefix("//") {
-        format!("/{rest}")
+        ognivo_os::slashed(&ognivo_os::shell::native(&format!("/{rest}")))
     } else if let Some(rest) = spec.strip_prefix("~/") {
         let home = places.home.as_deref().ok_or("no home directory for `~/`")?;
         format!("{}/{rest}", escaped(home))
@@ -389,6 +392,7 @@ fn path_globs(spec: &str, places: &Places) -> Result<Vec<GlobMatcher>, String> {
         .map(|g| {
             GlobBuilder::new(g)
                 .literal_separator(true)
+                .case_insensitive(ognivo_os::PATHS_IGNORE_CASE)
                 .build()
                 .map(|g| g.compile_matcher())
                 .map_err(|e| e.kind().to_string())
@@ -398,11 +402,11 @@ fn path_globs(spec: &str, places: &Places) -> Result<Vec<GlobMatcher>, String> {
 
 fn shown(path: &Path, places: &Places) -> String {
     if let Ok(rel) = path.strip_prefix(&places.root) {
-        return rel.display().to_string();
+        return ognivo_os::slashed(rel);
     }
     match places.home.as_deref().map(|h| path.strip_prefix(h)) {
-        Some(Ok(rel)) => format!("~/{}", rel.display()),
-        _ => path.display().to_string(),
+        Some(Ok(rel)) => format!("~/{}", ognivo_os::slashed(rel)),
+        _ => ognivo_os::slashed(path),
     }
 }
 
@@ -832,29 +836,33 @@ mod tests {
             r.edit(&p("/p/secrets/k"), Decision::Allow),
             Ruling::Deny(_)
         ));
-        // a command naming such a path meets the same rules
-        let ro = |_: &str| true;
-        assert_eq!(
-            r.command_in("cat secrets/key.pem", Decision::Allow, ro),
-            Ruling::Deny("Read(secrets) in test".into())
-        );
-        assert_eq!(
-            r.command_in("head -n 3 ./.env", Decision::Allow, ro),
-            Ruling::Ask
-        );
-        assert_eq!(
-            r.command_in("tool --input=.env", Decision::Allow, ro),
-            Ruling::Ask
-        );
-        let home = rules(&[], &[], &["Read(~/.ssh/**)"]);
-        assert!(matches!(
-            home.command_in("cat ~/.ssh/id_rsa", Decision::Allow, ro),
-            Ruling::Deny(_)
-        ));
-        assert_eq!(
-            r.command_in("cat src/lib.rs", Decision::Allow, ro),
-            Ruling::Allow
-        );
+        // a command naming such a path meets the same rules; on Windows a command's `/p` is
+        // the root of the current drive, `C:\p`, which the rules of `/p` do not cover
+        if cfg!(unix) {
+            // a command naming such a path meets the same rules
+            let ro = |_: &str| true;
+            assert_eq!(
+                r.command_in("cat secrets/key.pem", Decision::Allow, ro),
+                Ruling::Deny("Read(secrets) in test".into())
+            );
+            assert_eq!(
+                r.command_in("head -n 3 ./.env", Decision::Allow, ro),
+                Ruling::Ask
+            );
+            assert_eq!(
+                r.command_in("tool --input=.env", Decision::Allow, ro),
+                Ruling::Ask
+            );
+            let home = rules(&[], &[], &["Read(~/.ssh/**)"]);
+            assert!(matches!(
+                home.command_in("cat ~/.ssh/id_rsa", Decision::Allow, ro),
+                Ruling::Deny(_)
+            ));
+            assert_eq!(
+                r.command_in("cat src/lib.rs", Decision::Allow, ro),
+                Ruling::Allow
+            );
+        }
         // no rule lifts an edit's question
         assert_eq!(r.edit(&p("/tmp/scratch"), asks), Ruling::Ask);
         assert!(r.hides(&p("/p/.env")) && r.hides(&p("/p/secrets/x")));
@@ -864,7 +872,7 @@ mod tests {
     #[test]
     fn rules_come_from_the_user_and_the_project_whose_allow_rules_wait_for_trust() {
         let dir = tempfile::tempdir().unwrap();
-        let home = std::fs::canonicalize(dir.path()).unwrap();
+        let home = ognivo_os::canonicalize(dir.path()).unwrap();
         let root = home.join("p[1]");
         std::fs::create_dir_all(root.join(".claude")).unwrap();
         std::fs::create_dir_all(home.join(".ognivo")).unwrap();

@@ -26,7 +26,6 @@ use ognivo_core::protocol::{Out, Projector};
 use ognivo_core::verify;
 use ognivo_models::image;
 use ognivo_protocol as wire;
-use tokio::signal::unix::{SignalKind, signal};
 
 use crate::session::{Failure, SessionArgs, image_file};
 use crate::view::{compacted, given, kilo, not_read};
@@ -204,15 +203,16 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         }
         None => show(&e, jsonl),
     };
-    let mut term = signal(SignalKind::terminate())?;
-    let mut int = signal(SignalKind::interrupt())?;
+    let mut term = ognivo_os::signal::terminate()?;
+    let mut int = ognivo_os::signal::interrupt()?;
+    let (term_name, int_name) = (term.name(), int.name());
     let end = {
         let turn = agent.turn_with(&prompt, images, &mut on);
         tokio::pin!(turn);
         tokio::select! {
             end = &mut turn => Ok(end),
-            _ = term.recv() => Err(("SIGTERM", 143)),
-            _ = int.recv() => Err(("SIGINT", 130)),
+            _ = term.recv() => Err((term_name, 143)),
+            _ = int.recv() => Err((int_name, 130)),
         }
     };
     if let Err((name, _)) = &end {

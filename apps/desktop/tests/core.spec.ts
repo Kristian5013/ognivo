@@ -18,7 +18,8 @@ import { gpuEnv } from "../gpu.js";
 // model is a fake llama-server that streams what llama-server streams; no GPU, no network.
 
 const main = fileURLToPath(new URL("../main.js", import.meta.url));
-const ognivo = fileURLToPath(new URL("../../../target/debug/ognivo", import.meta.url));
+const windows = process.platform === "win32";
+const ognivo = fileURLToPath(new URL(`../../../target/debug/ognivo${windows ? ".exe" : ""}`, import.meta.url));
 
 const chunk = (delta: object, finish: string | null = null) => ({
   choices: [{ index: 0, delta, finish_reason: finish }],
@@ -144,15 +145,19 @@ async function launch(replies: Reply[], serving: Serving & { profile?: string } 
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
   delete env.ELECTRON_RUN_AS_NODE;
+  // the core's socket: a Unix socket of the test's; on Windows the pipe a core names in
+  // core.pipe, as it does for a user
+  const socket = windows ? join(dir, "data", "core.pipe") : join(dir, "run/core.sock");
   Object.assign(env, gpuEnv(), {
     // the user's own instruction files and sessions stay out of it
     HOME: dir,
+    USERPROFILE: dir,
     OGNIVO_BIN: ognivo,
-    OGNIVO_SOCKET: join(dir, "run/core.sock"),
     OGNIVO_DATA_DIR: join(dir, "data"),
     OGNIVO_CORE_IDLE: "1",
     OGNIVO_INACTIVE: "1",
   });
+  if (!windows) env.OGNIVO_SOCKET = socket;
   const app = await electron.launch({ args: [main], env });
   const page = await app.firstWindow();
   await page.getByRole("heading", { name: "New session" }).waitFor({ timeout: 30_000 });
@@ -162,8 +167,8 @@ async function launch(replies: Reply[], serving: Serving & { profile?: string } 
   const close = async () => {
     await app.close();
     server.close();
-    // nobody there: the core quits, and its socket goes with it
-    await expect.poll(() => existsSync(join(dir, "run/core.sock")), { timeout: 20_000 }).toBe(false);
+    // nobody there: the core quits, and its socket (on Windows the name of its pipe) goes
+    await expect.poll(() => existsSync(socket), { timeout: 20_000 }).toBe(false);
   };
   return { page, project, close };
 }

@@ -13,7 +13,8 @@
 //   OGNIVO_SCREENSHOT=out.png             render without showing a window, save, quit
 //   OGNIVO_INACTIVE=1                     show the window without taking the focus (perf runs)
 //
-// Start it with start.js (npm start), which sets the GPU it renders on first (gpu.js).
+// Start it with start.js (npm start), which sets the GPU it renders on first (gpu.js); an
+// installed window starts from packaging/launch, which does the same.
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, join, normalize, sep } from "node:path";

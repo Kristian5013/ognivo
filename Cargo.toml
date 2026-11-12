@@ -14,6 +14,7 @@ publish = false
 ognivo-core = { path = "crates/ognivo-core" }
 ognivo-mcp = { path = "crates/ognivo-mcp" }
 ognivo-models = { path = "crates/ognivo-models" }
+ognivo-os = { path = "crates/ognivo-os" }
 ognivo-patch = { path = "crates/ognivo-patch" }
 ognivo-protocol = { path = "crates/ognivo-protocol" }
 ognivo-store = { path = "crates/ognivo-store" }

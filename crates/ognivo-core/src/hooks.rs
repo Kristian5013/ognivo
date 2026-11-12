@@ -371,11 +371,11 @@ fn hook(
 
 fn shown(path: &Path, places: &Places) -> String {
     if let Ok(rel) = path.strip_prefix(&places.root) {
-        return rel.display().to_string();
+        return ognivo_os::slashed(rel);
     }
     match places.home.as_deref().map(|h| path.strip_prefix(h)) {
-        Some(Ok(rel)) => format!("~/{}", rel.display()),
-        _ => path.display().to_string(),
+        Some(Ok(rel)) => format!("~/{}", ognivo_os::slashed(rel)),
+        _ => ognivo_os::slashed(path),
     }
 }
 
@@ -501,12 +501,13 @@ struct Ran {
 async fn run_one(hook: &Hook, input: &[u8], ctx: &Context) -> Result<Ran, String> {
     let mut cmd = match &hook.args {
         Some(args) => {
-            let mut c = tokio::process::Command::new(&hook.command);
+            let mut c = ognivo_os::async_command(&hook.command);
             c.args(args);
             c
         }
         None => {
-            let mut c = tokio::process::Command::new("bash");
+            let bash = ognivo_os::shell::bash().map_err(|e| e.to_string())?;
+            let mut c = ognivo_os::async_command(bash);
             c.arg("-c").arg(&hook.command);
             c
         }
@@ -515,19 +516,17 @@ async fn run_one(hook: &Hook, input: &[u8], ctx: &Context) -> Result<Ran, String
         .env("CLAUDE_PROJECT_DIR", &ctx.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| e.to_string())?;
-    let pid = child.id();
-    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        .stderr(Stdio::piped());
+    // a hook and what it starts end together, at its timeout or when it is done
+    let mut tree = ognivo_os::Tree::spawn(cmd).map_err(|e| e.to_string())?;
+    let mut stdin = tree.stdin().ok_or("no stdin")?;
     let input = input.to_vec();
     // a hook that reads nothing must not hold up the others
     tokio::spawn(async move {
         let _ = stdin.write_all(&input).await;
     });
-    let mut stdout = child.stdout.take().ok_or("no stdout")?;
-    let mut stderr = child.stderr.take().ok_or("no stderr")?;
+    let mut stdout = tree.stdout().ok_or("no stdout")?;
+    let mut stderr = tree.stderr().ok_or("no stderr")?;
     let done = async {
         let (mut out, mut err) = (Vec::new(), Vec::new());
         let (mut o, mut e) = (
@@ -535,7 +534,7 @@ async fn run_one(hook: &Hook, input: &[u8], ctx: &Context) -> Result<Ran, String
             (&mut stderr).take(OUTPUT_MAX),
         );
         let _ = tokio::join!(o.read_to_end(&mut out), e.read_to_end(&mut err));
-        (child.wait().await, out, err)
+        (tree.wait().await, out, err)
     };
     match tokio::time::timeout(hook.timeout, done).await {
         Ok((status, out, err)) => Ok(Ran {
@@ -545,9 +544,7 @@ async fn run_one(hook: &Hook, input: &[u8], ctx: &Context) -> Result<Ran, String
             timed_out: false,
         }),
         Err(_) => {
-            if let Some(pid) = pid.and_then(|p| rustix::process::Pid::from_raw(p as i32)) {
-                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-            }
+            tree.stop(ognivo_os::Stop::Kill);
             Ok(Ran {
                 code: None,
                 stdout: String::new(),

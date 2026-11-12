@@ -17,13 +17,12 @@
 //!
 //! The store keeps what the core gives it: messages, events, counters and conversation
 //! notes are JSON the core writes and reads. Paths are kept as the OS spells them, so a
-//! revert after a restart writes exactly the file that was read.
+//! revert after a restart writes exactly the file that was read: their bytes on Unix, their
+//! UTF-16 as WTF-8 on Windows (UTF-8 for every path that is valid Unicode).
 
-use std::ffi::OsString;
+use std::borrow::Cow;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -305,10 +304,9 @@ impl Store {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(io(dir))?;
         }
-        match fs::OpenOptions::new()
+        match ognivo_os::private_file()
             .write(true)
             .create_new(true)
-            .mode(0o600)
             .open(path)
         {
             Ok(_) => {}
@@ -851,12 +849,13 @@ fn session_row(r: &Row<'_>) -> rusqlite::Result<SessionRow> {
     })
 }
 
-fn bytes(p: &Path) -> &[u8] {
-    p.as_os_str().as_bytes()
+/// A path as the store keeps it.
+fn bytes(p: &Path) -> Cow<'_, [u8]> {
+    ognivo_os::path_bytes(p)
 }
 
 fn path_of(b: Vec<u8>) -> PathBuf {
-    PathBuf::from(OsString::from_vec(b))
+    ognivo_os::path_from_bytes(b)
 }
 
 fn hex(b: &[u8]) -> String {
@@ -872,8 +871,6 @@ fn now() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
     use super::*;
 
     fn new(root: &str, kind: &str) -> NewSession {
@@ -887,6 +884,22 @@ mod tests {
         }
     }
 
+    /// A name that is not valid Unicode: Latin-1 on Unix, a lone surrogate on Windows.
+    fn odd_path() -> PathBuf {
+        #[cfg(unix)]
+        return PathBuf::from(
+            <std::ffi::OsString as std::os::unix::ffi::OsStringExt>::from_vec(
+                b"/p/caf\xe9".to_vec(),
+            ),
+        );
+        #[cfg(windows)]
+        return PathBuf::from(
+            <std::ffi::OsString as std::os::windows::ffi::OsStringExt>::from_wide(&[
+                0x43, 0x3a, 0x5c, 0x70, 0x5c, 0x63, 0xd800,
+            ]),
+        );
+    }
+
     #[test]
     fn a_new_store_is_private_and_opens_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -894,8 +907,12 @@ mod tests {
         let mut store = Store::open(&path).unwrap();
         let id = store.create_session(&new("/p", "chat")).unwrap();
         drop(store);
-        let mode = fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.session(id).unwrap().unwrap().profile, "gpt-oss-20b");
     }
@@ -1002,7 +1019,7 @@ mod tests {
         store
             .put_messages(id, 1, 2, &["t + note".into(), "a".into()])
             .unwrap();
-        let odd = PathBuf::from(OsString::from_vec(b"/p/caf\xe9".to_vec()));
+        let odd = odd_path();
         store
             .update_paths(id, 1, "seen", &[odd.clone(), "/p/b".into()], &[])
             .unwrap();

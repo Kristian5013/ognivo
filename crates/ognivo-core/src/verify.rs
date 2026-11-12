@@ -136,7 +136,7 @@ impl Ledger {
         for e in &self.entries {
             match e {
                 Entry::Changed(p) => {
-                    let shown = p.strip_prefix(root).unwrap_or(p).display().to_string();
+                    let shown = ognivo_os::slashed(p.strip_prefix(root).unwrap_or(p));
                     if !changed.contains(&shown) {
                         changed.push(shown);
                     }

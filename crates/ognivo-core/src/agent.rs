@@ -1253,7 +1253,7 @@ pub fn project_context(
     mcp: Option<&ognivo_mcp::Gateway>,
     skills: Option<&str>,
 ) -> String {
-    let mut text = format!("{PROJECT_AT}{}.", root.display());
+    let mut text = format!("{PROJECT_AT}{}.", ognivo_os::slashed(root));
     let checks = verify::project_checks(root);
     if checks.is_empty() {
         // T2, 2026-11-03: told to run "the project's build or tests" in a project of three
@@ -3968,7 +3968,10 @@ fn base_line(skill: &Skill) -> String {
     if skill.command {
         String::new()
     } else {
-        format!("Base directory for this skill: {}\n\n", skill.dir.display())
+        format!(
+            "Base directory for this skill: {}\n\n",
+            ognivo_os::slashed(&skill.dir)
+        )
     }
 }
 
@@ -4077,7 +4080,7 @@ mod tests {
         time_limit: Option<Duration>,
     ) -> Run {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
         let (driver, seen) = played(steps);
@@ -4149,7 +4152,7 @@ mod tests {
             answer("a() returns 2 now."),
         ];
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
         let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
@@ -5499,7 +5502,7 @@ mod tests {
     #[tokio::test]
     async fn leaving_plan_mode_mid_turn_lets_the_next_call_change_files() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
         let steps = vec![edit_lib(), edit_lib(), answer("done")]
@@ -5546,7 +5549,7 @@ mod tests {
     #[tokio::test]
     async fn a_call_shows_as_the_model_writes_it_by_ognivos_names() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         let whole = r#"{"file": "a.rs", "text": "fn a() {}\n"}"#;
         let fragment = |name: Option<&str>, arguments: &str| DriverEvent::ToolCallDelta {
@@ -6474,7 +6477,7 @@ mod tests {
     /// playing `scripts`; and what each subagent was sent.
     fn delegating(main: Vec<ChatCompletion>, scripts: Vec<Vec<ChatCompletion>>) -> (Run, Seen) {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
@@ -6721,7 +6724,7 @@ mod tests {
     #[tokio::test]
     async fn the_model_loads_a_skill_whose_commands_run_and_whose_tools_its_turn_allows() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         let home = root.parent().unwrap().join("home");
         std::fs::create_dir_all(root.join(".claude/skills/release")).unwrap();
         std::fs::create_dir_all(root.join(".claude/commands")).unwrap();
@@ -6798,7 +6801,7 @@ mod tests {
     #[tokio::test]
     async fn the_user_runs_a_command_and_one_that_cannot_render_runs_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         let home = root.parent().unwrap().join("home");
         std::fs::create_dir_all(root.join(".claude/commands")).unwrap();
         std::fs::write(
@@ -6890,7 +6893,7 @@ mod tests {
     #[tokio::test]
     async fn hooks_block_a_call_add_to_results_and_send_an_answer_back_once() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         let home = root.parent().unwrap().join("home");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() {}\n").unwrap();
@@ -6971,7 +6974,7 @@ mod tests {
     #[tokio::test]
     async fn a_task_for_a_template_gets_its_role_and_only_its_tools() {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         let review = |agent: &str| json!({"tasks": [{"title": "Review", "goal": "Review a.txt", "mode": "write", "files": ["a.txt"], "agent": agent}]});
@@ -7113,7 +7116,8 @@ mod tests {
         let echo = ognivo_mcp::ServerConfig {
             name: "echo".into(),
             transport: ognivo_mcp::Transport::Stdio {
-                command: "python3".into(),
+                // Windows names it `python`
+                command: if cfg!(windows) { "python" } else { "python3" }.into(),
                 args: vec![
                     "-I".into(),
                     concat!(
@@ -7129,7 +7133,7 @@ mod tests {
         let g = ognivo_mcp::Gateway::start(&[echo], Duration::from_secs(20), None).await;
         assert_eq!(g.prompts().len(), 1, "{:?}", g.started());
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         let mut opts = options(&root, WorkspaceState::CLEAN, None);
         opts.mcp = Some(Arc::new(g));

@@ -1144,6 +1144,7 @@ dependencies = [
  "ognivo-core",
  "ognivo-mcp",
  "ognivo-models",
+ "ognivo-os",
  "ognivo-protocol",
  "ognivo-store",
  "ognivo-tools",
@@ -1164,11 +1165,11 @@ dependencies = [
  "ignore",
  "ognivo-mcp",
  "ognivo-models",
+ "ognivo-os",
  "ognivo-protocol",
  "ognivo-store",
  "ognivo-tools",
  "regex",
- "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -1200,10 +1201,10 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "futures",
+ "ognivo-os",
  "process-wrap",
  "reqwest",
  "rmcp",
- "rustix",
  "serde",
  "serde_json",
  "tempfile",
@@ -1217,6 +1218,7 @@ version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "futures",
+ "ognivo-os",
  "regex",
  "reqwest",
  "serde",
@@ -1225,6 +1227,18 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
+]
+
+[[package]]
+name = "ognivo-os"
+version = "0.0.1"
+dependencies = [
+ "process-wrap",
+ "rustix",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "windows",
 ]
 
 [[package]]
@@ -1248,6 +1262,7 @@ name = "ognivo-store"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "ognivo-os",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.21",
@@ -1261,9 +1276,9 @@ dependencies = [
  "globset",
  "ignore",
  "ognivo-models",
+ "ognivo-os",
  "ognivo-patch",
  "regex",
- "rustix",
  "serde",
  "serde_json",
  "similar",

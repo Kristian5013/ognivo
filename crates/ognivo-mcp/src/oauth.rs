@@ -86,14 +86,9 @@ impl FileStore {
     /// Writes the file whole, through a file beside it, so a reader never sees half of it.
     fn write(&self, credentials: StoredCredentials) -> Result<(), String> {
         use std::io::Write as _;
-        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
         let shown = |e: std::io::Error| format!("{}: {e}", self.path.display());
         if let Some(dir) = self.path.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(shown)?;
+            ognivo_os::private_dir(dir).map_err(shown)?;
         }
         let text = serde_json::to_string_pretty(&Kept {
             url: self.url.clone(),
@@ -101,11 +96,10 @@ impl FileStore {
         })
         .map_err(|e| e.to_string())?;
         let tmp = self.path.with_extension("json.tmp");
-        let mut f = std::fs::OpenOptions::new()
+        let mut f = ognivo_os::private_file()
             .write(true)
             .create(true)
             .truncate(true)
-            .mode(0o600)
             .open(&tmp)
             .map_err(shown)?;
         f.write_all(text.as_bytes()).map_err(shown)?;
@@ -139,21 +133,18 @@ impl CredentialStore for FileStore {
     /// One refresh at a time: another ognivo with the same sign-in waits for this one's
     /// token rather than spend the refresh token a second time.
     async fn acquire_refresh_guard(&self) -> Result<Option<CredentialRefreshGuard>, AuthError> {
-        use std::os::unix::fs::OpenOptionsExt as _;
         let lock = self.path.with_extension("lock");
         let held = tokio::task::spawn_blocking(move || -> Result<std::fs::File, String> {
             if let Some(dir) = lock.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
-            let f = std::fs::OpenOptions::new()
+            let f = ognivo_os::private_file()
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .mode(0o600)
                 .open(&lock)
                 .map_err(|e| format!("{}: {e}", lock.display()))?;
-            rustix::fs::flock(&f, rustix::fs::FlockOperation::LockExclusive)
-                .map_err(|e| format!("{}: {e}", lock.display()))?;
+            f.lock().map_err(|e| format!("{}: {e}", lock.display()))?;
             Ok(f)
         })
         .await
@@ -342,7 +333,6 @@ mod tests {
 
     #[test]
     fn a_sign_in_is_kept_for_its_url_alone_and_for_the_user_alone() {
-        use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::tempdir().unwrap();
         let store = FileStore::new(dir.path(), "my docs/v2", "https://a.example/mcp");
         assert!(store.read().unwrap().is_none());
@@ -356,8 +346,12 @@ mod tests {
             .unwrap();
         let path = credentials_file(dir.path(), "my docs/v2");
         assert!(path.ends_with("my_docs_v2.json"), "{}", path.display());
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
         let kept = store.read().unwrap().unwrap();
         assert_eq!(kept.client_id, "c1");
         // the same name for another server finds nothing

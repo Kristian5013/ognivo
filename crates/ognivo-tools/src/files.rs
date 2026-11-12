@@ -76,7 +76,9 @@ fn io(shown: &Path) -> impl FnOnce(std::io::Error) -> FileError + '_ {
 
 /// A file as the tools see it: where it is, and how results name it. Inside the project
 /// the name is relative to the root, which keeps results short and is the form the model
-/// writes paths in; outside it is absolute. Only names change, never file content.
+/// writes paths in; outside it is absolute. On Windows the name has `/` between its parts,
+/// as the model writes paths in JSON, where a `\` is an escape. Only names change, never
+/// file content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub path: PathBuf,
@@ -90,7 +92,10 @@ impl Target {
             Ok(rel) => rel.to_owned(),
             Err(_) => path.clone(),
         };
-        Self { path, shown }
+        Self {
+            path,
+            shown: ognivo_os::with_slashes(shown),
+        }
     }
 }
 
@@ -113,8 +118,9 @@ impl LineStyle {
 
 /// Resolves a path the model gave against `cwd`: absolute, `.` and `..` removed, symlinks
 /// resolved for the longest existing prefix, so the policy sees where a write would land.
+/// On Windows a path as Git Bash writes it, `/c/Users/me`, is the OS's `C:\Users\me`.
 pub fn resolve(cwd: &Path, raw: &str) -> PathBuf {
-    let joined = cwd.join(raw);
+    let joined = cwd.join(ognivo_os::shell::native(raw));
     let mut lexical = PathBuf::new();
     for c in joined.components() {
         match c {
@@ -128,7 +134,7 @@ pub fn resolve(cwd: &Path, raw: &str) -> PathBuf {
     let mut existing = lexical.as_path();
     let mut rest = Vec::new();
     loop {
-        if let Ok(real) = fs::canonicalize(existing) {
+        if let Ok(real) = ognivo_os::canonicalize(existing) {
             let mut out = real;
             out.extend(rest.iter().rev());
             return out;
@@ -603,10 +609,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_handles_dots_and_missing_tails() {
         let d = tempfile::tempdir().unwrap();
-        let root = fs::canonicalize(d.path()).unwrap();
+        let root = ognivo_os::canonicalize(d.path()).unwrap();
         fs::create_dir(root.join("src")).unwrap();
         assert_eq!(
             resolve(&root, "src/../src/new/x.rs"),

@@ -16,13 +16,13 @@ path = "src/main.rs"
 ognivo-core.workspace = true
 ognivo-mcp.workspace = true
 ognivo-models.workspace = true
+ognivo-os.workspace = true
 ognivo-protocol.workspace = true
 ognivo-store.workspace = true
 ognivo-tools.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
-rustix = { workspace = true, features = ["termios"] }
 rustyline.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -31,6 +31,9 @@ tokio = { workspace = true, features = ["signal", "sync"] }
 [dev-dependencies]
 base64.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true, features = ["process"] }
 
 [lints]
 workspace = true

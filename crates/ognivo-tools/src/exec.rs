@@ -4,8 +4,10 @@
 //! - No TTY: stdin is `/dev/null`, stdout and stderr are one stream in order.
 //! - `bash -o pipefail`: the exit code is the pipeline's, so `cargo test | tail` fails
 //!   when the tests fail (M0: 49 of Qwen's 59 build/test calls went through tail/head).
-//! - Its own process group, killed as a whole: on timeout SIGINT, then SIGTERM, then
-//!   SIGKILL, and the result says so with exit code 124; dropping the future kills it too.
+//! - Its own process tree, killed as a whole ([`ognivo_os::Tree`]): on timeout SIGINT,
+//!   then SIGTERM, then SIGKILL (on Windows the job's end at once), and the result says so
+//!   with exit code 124; dropping the future kills it too.
+//! - On Windows the bash is Git for Windows' ([`ognivo_os::shell::bash`]).
 //! - The environment loses credentials (`*_API_KEY`, `*_TOKEN`) and the variables that
 //!   make bash source files (`BASH_ENV`, `ENV`), and gains pager-free settings.
 //! - The model sees the head and tail of the output within a byte budget; the full log
@@ -16,9 +18,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use rustix::process::{Pid, Signal, kill_process_group};
+use ognivo_os::shell::{self, NoBash};
+use ognivo_os::{Stop, Tree};
 use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 
 /// Default and maximum time a command may run.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -58,22 +60,13 @@ pub struct ShellResult {
 pub enum ExecError {
     #[error("cannot start bash: {0}")]
     Spawn(std::io::Error),
+    #[error(transparent)]
+    NoBash(#[from] NoBash),
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
         source: std::io::Error,
     },
-}
-
-/// Kills the whole group if the command is still running when this is dropped.
-struct GroupGuard(Option<Pid>);
-
-impl Drop for GroupGuard {
-    fn drop(&mut self) {
-        if let Some(pgid) = self.0 {
-            let _ = kill_process_group(pgid, Signal::KILL);
-        }
-    }
 }
 
 pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, ExecError> {
@@ -90,9 +83,10 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
     // exec 2>&1 keeps stdout and stderr in one ordered stream; the trailer records the
     // final directory without changing the command's exit code
     let script = format!(
-        "exec 2>&1\n{command}\n__ognivo_rc=$?\npwd -P > \"$__OGNIVO_CWD_FILE\" 2>/dev/null\nexit $__ognivo_rc\n"
+        "exec 2>&1\n{command}\n__ognivo_rc=$?\n{} > \"$__OGNIVO_CWD_FILE\" 2>/dev/null\nexit $__ognivo_rc\n",
+        shell::PWD
     );
-    let mut cmd = Command::new("bash");
+    let mut cmd = ognivo_os::async_command(shell::bash()?);
     cmd.arg("--noprofile")
         .arg("--norc")
         .arg("-o")
@@ -102,9 +96,7 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
         .current_dir(&opts.cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .kill_on_drop(true);
+        .stderr(Stdio::null());
     for (key, _) in std::env::vars_os() {
         let k = key.to_string_lossy();
         if k.ends_with("_API_KEY") || k.ends_with("_TOKEN") || k == "BASH_ENV" || k == "ENV" {
@@ -118,16 +110,14 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
         .env("AI_AGENT", "ognivo")
-        .env("__OGNIVO_CWD_FILE", &cwd_file);
+        .env("__OGNIVO_CWD_FILE", shell::bash_path(&cwd_file));
     let started = Instant::now();
-    let mut child = cmd.spawn().map_err(ExecError::Spawn)?;
-    let pgid = child.id().and_then(|id| Pid::from_raw(id as i32));
-    let mut guard = GroupGuard(pgid);
-    if let Some(id) = child.id() {
+    let mut tree = Tree::spawn(cmd).map_err(ExecError::Spawn)?;
+    if let Some(id) = tree.id() {
         // a build that eats the RAM must not take llama-server with it
-        let _ = std::fs::write(format!("/proc/{id}/oom_score_adj"), "500");
+        ognivo_os::oom_first(id);
     }
-    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stdout = tree.stdout().expect("stdout is piped");
     let mut out = Vec::new();
     let mut buf = [0u8; 16 * 1024];
     let deadline = tokio::time::Instant::now() + opts.timeout;
@@ -146,7 +136,7 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
                     out.extend_from_slice(&buf[..n.min(room)]);
                 }
             },
-            s = child.wait(), if status.is_none() => {
+            s = tree.wait(), if status.is_none() => {
                 status = Some(s.ok());
                 drain_until = Some(tokio::time::Instant::now() + DRAIN);
             }
@@ -157,20 +147,16 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
         }
     }
     if timed_out {
-        for sig in [Signal::INT, Signal::TERM, Signal::KILL] {
-            if let Some(pgid) = pgid {
-                let _ = kill_process_group(pgid, sig);
-            }
-            if let Ok(s) = tokio::time::timeout(KILL_GRACE, child.wait()).await {
+        for how in [Stop::Interrupt, Stop::Terminate, Stop::Kill] {
+            tree.stop(how);
+            if let Ok(s) = tokio::time::timeout(KILL_GRACE, tree.wait()).await {
                 status = Some(s.ok());
                 break;
             }
         }
     }
-    // whatever the command left running in its group dies with it
-    if let Some(pgid) = guard.0.take() {
-        let _ = kill_process_group(pgid, Signal::KILL);
-    }
+    // whatever the command left running in its tree dies with it
+    tree.stop(Stop::Kill);
     let status = status.flatten();
     let elapsed = started.elapsed();
     std::fs::write(&log, &out).map_err(|source| ExecError::Io {
@@ -179,7 +165,7 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
     })?;
     let cwd = std::fs::read_to_string(&cwd_file)
         .ok()
-        .map(|s| PathBuf::from(s.trim_end_matches('\n')))
+        .map(|s| shell::native(s.trim_end_matches(['\n', '\r'])))
         .filter(|p| p.is_dir())
         .unwrap_or_else(|| opts.cwd.clone());
     let _ = std::fs::remove_file(&cwd_file);
@@ -197,7 +183,7 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
         (false, None) => "[shell: killed by a signal]".to_owned(),
     };
     if cwd != opts.cwd {
-        head.push_str(&format!("\n[cwd: {}]", cwd.display()));
+        head.push_str(&format!("\n[cwd: {}]", ognivo_os::slashed(&cwd)));
     }
     let text = format!("{head}\n{}", budgeted(&out, opts.output_budget, &log));
     Ok(ShellResult {
@@ -223,7 +209,7 @@ fn budgeted(out: &[u8], budget: usize, log: &Path) -> String {
         "{}… [{cut_lines} lines, {} bytes cut; full log: {}] …\n{}",
         &text[..head_end],
         tail_start - head_end,
-        log.display(),
+        ognivo_os::slashed(log),
         &text[tail_start..]
     )
 }
@@ -253,7 +239,7 @@ mod tests {
 
     fn opts(dir: &Path, timeout: Duration, budget: usize) -> ShellOptions {
         ShellOptions {
-            cwd: std::fs::canonicalize(dir).unwrap(),
+            cwd: ognivo_os::canonicalize(dir).unwrap(),
             timeout,
             output_budget: budget,
             log_dir: dir.join("logs"),
@@ -300,7 +286,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let o = opts(d.path(), Duration::from_millis(500), DEFAULT_OUTPUT_BUDGET);
         let marker = d.path().join("survived");
-        let cmd = format!("(sleep 3; touch {}) & sleep 30", marker.display());
+        let cmd = format!(
+            "(sleep 3; touch '{}') & sleep 30",
+            shell::bash_path(&marker).to_string_lossy()
+        );
         let r = run(&cmd, &o).await.unwrap();
         assert!(r.timed_out && r.exit_code == Some(124), "{}", r.text);
         assert!(r.text.contains("timed out after 0 s"), "{}", r.text);

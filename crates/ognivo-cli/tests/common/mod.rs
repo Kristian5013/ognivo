@@ -11,6 +11,10 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Python as the OS names it: Windows has `python`, and a `python3` there may be the
+/// Microsoft Store's stand-in.
+pub const PYTHON: &str = if cfg!(windows) { "python" } else { "python3" };
+
 /// A chat answer that never comes: the connection stays open.
 pub const HANG: &str = "";
 
@@ -175,6 +179,7 @@ async fn read_request(sock: &mut TcpStream) -> (String, Vec<u8>) {
 
 /// A browser for the tests, as `$BROWSER` names one: it opens the page it is given and,
 /// the user saying yes, follows the redirect back to ognivo. Written under `dir`.
+#[cfg(unix)]
 pub fn browser(dir: &std::path::Path) -> std::path::PathBuf {
     use std::os::unix::fs::PermissionsExt as _;
     const FOLLOW: &str = r#"import sys
@@ -207,11 +212,12 @@ urllib.request.urlopen(back).read()
 }
 
 /// ognivo-mcp's MCP server behind OAuth, its own authorization server too, and its URL.
+#[cfg(unix)]
 pub fn oauth_server() -> (std::process::Child, String) {
     use std::io::BufRead as _;
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../ognivo-mcp/tests/fixtures/oauth_server.py");
-    let mut child = std::process::Command::new("python3")
+    let mut child = std::process::Command::new(PYTHON)
         .arg("-I")
         .arg(&script)
         .stdout(std::process::Stdio::piped())

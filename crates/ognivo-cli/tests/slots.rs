@@ -21,6 +21,7 @@ fn run(dir: &Path, url: &str, args: &[&str]) -> Child {
         .arg(&root)
         .args(args)
         .env("HOME", dir)
+        .env("USERPROFILE", dir)
         .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

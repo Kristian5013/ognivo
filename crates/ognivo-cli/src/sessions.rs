@@ -71,7 +71,7 @@ fn list(a: &SessionsArgs) -> Result<Vec<String>, Failure> {
     } else {
         Some(session::root(a.cwd.as_deref())?)
     };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = ognivo_os::home();
     let mut lines = Vec::new();
     match &a.search {
         Some(words) => {

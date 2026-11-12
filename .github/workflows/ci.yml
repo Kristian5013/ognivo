@@ -1,7 +1,8 @@
 # What scripts/check.sh checks before each commit (formatting, lints, the tests of the
 # workspace and of the UI), the UI's build, and the GUI end to end: a session in a real
-# window on a real core, against a fake llama-server. No GPU and no model here: the live
-# evaluations (T2) run where the models are.
+# window on a real core, against a fake llama-server. On Linux and on Windows, where the
+# shell of the agent is Git Bash, as it is for a user there. No GPU and no model here: the
+# live evaluations (T2) run where the models are.
 name: CI
 
 on:
@@ -67,5 +68,54 @@ jobs:
         uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-results
+          path: apps/desktop/test-results
+          if-no-files-found: ignore
+
+  check-windows:
+    name: lints and tests on Windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal -c rustfmt -c clippy
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: scripts/check.sh
+
+  e2e-windows:
+    name: the GUI end to end on Windows
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+      - uses: Swatinem/rust-cache@v2.9.3
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: cargo build --locked -p ognivo-cli
+      - run: npm ci
+      - run: npm run install-electron -w @ognivo/desktop
+      - run: npm run build -w @ognivo/ui
+      - run: npm run e2e -w @ognivo/desktop
+      - if: failure()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: e2e-results-windows
           path: apps/desktop/test-results
           if-no-files-found: ignore

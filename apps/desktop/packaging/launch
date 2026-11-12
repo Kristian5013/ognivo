@@ -1,0 +1,28 @@
+#!/bin/sh
+# The window of an installed ognivo (scripts/package.sh): Electron beside this script,
+# with the environment that start.js gives it in a checkout. /usr/bin/ognivo-window of the
+# .deb is a link to here, and the AppImage's AppRun comes here for the window.
+#
+# The GPU the window renders on (apps/desktop/gpu.js says why): Mesa's EGL when every
+# connected screen hangs on an Intel or AMD GPU, so that GLVND does not take NVIDIA's for
+# them. It has to be in the environment before Electron starts.
+here=$(dirname "$(readlink -f "$0")")
+mesa=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+if [ -z "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" ] && [ -e "$mesa" ]; then
+    screens=0
+    others=0
+    for c in /sys/class/drm/card*-*; do
+        [ "$(cat "$c/status" 2> /dev/null)" = connected ] || continue
+        screens=$((screens + 1))
+        case "$(cat "$c/device/device/vendor" 2> /dev/null)" in
+            0x8086 | 0x1002) ;;
+            *) others=$((others + 1)) ;;
+        esac
+    done
+    if [ "$screens" -gt 0 ] && [ "$others" -eq 0 ]; then
+        export __EGL_VENDOR_LIBRARY_FILENAMES="$mesa"
+    fi
+fi
+# an editor's extension host may pass this on, and Electron would start as plain Node
+unset ELECTRON_RUN_AS_NODE
+exec "$here/ognivo-window" "$@"

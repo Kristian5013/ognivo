@@ -50,6 +50,7 @@ async fn reads_edits_and_answers() {
             .arg("--atif")
             .arg(dir.path().join("trajectory.json"))
             .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -170,6 +171,8 @@ fn auto_approval_refuses_to_run_on_the_host() {
 }
 
 /// `timeout` stops the agent with SIGTERM: the end event is still written, exit 143.
+// Windows has no SIGTERM to send
+#[cfg(unix)]
 #[tokio::test]
 async fn sigterm_ends_the_run_with_an_end_event() {
     // a server that takes the request and never answers it
@@ -194,6 +197,7 @@ async fn sigterm_ends_the_run_with_an_end_event() {
             .arg("--cwd")
             .arg(dir.path())
             .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -256,6 +260,7 @@ async fn the_time_limit_ends_the_run_with_exit_124() {
             .arg("--cwd")
             .arg(dir.path())
             .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -321,6 +326,7 @@ async fn events_are_the_run_in_the_clients_model() {
             .arg("--cwd")
             .arg(dir.path())
             .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -391,6 +397,7 @@ async fn run_with_image(url: String, dir: &std::path::Path) -> std::process::Out
             .args(["--image", "shot.png"])
             .current_dir(dir.join("proj"))
             .env("HOME", &dir)
+            .env("USERPROFILE", &dir)
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

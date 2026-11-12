@@ -7,9 +7,10 @@ are tuned per model family instead of being squeezed through a generic chat API.
 It works in your project from the terminal (`ognivo chat`, or `ognivo run` with no user
 at all) or in its own window, on a llama-server that you run: ognivo never starts one.
 
-**Status:** pre-release, Linux only. On the way to v1: Gemma 4 on the Native path,
-terminal sessions in the window, packages (.deb, AppImage) and documentation in English
-(the architecture, [docs/architecture.md](docs/architecture.md), is in Russian for now).
+**Status:** pre-release, for Linux and Windows. On the way to v1: Gemma 4 on the Native
+path, terminal sessions in the window, the first release of the packages (a .deb and an
+AppImage; an installer and zips for Windows) and documentation in English (the
+architecture, [docs/architecture.md](docs/architecture.md), is in Russian for now).
 
 ## Models
 
@@ -112,11 +113,15 @@ once you trust exactly their commands. `ognivo mcp` shows what a session here ge
 
 ## Requirements
 
-- Linux (x86_64; tested on Ubuntu).
+- Linux (x86_64; tested on Ubuntu), or Windows 10 or 11 (x86_64) with
+  [Git for Windows](https://git-scm.com/download/win): there the agent runs commands in
+  its bash, Git Bash, as Claude Code does on Windows. ognivo finds it from `git` on
+  `PATH`; `OGNIVO_GIT_BASH` names another `bash.exe`.
 - A llama-server that runs the model: upstream llama.cpp from b6096 for gpt-oss, b7973
   for Qwen3.5 and 3.8, b8637 for Gemma 4, and a recent build is better; ik_llama.cpp on
   the Generic path.
-- To build: Rust 1.99 or newer and a C compiler; Node.js 24 or newer for the window.
+- To build: Rust 1.99 or newer and a C compiler (on Windows Visual Studio's C++ Build
+  Tools); Node.js 24 or newer for the window.
 
 ## Build and try
 
@@ -146,8 +151,8 @@ echo "Which file implements the edit tool?" | ognivo run --url http://127.0.0.1:
 `doctor` detects the model family, classifies the server and checks the properties the
 agent depends on (`--probe` also runs a short generation). `chat` streams the answer;
 each tool call shows as one line and each change as a short diff, and ^C stops a turn.
-On the Native path, ^\ ends the model's reasoning where it stands and asks for the
-answer. `run` takes the prompt on stdin, refuses what would need approval and tells the
+On the Native path, ^\ (Ctrl+Break on Windows) ends the model's reasoning where it
+stands and asks for the answer. `run` takes the prompt on stdin, refuses what would need approval and tells the
 model why; `--events` writes the session in the clients' event model (`ognivo-protocol`,
 version 1), one JSON event a line. For a server started with `--api-key`, pass
 `--api-key` or set `OGNIVO_API_KEY`.
@@ -155,8 +160,9 @@ version 1), one JSON event a line. For a server started with `--api-key`, pass
 ## The window
 
 The GUI works on the core: `ognivo core` runs the sessions, one core per user, on a Unix
-socket only that user can open (`$XDG_RUNTIME_DIR/ognivo/core.sock`), and the window
-starts it when none runs. The window lists the sessions of every project and starts new
+socket only that user can open (`$XDG_RUNTIME_DIR/ognivo/core.sock`), on Windows a named
+pipe whose name, new each time a core starts, is in `core.pipe` of the data directory;
+the window starts it when none runs. The window lists the sessions of every project and starts new
 ones (server, model, reasoning level, context, Native path), streams turns, asks in the
 thread what needs approval, shows subagents as lanes, reviews and reverts what changed,
 shows the model's reasoning and each call's code in a window as the model writes them,
@@ -192,6 +198,20 @@ sudo apparmor_parser -r /etc/apparmor.d/ognivo-electron
 
 The renderer's sandbox stays on; `--no-sandbox` would take it off.
 
+## Windows
+
+The installer puts the window and `ognivo.exe` in `%LOCALAPPDATA%\Programs\ognivo` for
+your user alone, with no administrator, adds the window to the Start menu and its `bin`
+to your `PATH`, for `ognivo chat` in a terminal; the zips are the same to unpack
+anywhere, and `ognivo.exe` alone. Sessions and settings are in `%USERPROFILE%\.ognivo`,
+and Claude Code's files in `%USERPROFILE%\.claude`, as on Linux in your home. Paths
+reach the model with `/` between their parts (`src/main.rs`, `C:/Users/me/proj`), which
+Windows reads as well as `\` and which JSON does not escape; a path the model copies from
+Git Bash, `/c/Users/me/proj`, is `C:\Users\me\proj` to the tools.
+
+To build it on Windows, in Git Bash: the same commands as above, and
+`scripts/package-windows.sh` makes the installer and the zips (Inno Setup 6).
+
 ## Layout
 
 | Path | What |
@@ -202,21 +222,22 @@ The renderer's sandbox stays on; `--no-sandbox` would take it off.
 | `crates/ognivo-tools` | the tools and their per-model shapes |
 | `crates/ognivo-patch` | the apply_patch (V4A) format, after OpenAI Codex (Apache-2.0) |
 | `crates/ognivo-mcp` | the MCP client and gateway: stdio, Streamable HTTP, OAuth |
+| `crates/ognivo-os` | what differs between Linux and Windows: the home directory, private files, programs by name, Git Bash, process trees (a process group, a job object), signals, the core's socket (a Unix socket, a named pipe) |
 | `crates/ognivo-protocol` | what the core and its clients say: the event model and the core's JSON-RPC methods, with their TypeScript |
 | `crates/ognivo-store` | sessions, the event log, the edit journal's contents |
 | `crates/ognivo-evals` | evaluation: T0 (recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (scenarios on fixture projects against a live server) |
 | `apps/ui` | the React UI of the GUI (React 19, Vite, Tailwind) |
 | `apps/desktop` | the Electron main process around it, which joins the page to the core |
 | `profiles/` | per-model profiles (TOML), checked templates and their goldens |
-| `scripts/` | `check.sh`, `night.sh`, the pinned llama.cpp build, benchmarks, server probes |
+| `scripts/` | `check.sh`, `night.sh`, the packages (`package.sh`, `package-windows.sh`), the pinned llama.cpp build, benchmarks, server probes |
 | `docs/` | the architecture (Russian for now), M0 measurements, research |
 
 ## Development
 
 `scripts/check.sh` runs before each commit: formatting, clippy, the workspace's tests,
 the UI's types and tests, and T0's replay of recorded completions where the recordings
-are (they stay on the machine that made them). CI runs it on every push, and the window
-end to end.
+are (they stay on the machine that made them). CI runs it on every push, on Linux and on
+Windows, and the window end to end on both.
 
 `npm run dev -w @ognivo/ui` serves the UI with hot reload at http://127.0.0.1:5180; start
 the window with `OGNIVO_UI_DEV=http://127.0.0.1:5180` to use it. In a browser, or with

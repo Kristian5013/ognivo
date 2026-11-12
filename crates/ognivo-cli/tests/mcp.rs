@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 fn echo_server() -> Value {
     let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ognivo-mcp/tests/fixtures/echo.py");
-    json!({"command": "python3", "args": ["-I", script]})
+    json!({"command": common::PYTHON, "args": ["-I", script]})
 }
 
 /// `ognivo run` in `dir/proj` with `dir` as the home, the task on stdin.
@@ -43,6 +43,7 @@ async fn run_with(dir: &Path, url: &str, flags: &[&str]) -> Output {
             .arg(dir.join("proj"))
             .args(&flags)
             .env("HOME", &dir)
+            .env("USERPROFILE", &dir)
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -224,6 +225,8 @@ async fn with_search_the_model_finds_a_tool_and_calls_it_through_mcp_call() {
     assert_eq!(last(&bodies[2]), "[mcp: echo · echo]\nhi there");
 }
 
+// the browser and the OAuth server are Python under /bin/sh
+#[cfg(unix)]
 #[test]
 fn a_remote_server_is_signed_in_to_from_the_command_line_and_out_again() {
     let (mut server, url) = common::oauth_server();
@@ -242,6 +245,7 @@ fn a_remote_server_is_signed_in_to_from_the_command_line_and_out_again() {
             .arg("--data-dir")
             .arg(dir.path().join("data"))
             .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
             .env("BROWSER", &browser)
             .env_remove("CLAUDE_CONFIG_DIR")
             .output()

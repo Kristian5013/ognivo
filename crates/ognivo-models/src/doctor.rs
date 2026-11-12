@@ -296,7 +296,7 @@ pub async fn diagnose(
 /// checkout (installed builds ship the templates elsewhere: M6).
 fn repo_paths(text: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    match root.join("profiles").canonicalize() {
+    match ognivo_os::canonicalize(root.join("profiles")) {
         Ok(profiles) => text.replace("profiles/", &format!("{}/", profiles.display())),
         Err(_) => text.to_owned(),
     }

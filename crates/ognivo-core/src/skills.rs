@@ -303,7 +303,7 @@ impl Finder<'_> {
         under: Option<PathBuf>,
     ) {
         let shown = shown(file, self.places);
-        let real = match file.canonicalize() {
+        let real = match ognivo_os::canonicalize(file) {
             Ok(real) => real,
             Err(e) => {
                 self.problems.push(format!("{shown}: {e}"));
@@ -527,11 +527,11 @@ fn read(path: &Path) -> std::io::Result<String> {
 
 fn shown(path: &Path, places: &Places) -> String {
     if let Ok(rel) = path.strip_prefix(&places.root) {
-        return rel.display().to_string();
+        return ognivo_os::slashed(rel);
     }
     match places.home.as_deref().map(|h| path.strip_prefix(h)) {
-        Some(Ok(rel)) => format!("~/{}", rel.display()),
-        _ => path.display().to_string(),
+        Some(Ok(rel)) => format!("~/{}", ognivo_os::slashed(rel)),
+        _ => ognivo_os::slashed(path),
     }
 }
 
@@ -854,6 +854,8 @@ mod tests {
         assert!(skills.command("/etc/hosts is wrong").is_none());
     }
 
+    // links need a privilege on Windows
+    #[cfg(unix)]
     #[test]
     fn a_project_skill_may_not_point_outside_the_project() {
         let tmp = tempfile::tempdir().unwrap();

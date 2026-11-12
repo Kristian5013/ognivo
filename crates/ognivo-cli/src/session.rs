@@ -1,9 +1,7 @@
 //! What `run`, `chat` and `sessions` share: the server and its profile, the project root,
 //! the data directory with the session store, and the agent's options.
 
-use std::ffi::OsString;
 use std::fmt::Display;
-use std::os::unix::ffi::OsStringExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -762,16 +760,18 @@ pub fn root(cwd: Option<&Path>) -> Result<PathBuf, Failure> {
         Some(d) => d.to_owned(),
         None => std::env::current_dir().map_err(Failure::usage)?,
     };
-    std::fs::canonicalize(&dir)
+    ognivo_os::canonicalize(&dir)
         .map_err(|_| Failure::usage(format!("{}: no such directory", dir.display())))
 }
 
 /// `dir` or `~/.ognivo/data`.
 pub fn data_dir(dir: Option<&Path>) -> Result<PathBuf, Failure> {
-    match (dir, std::env::var_os("HOME")) {
+    match (dir, ognivo_os::home()) {
         (Some(d), _) => Ok(d.to_owned()),
-        (None, Some(home)) => Ok(PathBuf::from(home).join(".ognivo/data")),
-        (None, None) => Err(Failure::usage("HOME is not set; pass --data-dir")),
+        (None, Some(home)) => Ok(home.join(".ognivo").join("data")),
+        (None, None) => Err(Failure::usage(
+            "no home directory (HOME is not set); pass --data-dir",
+        )),
     }
 }
 
@@ -798,7 +798,10 @@ fn state(changed: Option<&[PathBuf]>, known: &[PathBuf]) -> WorkspaceState {
 /// fails.
 fn changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     let top = git(root, &["rev-parse", "--show-toplevel"])?;
-    let top = PathBuf::from(OsString::from_vec(top.trim_ascii_end().to_vec()));
+    // git writes `/` between the parts, on Windows too: the OS's separator goes in
+    let top: PathBuf = ognivo_os::path_from_bytes(top.trim_ascii_end().to_vec())
+        .components()
+        .collect();
     let status = git(
         root,
         &["status", "--porcelain", "-z", "--untracked-files=all"],
@@ -808,7 +811,9 @@ fn changed_files(root: &Path) -> Option<Vec<PathBuf>> {
     while let Some(entry) = fields.next() {
         // `XY path`; a rename or copy names the old path in the next field
         let path = entry.get(3..)?;
-        changed.push(top.join(OsString::from_vec(path.to_vec())));
+        changed.push(path.split(|&b| b == b'/').fold(top.clone(), |p, part| {
+            p.join(ognivo_os::path_from_bytes(part.to_vec()))
+        }));
         if matches!(entry[0], b'R' | b'C') {
             fields.next();
         }
@@ -818,7 +823,7 @@ fn changed_files(root: &Path) -> Option<Vec<PathBuf>> {
 
 /// What a git command prints, if it succeeds.
 fn git(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let out = std::process::Command::new("git")
+    let out = ognivo_os::command("git")
         .args(["-c", "core.fsmonitor=false", "--no-pager"])
         .args(args)
         .current_dir(root)
@@ -843,29 +848,11 @@ fn user_instructions() -> UserInstructions {
 /// tools take it, or the desktop's opener. The caller shows the URL too, for when there is
 /// none.
 pub fn open_in_browser(url: &str) {
-    let opener = std::env::var("BROWSER")
-        .ok()
-        .filter(|b| !b.trim().is_empty())
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                "open".into()
-            } else {
-                "xdg-open".into()
-            }
-        });
-    let _ = std::process::Command::new(opener)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+    ognivo_os::open_in_browser(url);
 }
 
 pub fn user_dirs() -> (Option<PathBuf>, Option<PathBuf>) {
-    let home = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .map(PathBuf::from)
-        .map(|h| std::fs::canonicalize(&h).unwrap_or(h));
+    let home = ognivo_os::home().map(|h| ognivo_os::canonicalize(&h).unwrap_or(h));
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(PathBuf::from);

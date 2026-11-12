@@ -106,7 +106,7 @@ pub fn load(places: &Places) -> Templates {
         files.sort();
         for file in files {
             let shown = shown(&file, places);
-            let Ok(real) = file.canonicalize() else {
+            let Ok(real) = ognivo_os::canonicalize(&file) else {
                 continue;
             };
             if !read.insert(real.clone()) {
@@ -200,11 +200,11 @@ fn ids(names: &[String]) -> Vec<ToolId> {
 
 fn shown(path: &Path, places: &Places) -> String {
     if let Ok(rel) = path.strip_prefix(&places.root) {
-        return rel.display().to_string();
+        return ognivo_os::slashed(rel);
     }
     match places.home.as_deref().map(|h| path.strip_prefix(h)) {
-        Some(Ok(rel)) => format!("~/{}", rel.display()),
-        _ => path.display().to_string(),
+        Some(Ok(rel)) => format!("~/{}", ognivo_os::slashed(rel)),
+        _ => ognivo_os::slashed(path),
     }
 }
 

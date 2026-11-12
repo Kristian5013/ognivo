@@ -5,12 +5,14 @@
 mod common;
 
 use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
-use common::{HANG, answer_stream, call_stream, chunk, fake_server, sse};
+#[cfg(unix)]
+use common::HANG;
+use common::{answer_stream, call_stream, chunk, fake_server, sse};
 use serde_json::json;
 
 fn spawn(url: &str, root: &Path, data: &Path, stdin: &str) -> Child {
@@ -27,6 +29,7 @@ fn spawn_with(url: &str, root: &Path, data: &Path, stdin: &str, args: &[&str]) -
         .arg(root)
         // the user's own instruction files are looked for there
         .env("HOME", root.parent().unwrap())
+        .env("USERPROFILE", root.parent().unwrap())
         .env_remove("CLAUDE_CONFIG_DIR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -130,8 +133,12 @@ async fn asks_runs_and_remembers_always_for_the_session() {
         "{text}"
     );
     assert!(!text.contains("/exit"), "{text}");
-    let mode = std::fs::metadata(&history).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&history).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 }
 
 #[tokio::test]
@@ -342,6 +349,8 @@ async fn a_declined_command_tells_the_model_why() {
     );
 }
 
+// Windows has no SIGINT to send to a process
+#[cfg(unix)]
 #[tokio::test]
 async fn ctrl_c_stops_the_turn_and_the_chat_goes_on() {
     let (url, bodies) = fake_server(vec![HANG.to_owned(), answer_stream("Going on.")]).await;
@@ -395,8 +404,9 @@ async fn instruction_files_are_named_and_reach_the_model() {
     std::fs::create_dir(root.join("sub")).unwrap();
     std::fs::write(root.join("sub/AGENTS.md"), "Tests live in tests/.\n").unwrap();
     std::fs::write(root.join("sub/x.rs"), "x\n").unwrap();
-    // a link out of the project is named, not read
+    // a link out of the project is named, not read (links need a privilege on Windows)
     std::fs::write(home.join("outside.md"), "the secret").unwrap();
+    #[cfg(unix)]
     std::os::unix::fs::symlink(home.join("outside.md"), root.join("CLAUDE.md")).unwrap();
     let data = home.join("data");
     let (r, d) = (root.clone(), data.clone());
@@ -408,7 +418,12 @@ async fn instruction_files_are_named_and_reach_the_model() {
     .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{:?}\n{stdout}", out.status);
-    let banner = "\ninstructions ~/.claude/CLAUDE.md, AGENTS.md\n· not read: CLAUDE.md (a link to outside the project)\n";
+    let link = if cfg!(unix) {
+        "· not read: CLAUDE.md (a link to outside the project)\n"
+    } else {
+        ""
+    };
+    let banner = format!("\ninstructions ~/.claude/CLAUDE.md, AGENTS.md\n{link}");
     assert!(stdout.contains(&format!("{banner}/help")), "{stdout}");
     // a new conversation reads them again
     assert!(
@@ -454,6 +469,7 @@ fn sessions(data: &Path, root: &Path, args: &[&str]) -> (bool, String) {
         .arg("--cwd")
         .arg(root)
         .env("HOME", root.parent().unwrap())
+        .env("USERPROFILE", root.parent().unwrap())
         .output()
         .unwrap();
     let text = if out.status.success() {
