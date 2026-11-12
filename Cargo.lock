@@ -1186,6 +1186,7 @@ dependencies = [
  "ognivo-core",
  "ognivo-mcp",
  "ognivo-models",
+ "ognivo-os",
  "ognivo-store",
  "ognivo-tools",
  "serde",

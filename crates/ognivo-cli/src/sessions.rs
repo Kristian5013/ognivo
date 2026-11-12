@@ -126,8 +126,8 @@ fn line(r: &SessionRow, with_root: bool, home: Option<&Path>) -> String {
     );
     if with_root {
         let root = match home.and_then(|h| r.root.strip_prefix(h).ok()) {
-            Some(rel) => format!("~/{}", rel.display()),
-            None => r.root.display().to_string(),
+            Some(rel) => format!("~/{}", ognivo_os::slashed(rel)),
+            None => ognivo_os::slashed(&r.root),
         };
         line.push_str(&format!("  {}", printable(&root)));
     }

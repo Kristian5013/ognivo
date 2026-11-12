@@ -442,7 +442,7 @@ pub async fn run(s: &Scenario, t: &Target, seed: u32, out: &Path) -> Result<RunR
     }
     let root = work.join("proj");
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-    let root = std::fs::canonicalize(&root).map_err(|e| e.to_string())?;
+    let root = ognivo_os::canonicalize(&root).map_err(|e| e.to_string())?;
     let fixtures = s.prepare(&root).map_err(|e| format!("{name}: {e}"))?;
 
     let db = out.join("sessions.db");

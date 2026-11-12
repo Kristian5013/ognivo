@@ -297,9 +297,32 @@ pub async fn diagnose(
 fn repo_paths(text: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     match ognivo_os::canonicalize(root.join("profiles")) {
-        Ok(profiles) => text.replace("profiles/", &format!("{}/", profiles.display())),
+        Ok(profiles) => absolute_paths(text, &profiles),
         Err(_) => text.to_owned(),
     }
+}
+
+/// Each `profiles/...` word of `text` as a path in `profiles`: whole, in the OS's
+/// spelling, and in double quotes where it has a space ("Рабочий стол"), which bash,
+/// PowerShell and cmd alike take as one argument.
+fn absolute_paths(text: &str, profiles: &Path) -> String {
+    text.split(' ')
+        .map(|word| match word.strip_prefix("profiles/") {
+            Some(rest) => {
+                let path = rest
+                    .split('/')
+                    .fold(profiles.to_path_buf(), |p, part| p.join(part));
+                let shown = path.display().to_string();
+                if shown.contains(char::is_whitespace) {
+                    format!("\"{shown}\"")
+                } else {
+                    shown
+                }
+            }
+            None => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn note_class(
@@ -670,6 +693,33 @@ fn num(v: Option<f64>) -> String {
 mod tests {
     use super::*;
     use crate::profile::builtin;
+
+    #[test]
+    fn advice_names_a_template_by_a_path_a_shell_takes_whole() {
+        let profiles = Path::new("home")
+            .join("Рабочий стол")
+            .join("cforge")
+            .join("profiles");
+        let flags =
+            "-c 98304 --chat-template-file profiles/templates/Qwen3.8-27B/canonical.jinja -fa on";
+        let path = profiles
+            .join("templates")
+            .join("Qwen3.8-27B")
+            .join("canonical.jinja");
+        assert_eq!(
+            absolute_paths(flags, &profiles),
+            format!(
+                "-c 98304 --chat-template-file \"{}\" -fa on",
+                path.display()
+            )
+        );
+        // a path without a space goes as it is
+        let plain = Path::new("/opt/ognivo/profiles");
+        assert_eq!(
+            absolute_paths("x profiles/a/b.jinja", plain),
+            format!("x {}", plain.join("a").join("b.jinja").display())
+        );
+    }
 
     fn notes(n_ctx: u32, id: &str) -> Vec<String> {
         let profile = builtin().unwrap().into_iter().find(|p| p.id == id).unwrap();

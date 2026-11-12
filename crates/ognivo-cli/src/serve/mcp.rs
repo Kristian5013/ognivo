@@ -132,11 +132,11 @@ fn places(project: &str) -> Result<(PathBuf, Option<PathBuf>, Option<PathBuf>), 
     Ok((root, home, claude_dir))
 }
 
-/// A path as the user names it: `~/…` under the home.
+/// A path as the user names it: `~/…` under the home, with `/` between its parts.
 fn shown(path: &Path, home: Option<&Path>) -> String {
     match home.and_then(|h| path.strip_prefix(h).ok()) {
-        Some(rel) => format!("~/{}", rel.display()),
-        None => path.display().to_string(),
+        Some(rel) => format!("~/{}", ognivo_os::slashed(rel)),
+        None => ognivo_os::slashed(path),
     }
 }
 

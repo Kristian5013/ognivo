@@ -138,12 +138,7 @@ impl CredentialStore for FileStore {
             if let Some(dir) = lock.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
             }
-            let f = ognivo_os::private_file()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&lock)
-                .map_err(|e| format!("{}: {e}", lock.display()))?;
+            let f = ognivo_os::lock_file(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
             f.lock().map_err(|e| format!("{}: {e}", lock.display()))?;
             Ok(f)
         })

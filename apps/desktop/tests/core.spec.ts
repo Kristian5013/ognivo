@@ -19,6 +19,8 @@ import { gpuEnv } from "../gpu.js";
 
 const main = fileURLToPath(new URL("../main.js", import.meta.url));
 const windows = process.platform === "win32";
+// Python as the OS names it: a `python3` on Windows may be the Microsoft Store's stand-in
+const python = windows ? "python" : "python3";
 const ognivo = fileURLToPath(new URL(`../../../target/debug/ognivo${windows ? ".exe" : ""}`, import.meta.url));
 
 const chunk = (delta: object, finish: string | null = null) => ({
@@ -150,15 +152,18 @@ async function launch(replies: Reply[], serving: Serving & { profile?: string } 
   const socket = windows ? join(dir, "data", "core.pipe") : join(dir, "run/core.sock");
   Object.assign(env, gpuEnv(), {
     // the user's own instruction files and sessions stay out of it
-    HOME: dir,
-    USERPROFILE: dir,
+    OGNIVO_HOME: dir,
     OGNIVO_BIN: ognivo,
     OGNIVO_DATA_DIR: join(dir, "data"),
     OGNIVO_CORE_IDLE: "1",
     OGNIVO_INACTIVE: "1",
   });
-  if (!windows) env.OGNIVO_SOCKET = socket;
-  const app = await electron.launch({ args: [main], env });
+  // Electron's own files too, on Linux; Chromium on Windows dies at once with a profile
+  // that is not the user's (0x80000003), so there USERPROFILE stays
+  if (!windows) Object.assign(env, { HOME: dir, OGNIVO_SOCKET: socket });
+  // a window of its own: a window of another test that is not gone yet, or the user's,
+  // would hold the single-instance lock of a shared profile, and this one would quit
+  const app = await electron.launch({ args: [main, `--user-data-dir=${join(dir, "electron")}`], env });
   const page = await app.firstWindow();
   await page.getByRole("heading", { name: "New session" }).waitFor({ timeout: 30_000 });
   await page.locator("#project").fill(project);
@@ -438,13 +443,13 @@ test("the project's MCP server: trusted, its tool asks and answers", async () =>
   const echo = fileURLToPath(new URL("../../../crates/ognivo-mcp/tests/fixtures/echo.py", import.meta.url));
   writeFileSync(
     join(project, ".mcp.json"),
-    JSON.stringify({ mcpServers: { repo: { command: "python3", args: ["-I", echo] } } }),
+    JSON.stringify({ mcpServers: { repo: { command: python, args: ["-I", echo] } } }),
   );
   try {
     await page.getByRole("button", { name: "Start" }).click();
     // its command shows before it runs
     const trust = page.getByRole("dialog", { name: "Trust the project's MCP servers" });
-    await expect(trust.getByText(/python3 -I .*echo\.py/)).toBeVisible({ timeout: 30_000 });
+    await expect(trust.getByText(/python3? -I .*echo\.py/)).toBeVisible({ timeout: 30_000 });
     await trust.getByRole("button", { name: "Start them" }).click();
     const composer = page.locator("textarea");
     await expect(composer).toHaveAttribute("placeholder", /Enter sends/, { timeout: 30_000 });
@@ -474,7 +479,7 @@ test("the project's MCP server: trusted, its tool asks and answers", async () =>
     // a server of the user's own, added and removed through the form
     const form = panel.getByRole("form", { name: "Add an MCP server" });
     await form.getByLabel("Name").fill("local-echo");
-    await form.getByLabel("Command").fill(`python3 -I ${echo}`);
+    await form.getByLabel("Command").fill(`${python} -I ${echo}`);
     await form.getByRole("button", { name: "Add" }).click();
     await expect(panel.getByText("local-echo", { exact: true })).toBeVisible({ timeout: 10_000 });
     await page.screenshot({ path: "test-results/core-mcp-panel.png" });

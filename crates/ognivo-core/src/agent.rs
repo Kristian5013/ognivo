@@ -6790,7 +6790,7 @@ mod tests {
             results[1],
             format!(
                 "Base directory for this skill: {}\n\nThe version is 1.2.3.\nRun `touch released`, then report the version.\n",
-                root.join(".claude/skills/release").display()
+                ognivo_os::slashed(&root.join(".claude/skills/release"))
             )
         );
         // allowed by the skill's allowed-tools, in the turn that loaded it

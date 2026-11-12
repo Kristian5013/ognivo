@@ -15,6 +15,7 @@
 //   OGNIVO_SOCKET=path     the socket; $XDG_RUNTIME_DIR/ognivo/core.sock by default; on
 //                          Windows a pipe (\\.\pipe\NAME), by default the one core.pipe names
 //   OGNIVO_DATA_DIR=path   the data directory of the core; ~/.ognivo/data by default
+//   OGNIVO_HOME=path       the home ognivo works in, ~ above (the core's and the window's)
 //   OGNIVO_CORE_IDLE=s     how long a core this starts stays without a client (its --idle)
 
 import { spawn } from "node:child_process";
@@ -72,9 +73,10 @@ const METHODS = new Set([
   "changes/revert",
 ]);
 
-/** The core's data directory: OGNIVO_DATA_DIR, or ~/.ognivo/data. */
+/** The core's data directory: OGNIVO_DATA_DIR, or .ognivo/data in OGNIVO_HOME or the
+ * user's home, as the core has it (ognivo_os::home). */
 export function dataDir(env = process.env) {
-  return env.OGNIVO_DATA_DIR || join(homedir(), ".ognivo", "data");
+  return env.OGNIVO_DATA_DIR || join(env.OGNIVO_HOME || homedir(), ".ognivo", "data");
 }
 
 /** Where the core listens: OGNIVO_SOCKET, or $XDG_RUNTIME_DIR/ognivo/core.sock; on Windows

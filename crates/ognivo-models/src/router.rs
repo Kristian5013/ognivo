@@ -330,8 +330,7 @@ impl Inner {
             return Some(None);
         };
         let path = dir.join(format!("{}-{slot}.lock", self.keys[endpoint]));
-        let opened = ognivo_os::private_dir(dir)
-            .and_then(|()| File::options().create(true).append(true).open(&path));
+        let opened = ognivo_os::private_dir(dir).and_then(|()| ognivo_os::lock_file(&path));
         match opened.map(|f| (f.try_lock(), f)) {
             Ok((Ok(()), file)) => Some(Some(file)),
             Ok((Err(TryLockError::WouldBlock), _)) => None,

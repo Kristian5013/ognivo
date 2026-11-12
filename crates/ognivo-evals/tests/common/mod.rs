@@ -231,7 +231,7 @@ pub struct Project {
 impl Project {
     pub fn new(files: &[(&str, &str)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(dir.path()).unwrap().join("proj");
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         for (name, text) in files {
             let path = root.join(name);

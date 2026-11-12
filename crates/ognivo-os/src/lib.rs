@@ -114,8 +114,10 @@ pub fn with_slashes(path: PathBuf) -> PathBuf {
     path
 }
 
-/// The user's home directory: `$HOME` on Unix; on Windows `%USERPROFILE%`, as the window
-/// (Node's `os.homedir()`) and Claude Code have it, or `$HOME` where that is not set.
+/// The home directory ognivo works in, where `.ognivo` and Claude Code's `.claude` are:
+/// `$OGNIVO_HOME` when it is set (tests, a second profile), else the user's: `$HOME` on
+/// Unix; on Windows `%USERPROFILE%`, as the window (Node's `os.homedir()`) and Claude Code
+/// have it, or `$HOME` where that is not set. The window reads `OGNIVO_HOME` too.
 pub fn home() -> Option<PathBuf> {
     let var = |k: &str| {
         std::env::var_os(k)
@@ -123,10 +125,10 @@ pub fn home() -> Option<PathBuf> {
             .map(PathBuf::from)
     };
     #[cfg(windows)]
-    let home = var("USERPROFILE").or_else(|| var("HOME"));
+    let user = var("USERPROFILE").or_else(|| var("HOME"));
     #[cfg(not(windows))]
-    let home = var("HOME");
-    home
+    let user = var("HOME");
+    var("OGNIVO_HOME").or(user)
 }
 
 /// Creates `dir` and its parents; on Unix only the user may enter those it creates.
@@ -146,6 +148,18 @@ pub fn private_file() -> fs::OpenOptions {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     options
+}
+
+/// A file to hold a lock on (`File::lock`, `File::try_lock`): created when missing, the
+/// user's alone, and left as it is. It is opened for writing: Windows locks only through
+/// a handle that may read or write, and one that only appends may not, so its lock would
+/// fail as if another process held it.
+pub fn lock_file(path: &Path) -> io::Result<fs::File> {
+    private_file()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
 }
 
 /// `fs::canonicalize`, without the `\\?\` that Windows puts in front of a path which
@@ -476,6 +490,22 @@ mod tests {
         assert_eq!(plain(&long), long);
         // a name that merely starts like a reserved one is fine
         assert_eq!(plain(r"\\?\C:\console\com10\lpt"), r"C:\console\com10\lpt");
+    }
+
+    #[test]
+    fn a_lock_file_locks_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.lock");
+        let first = lock_file(&path).unwrap();
+        first.try_lock().unwrap();
+        // another handle, as another process would have: it waits, it does not fail
+        let second = lock_file(&path).unwrap();
+        assert!(matches!(
+            second.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        drop(first);
+        second.try_lock().unwrap();
     }
 
     #[test]

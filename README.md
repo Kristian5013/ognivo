@@ -204,7 +204,8 @@ The installer puts the window and `ognivo.exe` in `%LOCALAPPDATA%\Programs\ogniv
 your user alone, with no administrator, adds the window to the Start menu and its `bin`
 to your `PATH`, for `ognivo chat` in a terminal; the zips are the same to unpack
 anywhere, and `ognivo.exe` alone. Sessions and settings are in `%USERPROFILE%\.ognivo`,
-and Claude Code's files in `%USERPROFILE%\.claude`, as on Linux in your home. Paths
+and Claude Code's files in `%USERPROFILE%\.claude`, as on Linux in your home;
+`OGNIVO_HOME` names another home for both, to ognivo, its core and the window alike. Paths
 reach the model with `/` between their parts (`src/main.rs`, `C:/Users/me/proj`), which
 Windows reads as well as `\` and which JSON does not escape; a path the model copies from
 Git Bash, `/c/Users/me/proj`, is `C:\Users\me\proj` to the tools.

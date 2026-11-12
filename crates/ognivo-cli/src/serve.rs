@@ -97,16 +97,19 @@ pub async fn serve(a: CoreArgs) -> anyhow::Result<ExitCode> {
         return fail(format!("{}: {e}", data_dir.display()), 2);
     }
     // one core per data directory: it numbers the clients' stream in the store
-    let lock = match std::fs::File::options()
-        .create(true)
-        .append(true)
-        .open(data_dir.join("core.lock"))
-    {
+    let lock_path = data_dir.join("core.lock");
+    let lock = match ognivo_os::lock_file(&lock_path) {
         Ok(f) => f,
-        Err(e) => return fail(format!("{}: {e}", data_dir.display()), 2),
+        Err(e) => return fail(format!("{}: {e}", lock_path.display()), 2),
     };
-    if lock.try_lock().is_err() {
-        return fail(format!("another core runs on {}", data_dir.display()), 1);
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            return fail(format!("another core runs on {}", data_dir.display()), 1);
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return fail(format!("{}: {e}", lock_path.display()), 2);
+        }
     }
     let mut listener = match ipc::listen(&socket) {
         Ok(l) => l,
