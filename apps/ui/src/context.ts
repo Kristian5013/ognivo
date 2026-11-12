@@ -2,6 +2,7 @@
 // mention being written, and a message's tokens.
 
 import type { Item } from "./model.ts";
+import { relativeTo } from "./paths.ts";
 
 /** A rough count, about four bytes a token, until a core can ask the server's tokenizer. */
 export function estimateTokens(text: string): number {
@@ -13,7 +14,7 @@ const READ = /^\[read: (.+?) — lines (\d+)-(\d+) of (\d+) lines, .*?~(\d+) tok
 /** The files a session touched, relative to its project, with what reading each whole
  * cost when it did: the read tool says `~N tokens` of the lines it returned. */
 export function sessionFiles(items: Item[], project: string): Map<string, number | undefined> {
-  const rel = (p: string) => (project && p.startsWith(`${project}/`) ? p.slice(project.length + 1) : p);
+  const rel = (p: string) => relativeTo(project, p);
   const files = new Map<string, number | undefined>();
   const see = (p: string) => {
     const path = rel(p.trim());

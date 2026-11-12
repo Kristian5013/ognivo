@@ -12,6 +12,7 @@
 // whose generation ran nothing stays, as not run.
 
 import type { Generation, Item, Picture, Thread, ToolItem, ToolResult } from "./model.ts";
+import { relativeTo } from "./paths.ts";
 
 /** A call the model is writing: its tool and each argument as far as it came, in the
  * order they came, by ognivo's names (`path`, `content`, `old`, `new`, `patch`, ...). */
@@ -355,9 +356,7 @@ export class ThreadStore {
       (call?.name === "Edit" && result.text.startsWith("[edit: applied")) ||
       (call?.name === "Write" && result.text.startsWith("[write: "))
     ) {
-      const project = this.info.project;
-      const path =
-        project && call.path.startsWith(`${project}/`) ? call.path.slice(project.length + 1) : call.path;
+      const path = relativeTo(this.info.project, call.path);
       this.files.set(path, [...(this.files.get(path) ?? []), item.id]);
     } else {
       return;

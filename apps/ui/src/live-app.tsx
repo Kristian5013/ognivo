@@ -18,6 +18,7 @@ import { type Ask, type Core, CoreError } from "./core.ts";
 import { count, ending } from "./format.ts";
 import type { Picture } from "./model.ts";
 import { DEFAULT_MODE, isMode, modeInfo } from "./modes.ts";
+import { basename } from "./paths.ts";
 import profiles from "./profiles.json";
 import * as P from "./protocol.ts";
 import type { ThreadStore } from "./store.ts";
@@ -83,10 +84,6 @@ function saveSettings(s: Settings): void {
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
-}
-
-function basename(path: string): string {
-  return path.replace(/\/+$/, "").split("/").at(-1) || path;
 }
 
 const SIDEBAR = 288;

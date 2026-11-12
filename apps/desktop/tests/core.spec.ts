@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { crc32, deflateSync } from "node:zlib";
 
-import { _electron as electron, expect, test } from "@playwright/test";
+import { _electron as electron, type Locator, expect, test } from "@playwright/test";
 
 import { gpuEnv } from "../gpu.js";
 
@@ -310,8 +310,12 @@ test("plan mode: the reasoning and the call shown as the model writes them, the 
 });
 
 test("subagents show as lanes, and their threads open", async () => {
+  // a write task with more files than its lane holds
+  const files = ["Header", "Hero", "ProductsSec", "EnvironmentSec", "Footer", "Gallery", "Contacts", "Pricing"].map(
+    (c) => `components/sections/landing-page/${c}Section.tsx`,
+  );
   const tasks = [
-    { title: "Count the files", goal: "How many files are there?", mode: "read" },
+    { title: "Scale the typography", goal: "Scale every heading by 1.25.", mode: "write", files },
     { title: "Read the README", goal: "What does it say?", mode: "read" },
   ];
   const { page, close } = await launch([
@@ -332,6 +336,28 @@ test("subagents show as lanes, and their threads open", async () => {
     await expect(lanes).toHaveCount(2);
     for (const t of tasks) await expect(lanes.filter({ hasText: t.title }).getByText("done")).toBeVisible();
     await page.screenshot({ path: "test-results/core-subagents.png" });
+
+    // the files' line ends in an ellipsis before the lane's state, the title stays whole
+    const wide = lanes.filter({ hasText: "Scale the typography" });
+    const box = async (l: Locator) => (await l.boundingBox())!;
+    const line = wide.getByText(/^writes components\//);
+    const heading = wide.getByText("Scale the typography", { exact: true });
+    const [title, text, state, open, lane] = await Promise.all(
+      [heading, line, wide.getByText("done", { exact: true }), wide.getByRole("button", { name: "Open" }), wide].map(box),
+    );
+    expect(text.x + text.width).toBeLessThanOrEqual(state.x);
+    expect(state.x + state.width).toBeLessThanOrEqual(open.x);
+    expect(open.x + open.width).toBeLessThanOrEqual(lane.x + lane.width);
+    expect(title.width).toBeGreaterThan(0);
+    // whole to the fraction of a pixel: an ellipsis shows for less than scrollWidth counts
+    const whole = (e: Element) => {
+      const r = document.createRange();
+      r.selectNodeContents(e);
+      return r.getBoundingClientRect().width <= e.getBoundingClientRect().width;
+    };
+    expect(await heading.evaluate(whole)).toBe(true);
+    expect(await line.evaluate(whole)).toBe(false);
+    await expect(line).toHaveAttribute("title", files.join("\n"));
 
     await lanes.filter({ hasText: "Read the README" }).getByRole("button", { name: "Open" }).click();
     await expect(page.getByText("A subagent's thread")).toBeVisible();

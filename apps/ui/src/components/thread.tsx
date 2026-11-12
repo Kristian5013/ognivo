@@ -270,7 +270,7 @@ function Content({ store, row, dropped }: { store: ThreadStore; row: Row; droppe
         case "void":
           return <Void item={item} />;
         case "subagent":
-          return <SubagentCard item={item} live={row.live} />;
+          return <SubagentCard item={item} live={row.live} project={store.info.project} />;
       }
     }
   }

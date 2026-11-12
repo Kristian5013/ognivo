@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useMemo, useSyncExternalStore }
 
 import { summary } from "../format.ts";
 import type { Picture, SubagentItem } from "../model.ts";
+import { relativeTo } from "../paths.ts";
 import type { ThreadStore } from "../store.ts";
 
 /** What a thread's rows can do on the core: lead to a subagent's thread, and write a turn's
@@ -54,8 +55,9 @@ function ending(end: string): [string, string] {
 }
 
 /** A subagent's lane: its task, what it does now, and how it ended; its thread a click
- * away. */
-export function SubagentCard({ item, live }: { item: SubagentItem; live: boolean }) {
+ * away. Its files are relative to `project`; a line too long for the lane ends in an
+ * ellipsis and shows whole on hover, the task's title last of all. */
+export function SubagentCard({ item, live, project = "" }: { item: SubagentItem; live: boolean; project?: string }) {
   const nav = useContext(ThreadNavContext);
   const child = item.thread === undefined ? undefined : nav?.store(item.thread);
   const subscribe = useCallback((l: () => void) => (child ? child.subscribeList(l) : NOTHING()), [child]);
@@ -63,24 +65,38 @@ export function SubagentCard({ item, live }: { item: SubagentItem; live: boolean
   const now = useMemo(() => (live ? activity(child) : undefined), [child, live, version]);
   const [label, tone] = item.end ? ending(item.end) : ["working", "text-spark"];
   const canOpen = nav !== undefined && item.thread !== undefined && child !== undefined;
+  const writes = item.write?.map((p) => relativeTo(project, p));
+  const changed = item.changed.map((p) => relativeTo(project, p));
   return (
     <div className={`lane ${live ? "lane-live" : ""} flex min-w-0 items-center gap-3 rounded-md border border-border bg-panel px-3 py-1.5`}>
       <span className="grid size-5 shrink-0 place-items-center rounded-full bg-raised font-mono text-[11px] text-spark">
         {item.index + 1}
       </span>
-      <span className="min-w-0 flex-1">
+      <span className="min-w-0 flex-1 overflow-hidden">
         <span className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate font-medium">{item.title}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">
-            {item.write ? `writes ${item.write.join(", ")}` : "reads"}
+          <span className="min-w-0 truncate font-medium" title={item.title}>
+            {item.title}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground" title={writes?.join("\n")}>
+            {writes ? `writes ${writes.join(", ")}` : "reads"}
           </span>
         </span>
-        {now && <span className="block truncate font-mono text-[11px] text-muted-foreground">{now}</span>}
-        {!live && item.changed.length > 0 && (
-          <span className="block truncate font-mono text-[11px] text-muted-foreground">changed {item.changed.join(", ")}</span>
+        {now && (
+          <span className="block truncate font-mono text-[11px] text-muted-foreground" title={now}>
+            {now}
+          </span>
+        )}
+        {!live && changed.length > 0 && (
+          <span className="block truncate font-mono text-[11px] text-muted-foreground" title={changed.join("\n")}>
+            changed {changed.join(", ")}
+          </span>
         )}
       </span>
-      {item.steps !== undefined && <span className="shrink-0 text-[11px] text-muted-foreground">{item.steps} steps</span>}
+      {item.steps !== undefined && (
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          {item.steps} {item.steps === 1 ? "step" : "steps"}
+        </span>
+      )}
       <span className={`shrink-0 text-[12px] font-medium ${tone} ${live ? "ember-text" : ""}`}>{label}</span>
       {canOpen && (
         <button
