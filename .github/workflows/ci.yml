@@ -1,8 +1,8 @@
 # What scripts/check.sh checks before each commit (formatting, lints, the tests of the
-# workspace and of the UI), the UI's build, and the GUI end to end: a session in a real
-# window on a real core, against a fake llama-server. On Linux and on Windows, where the
-# shell of the agent is Git Bash, as it is for a user there. No GPU and no model here: the
-# live evaluations (T2) run where the models are.
+# workspace and of the VS Code extension), the extension's build, and the extension end to
+# end: a session in a real VS Code on a real core, against a fake llama-server. On Linux
+# and on Windows, where the shell of the agent is Git Bash, as it is for a user there. No
+# GPU and no model here: the live evaluations (T2) run where the models are.
 name: CI
 
 on:
@@ -23,6 +23,8 @@ env:
   CARGO_TERM_COLOR: always
   # Cargo.toml's rust-version: the lints the code is written against
   RUST_TOOLCHAIN: "1.99.0"
+  # the VS Code the extension is tested in end to end
+  OGNIVO_VSCODE: "1.146.0"
 
 jobs:
   check:
@@ -41,10 +43,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: scripts/check.sh
-      - run: npm run build -w @ognivo/ui
+      - run: npm run build -w apps/vscode
 
   e2e:
-    name: the GUI end to end
+    name: the extension end to end
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7.0.1
@@ -59,16 +61,16 @@ jobs:
           cache: npm
       - run: cargo build --locked -p ognivo-cli
       - run: npm ci
-      - run: npm run install-electron -w @ognivo/desktop
-      - run: npm run build -w @ognivo/ui
-      # Ubuntu 24.04 keeps Chromium's sandbox from unprivileged user namespaces (README)
+      - run: npm run build -w apps/vscode
+      # Ubuntu 24.04 keeps Chromium's sandbox, VS Code's too, from unprivileged user
+      # namespaces
       - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: xvfb-run -a npm run e2e -w @ognivo/desktop
+      - run: xvfb-run -a npm run e2e -w apps/vscode
       - if: failure()
         uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-results
-          path: apps/desktop/test-results
+          path: apps/vscode/test-results
           if-no-files-found: ignore
 
   check-windows:
@@ -92,7 +94,7 @@ jobs:
       - run: scripts/check.sh
 
   e2e-windows:
-    name: the GUI end to end on Windows
+    name: the extension end to end on Windows
     runs-on: windows-2025
     defaults:
       run:
@@ -110,12 +112,11 @@ jobs:
           cache: npm
       - run: cargo build --locked -p ognivo-cli
       - run: npm ci
-      - run: npm run install-electron -w @ognivo/desktop
-      - run: npm run build -w @ognivo/ui
-      - run: npm run e2e -w @ognivo/desktop
+      - run: npm run build -w apps/vscode
+      - run: npm run e2e -w apps/vscode
       - if: failure()
         uses: actions/upload-artifact@v7.0.2
         with:
           name: e2e-results-windows
-          path: apps/desktop/test-results
+          path: apps/vscode/test-results
           if-no-files-found: ignore

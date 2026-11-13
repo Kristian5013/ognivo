@@ -2418,16 +2418,17 @@ mod tests {
         (url, prompts, bodies, warm, pieces)
     }
 
-    /// The UI's profiles.json (apps/ui/scripts/profiles.mjs) says what the profiles say: the
+    /// The panel's profiles.json (apps/vscode/scripts/profiles.mjs) says what the profiles say: the
     /// form of a new thread offers the Native path, the levels and the contexts by it.
     #[test]
     fn the_uis_profiles_say_what_the_profiles_do() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let text = std::fs::read_to_string(repo.join("apps/ui/src/profiles.json")).unwrap();
+        let text =
+            std::fs::read_to_string(repo.join("apps/vscode/src/shared/profiles.json")).unwrap();
         let ui: Value = serde_json::from_str(&text).unwrap();
         for p in profile::builtin().unwrap() {
             let u = &ui[&p.id];
-            let again = "write it again: npm run profiles (apps/ui)";
+            let again = "write it again: npm run profiles -w apps/vscode";
             assert_eq!(u["native"], json!(reads(p.family)), "{}: {again}", p.id);
             assert_eq!(
                 u["reasoning"],

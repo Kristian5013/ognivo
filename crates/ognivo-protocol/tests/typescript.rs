@@ -1,6 +1,6 @@
-//! The TypeScript of the event model and of the core's methods, which the GUI imports
-//! (`apps/ui/src/protocol.ts`), is what the Rust types make of it:
-//! `OGNIVO_BLESS=1 cargo test -p ognivo-protocol` writes it again after a change.
+//! The TypeScript of the event model and of the core's methods, which the VS Code
+//! extension imports (`apps/vscode/src/shared/protocol.ts`), is what the Rust types make
+//! of it: `OGNIVO_BLESS=1 cargo test -p ognivo-protocol` writes it again after a change.
 
 use std::path::Path;
 
@@ -68,6 +68,8 @@ fn typescript() -> String {
         Accepted::decl(&cfg),
         Revert::decl(&cfg),
         Reverted::decl(&cfg),
+        BaseOf::decl(&cfg),
+        Base::decl(&cfg),
         Done::decl(&cfg),
         ItemRef::decl(&cfg),
         ApprovalAsked::decl(&cfg),
@@ -122,6 +124,7 @@ fn typescript() -> String {
         method::<ThreadRef, Changes>(&cfg, rpc::CHANGES_LIST),
         method::<Accept, Accepted>(&cfg, rpc::CHANGES_ACCEPT),
         method::<Revert, Reverted>(&cfg, rpc::CHANGES_REVERT),
+        method::<BaseOf, Base>(&cfg, rpc::CHANGES_BASE),
     ];
     let asks = [
         method::<ApprovalAsked, ApprovalAnswer>(&cfg, rpc::APPROVAL_ASK),
@@ -161,8 +164,9 @@ fn typescript() -> String {
 }
 
 #[test]
-fn the_gui_has_the_event_model_as_the_core_sends_it() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/ui/src/protocol.ts");
+fn the_extension_has_the_event_model_as_the_core_sends_it() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/vscode/src/shared/protocol.ts");
     let want = typescript();
     if std::env::var_os("OGNIVO_BLESS").is_some() {
         std::fs::write(&path, &want).unwrap();
@@ -176,17 +180,17 @@ fn the_gui_has_the_event_model_as_the_core_sends_it() {
     );
 }
 
-/// The window lets the page call every method of a client: one its list leaves out never
+/// The extension lets its page call every method of a client: one its list leaves out never
 /// reaches the core (`thread/mode` did not, at first).
 #[test]
-fn the_window_lets_the_page_call_every_method() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/desktop/core.js");
+fn the_extension_lets_the_page_call_every_method() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/vscode/src/core.ts");
     let js = std::fs::read_to_string(&path).unwrap();
     let allowed = js
         .split("const METHODS = new Set([")
         .nth(1)
         .and_then(|rest| rest.split("]);").next())
-        .expect("core.js has its METHODS");
+        .expect("core.ts has its METHODS");
     let ts = typescript();
     let methods = ts
         .split("export type Methods = {\n")

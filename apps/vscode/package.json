@@ -1,0 +1,376 @@
+{
+  "name": "ognivo",
+  "displayName": "ognivo",
+  "description": "A coding agent for your own models on llama.cpp's llama-server",
+  "version": "0.0.1",
+  "publisher": "ognivo",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kristian5013/ognivo"
+  },
+  "icon": "media/icon.png",
+  "engines": {
+    "vscode": "^1.140.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "keywords": [
+    "llama.cpp",
+    "llama-server",
+    "local models",
+    "agent",
+    "gguf"
+  ],
+  "main": "./dist/extension.cjs",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ognivo",
+          "title": "ognivo",
+          "icon": "media/ognivo.svg"
+        }
+      ]
+    },
+    "views": {
+      "ognivo": [
+        {
+          "type": "webview",
+          "id": "ognivo.chat",
+          "name": "Agent",
+          "initialSize": 4
+        },
+        {
+          "id": "ognivo.changes",
+          "name": "Changes",
+          "icon": "media/ognivo.svg",
+          "initialSize": 1
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "ognivo.changes",
+        "contents": "Nothing unreviewed: the agent's edits of the open session show here, to look at, accept or revert."
+      }
+    ],
+    "commands": [
+      {
+        "command": "ognivo.newSession",
+        "title": "New Session",
+        "category": "ognivo",
+        "icon": "$(add)"
+      },
+      {
+        "command": "ognivo.openSession",
+        "title": "Open a Session…",
+        "category": "ognivo",
+        "icon": "$(history)"
+      },
+      {
+        "command": "ognivo.openInEditor",
+        "title": "Open the Agent in an Editor Tab",
+        "category": "ognivo",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "ognivo.focus",
+        "title": "Focus the Agent",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.addSelection",
+        "title": "Add the Selection to the Message",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.addFile",
+        "title": "Add the File to the Message",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.chooseModel",
+        "title": "Choose the Server and the Model…",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.settings",
+        "title": "Settings",
+        "category": "ognivo",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "ognivo.showLog",
+        "title": "Show the Core's Log",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.changes.open",
+        "title": "Open the Change",
+        "category": "ognivo",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "ognivo.changes.openFile",
+        "title": "Open the File",
+        "category": "ognivo",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "ognivo.changes.accept",
+        "title": "Accept",
+        "category": "ognivo",
+        "icon": "$(check)"
+      },
+      {
+        "command": "ognivo.changes.revert",
+        "title": "Revert",
+        "category": "ognivo",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "ognivo.changes.acceptAll",
+        "title": "Accept All",
+        "category": "ognivo",
+        "icon": "$(check-all)"
+      },
+      {
+        "command": "ognivo.changes.refresh",
+        "title": "Refresh",
+        "category": "ognivo",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ognivo.newSession",
+          "when": "view == ognivo.chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ognivo.openSession",
+          "when": "view == ognivo.chat",
+          "group": "navigation@2"
+        },
+        {
+          "command": "ognivo.openInEditor",
+          "when": "view == ognivo.chat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "ognivo.settings",
+          "when": "view == ognivo.chat",
+          "group": "navigation@4"
+        },
+        {
+          "command": "ognivo.chooseModel",
+          "when": "view == ognivo.chat",
+          "group": "more@1"
+        },
+        {
+          "command": "ognivo.showLog",
+          "when": "view == ognivo.chat",
+          "group": "more@2"
+        },
+        {
+          "command": "ognivo.changes.acceptAll",
+          "when": "view == ognivo.changes && ognivo.unreviewed",
+          "group": "navigation@1"
+        },
+        {
+          "command": "ognivo.changes.refresh",
+          "when": "view == ognivo.changes",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ognivo.changes.openFile",
+          "when": "view == ognivo.changes && viewItem =~ /^file/ && viewItem != file.deleted",
+          "group": "inline@1"
+        },
+        {
+          "command": "ognivo.changes.revert",
+          "when": "view == ognivo.changes && viewItem =~ /^file/",
+          "group": "inline@2"
+        },
+        {
+          "command": "ognivo.changes.accept",
+          "when": "view == ognivo.changes && viewItem =~ /^file/",
+          "group": "inline@3"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "ognivo.addSelection",
+          "when": "editorHasSelection",
+          "group": "9_ognivo@1"
+        },
+        {
+          "command": "ognivo.addFile",
+          "when": "resourceScheme == file",
+          "group": "9_ognivo@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "ognivo.addFile",
+          "when": "!explorerResourceIsFolder",
+          "group": "9_ognivo@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "ognivo.addFile",
+          "when": "resourceScheme == file",
+          "group": "9_ognivo@1"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "ognivo.changes.open",
+          "when": "false"
+        },
+        {
+          "command": "ognivo.changes.openFile",
+          "when": "false"
+        },
+        {
+          "command": "ognivo.changes.accept",
+          "when": "false"
+        },
+        {
+          "command": "ognivo.changes.revert",
+          "when": "false"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "ognivo.focus",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "!editorHasSelection || !editorTextFocus"
+      },
+      {
+        "command": "ognivo.addSelection",
+        "key": "ctrl+alt+o",
+        "mac": "cmd+alt+o",
+        "when": "editorTextFocus && editorHasSelection"
+      }
+    ],
+    "configuration": {
+      "title": "ognivo",
+      "properties": {
+        "ognivo.server": {
+          "type": "string",
+          "default": "http://127.0.0.1:8080",
+          "markdownDescription": "The llama-server a new session works with, or llama-server's router. ognivo never starts one.",
+          "order": 1
+        },
+        "ognivo.model": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Behind llama-server's router: the model of a new session, by its id. Empty: the one the router runs.",
+          "order": 2
+        },
+        "ognivo.profile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The model's profile (`profiles/*.toml`). Empty: the one that fits the server's model.",
+          "order": 3
+        },
+        "ognivo.reasoning": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The reasoning level of a new session (`xhigh`, `medium`, `low`, `off`, as the model has them). Empty: the model's default.",
+          "order": 4
+        },
+        "ognivo.context": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Tokens of working context of a new session. 0: the profile's, within the server's window (`-c`).",
+          "order": 5
+        },
+        "ognivo.mode": {
+          "type": "string",
+          "enum": [
+            "manual",
+            "edit_automatically",
+            "plan",
+            "auto"
+          ],
+          "enumDescriptions": [
+            "Asks before every edit, and before every command that does more than read.",
+            "Edits apply at once, to review in Changes; commands ask as usual.",
+            "Reads and plans, and changes nothing: you carry the plan out when it is ready.",
+            "Edits and runs commands without asking; protected files, files outside the project and your rules still ask."
+          ],
+          "default": "edit_automatically",
+          "markdownDescription": "The mode a new session starts in. The composer switches it at any time (Shift+Tab).",
+          "order": 6
+        },
+        "ognivo.native": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "The Native path: ognivo renders the model's format itself (gpt-oss, Qwen).",
+          "order": 7
+        },
+        "ognivo.subagents": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "The agent may hand parts of a task to subagents of its own (llama-server `-np 2` or more).",
+          "order": 8
+        },
+        "ognivo.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "The `ognivo` program the core runs as. Empty: the one this extension ships, else `ognivo` on `PATH`.",
+          "order": 9
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "watch": "node scripts/build.mjs --watch",
+    "check": "tsc -p tsconfig.json && tsc -p src/webview/tsconfig.json",
+    "test": "vitest run",
+    "package": "node scripts/package.mjs",
+    "profiles": "node scripts/profiles.mjs",
+    "fixtures": "node scripts/fixtures.mjs",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@vscode/codicons": "0.0.45",
+    "markdown-it": "14.3.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-virtuoso": "4.18.19"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/markdown-it": "14.2.0",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/vscode": "1.140.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "4.1.0",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.5"
+  }
+}

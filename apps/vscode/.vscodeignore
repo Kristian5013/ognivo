@@ -1,0 +1,12 @@
+# What the .vsix holds: package.json, dist/ (the extension and its page, with the npm
+# packages they bundle), media/, bin/ (the core, in a platform's package), README.md,
+# LICENSE and THIRD-PARTY-LICENSES.txt. Everything else stays out.
+**
+!package.json
+!dist/**
+!media/ognivo.svg
+!media/icon.png
+!bin/**
+!README.md
+!LICENSE
+!THIRD-PARTY-LICENSES.txt

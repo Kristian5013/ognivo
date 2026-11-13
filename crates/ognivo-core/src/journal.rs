@@ -269,6 +269,12 @@ impl Journal {
             .collect()
     }
 
+    /// What `path` held before its first unreviewed change: `Some(None)` for a file the
+    /// agent created, `None` for a file without an unreviewed change.
+    pub fn base(&self, path: &Path) -> Option<Option<&[u8]>> {
+        self.files.get(path).map(|e| e.base.as_deref())
+    }
+
     /// Commands with side effects since the last accept.
     pub fn side_effects(&self) -> &[String] {
         &self.side_effects
@@ -424,6 +430,22 @@ mod tests {
         fn read(&self, name: &str) -> Option<String> {
             fs::read_to_string(self.root.join(name)).ok()
         }
+    }
+
+    #[test]
+    fn the_base_is_what_a_file_had_before_its_first_unreviewed_change() {
+        let mut p = Project::new();
+        let (a, b) = (p.root.join("a.txt"), p.root.join("b.txt"));
+        assert_eq!(p.journal.base(&a), None);
+        p.write("a.txt", "one\nTWO\n");
+        p.write("a.txt", "one\nTWO\nthree\n");
+        p.write("b.txt", "new\n");
+        // before the first of both writes, not between them
+        assert_eq!(p.journal.base(&a), Some(Some(&b"one\ntwo\n"[..])));
+        // the agent created it
+        assert_eq!(p.journal.base(&b), Some(None));
+        p.journal.accept(Some(&a)).unwrap();
+        assert_eq!(p.journal.base(&a), None);
     }
 
     #[test]

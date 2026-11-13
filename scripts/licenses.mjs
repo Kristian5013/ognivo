@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// THIRD-PARTY-LICENSES.txt of the packages (scripts/package.sh): the code of others that
-// they carry, with its licenses. ognivo links crates, and the window bundles npm packages
-// in its UI; Electron's and Chromium's notices come with Electron itself.
+// THIRD-PARTY-LICENSES.txt of the packages (scripts/package.sh, apps/vscode/scripts/
+// package.mjs): the code of others that they carry, with its licenses. ognivo links
+// crates, and the VS Code extension bundles npm packages in its code and its page.
 //
 //   node scripts/licenses.mjs [TARGET] > THIRD-PARTY-LICENSES.txt
 //
@@ -9,7 +9,7 @@
 // x86_64-pc-windows-msvc for Windows), from `cargo metadata` and the lockfile:
 // normal dependencies, not those of build scripts or tests, and no proc macros, which run
 // in the compiler. npm: the workspace's packages that are not only for development
-// (package-lock.json), which are the UI's.
+// (package-lock.json), which are what the extension bundles.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -101,14 +101,13 @@ function npm() {
 
 const groups = [
   ["Crates that ognivo links", crates()],
-  ["npm packages that the window bundles", npm()],
+  ["npm packages that the VS Code extension bundles", npm()],
 ];
 const out = [
   "The code of others that ognivo's packages carry, and its licenses.",
   "",
-  "ognivo links the crates below, and its window bundles the npm packages below in its",
-  "UI. The window is Electron, with Chromium: their notices are Electron's LICENSE and",
-  "LICENSES.chromium.html, beside the window's binary.",
+  "ognivo links the crates below, and its VS Code extension bundles the npm packages",
+  "below in its code and its page.",
 ];
 const byText = new Map();
 for (const [title, list] of groups) {

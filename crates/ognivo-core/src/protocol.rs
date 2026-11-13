@@ -1075,7 +1075,7 @@ mod tests {
             .collect()
     }
 
-    /// The stream every client is tested on (`apps/ui/fixtures/stream.jsonl`) is what the
+    /// The stream every client is tested on (`apps/vscode/fixtures/stream.jsonl`) is what the
     /// projector makes of the turn above: `OGNIVO_BLESS=1 cargo test -p ognivo-core
     /// protocol` writes it again.
     #[test]
@@ -1085,7 +1085,7 @@ mod tests {
             .map(|e| serde_json::to_string(e).unwrap() + "\n")
             .collect();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../apps/ui/fixtures/stream.jsonl");
+            .join("../../apps/vscode/fixtures/stream.jsonl");
         if std::env::var_os("OGNIVO_BLESS").is_some() {
             std::fs::write(&path, &lines).unwrap();
         }

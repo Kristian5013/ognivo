@@ -1,7 +1,7 @@
 # Rust
 /target/
 
-# Node / Electron
+# Node
 node_modules/
 dist/
 out/
@@ -9,6 +9,8 @@ out/
 # Playwright's results and reports
 test-results/
 playwright-report/
+# the VS Code the extension's end-to-end test downloads
+.vscode-test/
 
 # Python (dev-only harnesses)
 __pycache__/

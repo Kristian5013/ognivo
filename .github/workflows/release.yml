@@ -1,9 +1,10 @@
-# The packages of a release. Linux's (scripts/package.sh): the .deb, the AppImage and the
-# tarball of ognivo, built on Ubuntu 22.04, the oldest system they are for: glibc is what
-# ognivo needs of one. Windows' (scripts/package-windows.sh): the installer, the zip of the
-# window and the zip of ognivo.exe, built on Windows Server 2025. A tag v<version> pushed
-# puts them all, with one SHA256SUMS, into a draft release, to look at and publish by hand;
-# run by hand, the workflow keeps each system's packages as its artifacts.
+# The packages of a release. Linux's (scripts/package.sh): the VS Code extension for
+# linux-x64 with ognivo in it, and the tarball of ognivo, built on Ubuntu 22.04, the oldest
+# system they are for: glibc is what ognivo needs of one. Windows' (scripts/
+# package-windows.sh): the extension for win32-x64 with ognivo.exe in it, and the zip of
+# ognivo.exe, built on Windows Server 2025. A tag v<version> pushed puts them all, with one
+# SHA256SUMS, into a draft release, to look at and publish by hand; run by hand, the
+# workflow keeps each system's packages as its artifacts.
 name: Release
 
 on:
@@ -34,7 +35,6 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run install-electron -w @ognivo/desktop
       - name: the tag is the version
         if: github.ref_type == 'tag'
         run: |
@@ -48,8 +48,7 @@ jobs:
         with:
           name: linux
           path: |
-            out/ognivo_*_amd64.deb
-            out/ognivo-*-x86_64.AppImage
+            out/ognivo-*-linux-x64.vsix
             out/ognivo-*-x86_64-linux.tar.gz
           retention-days: 14
 
@@ -72,15 +71,13 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - run: npm run install-electron -w @ognivo/desktop
       - run: scripts/package-windows.sh
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: windows
           path: |
-            out/ognivo-*-x86_64-windows-setup.exe
+            out/ognivo-*-win32-x64.vsix
             out/ognivo-*-x86_64-windows.zip
-            out/ognivo-*-x86_64-windows-cli.zip
           retention-days: 14
 
   release:

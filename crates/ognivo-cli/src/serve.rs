@@ -311,6 +311,10 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
             let command = |reply| thread::Command::Revert(p.path, p.force, reply);
             thread::command(hub, p.thread, command).await
         }
+        rpc::CHANGES_BASE => {
+            let p: rpc::BaseOf = parse(params)?;
+            thread::command(hub, p.thread, |reply| thread::Command::Base(p.path, reply)).await
+        }
         rpc::THREAD_CLEAR
         | rpc::THREAD_CLOSE
         | rpc::TURN_INTERRUPT

@@ -67,6 +67,7 @@ pub enum Command {
     Changes(oneshot::Sender<Reply>),
     Accept(Option<String>, oneshot::Sender<Reply>),
     Revert(String, bool, oneshot::Sender<Reply>),
+    Base(String, oneshot::Sender<Reply>),
     Clear(oneshot::Sender<Reply>),
     Close(oneshot::Sender<Reply>),
 }
@@ -82,6 +83,7 @@ impl Command {
             | Command::Changes(r)
             | Command::Accept(_, r)
             | Command::Revert(_, _, r)
+            | Command::Base(_, r)
             | Command::Clear(r)
             | Command::Close(r) => r,
         };
@@ -791,6 +793,7 @@ impl Actor {
                 Command::Changes(reply) => (reply, self.changes()),
                 Command::Accept(file, reply) => (reply, self.accept(file)),
                 Command::Revert(file, force, reply) => (reply, self.revert(&file, force)),
+                Command::Base(file, reply) => (reply, self.base(&file)),
                 Command::Clear(reply) => {
                     self.agent.clear();
                     self.first = instructions(&self.agent);
@@ -994,6 +997,20 @@ impl Actor {
             .map_err(|e| RpcError::new(rpc::error::JOURNAL, e.to_string()))?;
         reply(rpc::Reverted {
             removed: how == Reverted::Removed,
+        })
+    }
+
+    /// What a changed file held before its first unreviewed change, for a client's diff.
+    fn base(&self, file: &str) -> Reply {
+        let path = files::resolve(&self.root, file);
+        let Some(base) = self.agent.change_base(&path) else {
+            return Err(RpcError::new(
+                rpc::error::JOURNAL,
+                format!("{file}: no unreviewed change by ognivo"),
+            ));
+        };
+        reply(rpc::Base {
+            text: base.map(|b| String::from_utf8_lossy(b).into_owned()),
         })
     }
 }

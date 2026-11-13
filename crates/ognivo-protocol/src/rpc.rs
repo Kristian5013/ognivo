@@ -38,6 +38,7 @@ pub const THREAD_MODE: &str = "thread/mode";
 pub const CHANGES_LIST: &str = "changes/list";
 pub const CHANGES_ACCEPT: &str = "changes/accept";
 pub const CHANGES_REVERT: &str = "changes/revert";
+pub const CHANGES_BASE: &str = "changes/base";
 
 /// The core's notification of an event.
 pub const EVENT: &str = "event";
@@ -369,6 +370,22 @@ pub struct Revert {
 pub struct Reverted {
     /// The agent had created the file, and it is gone.
     pub removed: bool,
+}
+
+/// `changes/base`: what a file with an unreviewed change held before it, which a client
+/// shows the file's change against (the editor's own diff).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct BaseOf {
+    pub thread: ThreadId,
+    /// As `changes/list` names it: relative to the project root inside it, absolute outside.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Base {
+    /// The text before the first unreviewed change, bytes that are not UTF-8 replaced;
+    /// `None` for a file the agent created.
+    pub text: Option<String>,
 }
 
 /// The result of a method that returns nothing.

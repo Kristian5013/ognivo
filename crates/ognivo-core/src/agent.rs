@@ -1526,6 +1526,11 @@ impl Agent {
         self.journal.side_effects()
     }
 
+    /// What `path` held before its first unreviewed change ([`Journal::base`]).
+    pub fn change_base(&self, path: &Path) -> Option<Option<&[u8]>> {
+        self.journal.base(path)
+    }
+
     /// Whether changes from before the session still wait for an accept.
     pub fn inherited_changes(&self) -> bool {
         self.journal.inherited()
