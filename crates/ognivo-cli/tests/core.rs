@@ -717,6 +717,14 @@ async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
             .any(|e| e["event"] == "thread_rewound")
     );
 
+    // listed by another spelling of the project's path, as VS Code names `C:\` as `c:\`
+    let spelled = root.join("sub").join("..");
+    std::fs::create_dir(root.join("sub")).unwrap();
+    let list = a
+        .ok("thread/list", json!({"project": spelled, "limit": null}))
+        .await;
+    assert_eq!(list["threads"][0]["thread"], thread, "{list}");
+
     // deleted, it is gone from the list and the store, and closed
     a.ok("thread/delete", json!({"thread": thread})).await;
     let list = a

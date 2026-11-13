@@ -1299,7 +1299,8 @@ const TOOLCHAIN: &[&str] = &[
 /// The machine the commands run on, and the programs of [`TOOLCHAIN`] on its PATH. On
 /// Windows the shell is Git Bash: told nothing, gpt-oss took itself for a Linux
 /// container, looked for gcc with `which` and said it could not compile, with MSVC on the
-/// PATH (2026-11-13).
+/// PATH (2026-11-13). Git Bash also turns an argument that starts with `/` into a path:
+/// `cl /EHsc`, MSVC's own way, reaches cl as `C:/Program Files/Git/EHsc`.
 fn machine_note() -> String {
     let found: Vec<&str> = TOOLCHAIN
         .iter()
@@ -1315,7 +1316,7 @@ fn machine_note() -> String {
     };
     if cfg!(windows) {
         format!(
-            "The machine runs Windows, not Linux. Commands run in Git Bash, the bash of Git for Windows: its syntax and tools (ls, grep, sed, find), paths as C:/Users/me or /c/Users/me, and Windows programs by name (`cl`, `python`, `where`; `.exe` is not needed).{on_path}"
+            "The machine runs Windows, not Linux. Commands run in Git Bash, the bash of Git for Windows: its syntax and tools (ls, grep, sed, find), paths as C:/Users/me or /c/Users/me, and Windows programs by name (`cl`, `python`, `where`; `.exe` is not needed). Git Bash turns an argument that starts with / into a path (`/EHsc` becomes C:/Program Files/Git/EHsc): give a Windows program its switches with - (`cl -nologo -EHsc main.cpp`), or with // (`cmd //c dir`).{on_path}"
         )
     } else {
         format!(

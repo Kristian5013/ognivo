@@ -4,7 +4,7 @@
 //! clients review what it changed.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -130,7 +130,11 @@ pub async fn command(
 }
 
 pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
-    let project = a.project.map(PathBuf::from);
+    // as a session keeps its root: canonical. VS Code names `C:\` as `c:\`, and the store
+    // compares the bytes (2026-11-13: a new session's page listed no recent sessions)
+    let project = a
+        .project
+        .map(|p| ognivo_os::canonicalize(Path::new(&p)).unwrap_or_else(|_| PathBuf::from(p)));
     let rows = lock(&hub.reader)
         .sessions(project.as_deref(), a.limit.unwrap_or(200))
         .map_err(store_error)?;
