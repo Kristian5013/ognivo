@@ -26,6 +26,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
@@ -68,7 +69,21 @@ const METHODS = new Set([
   "changes/accept",
   "changes/revert",
   "changes/base",
+  "core/quit",
 ]);
+
+/** A variable of VS Code's own process, which the core and what it starts must not get:
+ * `ELECTRON_RUN_AS_NODE` would turn `code` in the agent's commands into node. */
+function editors(name: string): boolean {
+  return /^(VSCODE_|ELECTRON_)/i.test(name) || name.toUpperCase() === "CHROME_CRASHPAD_PIPE_NAME";
+}
+
+/** The environment of a core this starts: the extension's without VS Code's own. */
+export function coreEnv(env: Env = process.env): Env {
+  const out: Env = {};
+  for (const [k, v] of Object.entries(env)) if (v !== undefined && !editors(k)) out[k] = v;
+  return out;
+}
 
 type Env = NodeJS.ProcessEnv;
 
@@ -119,15 +134,58 @@ export function binary(setting: string, extension: string, env: Env = process.en
   return built[0] ?? "ognivo";
 }
 
+/** Where the copies of the shipped binary are, which the cores this extension starts run. */
+export function cacheBin(env: Env = process.env): string {
+  const cache = WINDOWS
+    ? join(env.LOCALAPPDATA || join(env.USERPROFILE || homedir(), "AppData", "Local"), "ognivo")
+    : join(env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache"), "ognivo");
+  return join(cache, "bin");
+}
+
+/** The process ids of cores that run a copy of [`cacheBin`] other than `bin`: started by an
+ * older build of the extension. */
+export async function staleCores(bin: string, env: Env = process.env): Promise<number[]> {
+  const dir = cacheBin(env).toLowerCase();
+  const ours = (exe: string) => exe.toLowerCase().startsWith(dir) && exe.toLowerCase() !== bin.toLowerCase();
+  if (WINDOWS) {
+    const { execFile } = await import("node:child_process");
+    const out = await new Promise<string>((resolve) =>
+      execFile(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "Get-CimInstance Win32_Process -Filter \"Name like 'ognivo-%'\" | ForEach-Object { \"$($_.ProcessId)|$($_.ExecutablePath)\" }",
+        ],
+        { windowsHide: true, timeout: 15_000 },
+        (_e, stdout) => resolve(String(stdout ?? "")),
+      ),
+    );
+    return out
+      .split(/\r?\n/)
+      .map((l) => l.split("|"))
+      .filter(([pid, exe]) => pid && exe && ours(exe))
+      .map(([pid]) => Number(pid));
+  }
+  const pids: number[] = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      if (ours(readlinkSync(`/proc/${name}/exe`))) pids.push(Number(name));
+    } catch {
+      // not ours to read
+    }
+  }
+  return pids;
+}
+
 /** A copy of the shipped binary outside the extension: the core goes on after VS Code, and
  * a program that runs holds its file on Windows, so an update could not replace the
  * extension's directory. One copy for each build, in the user's cache; the other builds'
  * copies go (one a core still runs stays, as Windows keeps it). */
 export function outsideExtension(path: string, env: Env = process.env): string {
-  const cache = WINDOWS
-    ? join(env.LOCALAPPDATA || join(env.USERPROFILE || homedir(), "AppData", "Local"), "ognivo")
-    : join(env.XDG_CACHE_HOME || join(env.HOME || homedir(), ".cache"), "ognivo");
-  const dir = join(cache, "bin");
+  const dir = cacheBin(env);
   const { size, mtimeMs } = statSync(path);
   const name = `ognivo-${size}-${Math.trunc(mtimeMs)}${EXE}`;
   const copy = join(dir, name);
@@ -175,7 +233,7 @@ function start(bin: string, socket: string | undefined, env: Env): void {
   mkdirSync(dirname(logFile), { recursive: true, mode: 0o700 });
   const log = openSync(logFile, "a", 0o600);
   // windowsHide: the core is a console program, and it is started without a console
-  const child = spawn(bin, args, { detached: true, stdio: ["ignore", log, log], windowsHide: true, env });
+  const child = spawn(bin, args, { detached: true, stdio: ["ignore", log, log], windowsHide: true, env: coreEnv(env) });
   closeSync(log);
   child.on("error", () => {});
   child.unref();

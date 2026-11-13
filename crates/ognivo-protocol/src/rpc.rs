@@ -39,6 +39,7 @@ pub const CHANGES_LIST: &str = "changes/list";
 pub const CHANGES_ACCEPT: &str = "changes/accept";
 pub const CHANGES_REVERT: &str = "changes/revert";
 pub const CHANGES_BASE: &str = "changes/base";
+pub const CORE_QUIT: &str = "core/quit";
 
 /// The core's notification of an event.
 pub const EVENT: &str = "event";
@@ -80,6 +81,9 @@ pub struct Initialized {
     pub protocol: u32,
     /// The core's version.
     pub core: String,
+    /// The program the core runs as: a client that would start another build asks this one
+    /// to quit (`core/quit`) and starts its own.
+    pub exe: String,
     /// The last event's place in the stream: the client gets the events after it.
     #[ts(type = "number")]
     pub seq: u64,
@@ -391,6 +395,11 @@ pub struct Base {
 /// The result of a method that returns nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Done {}
+
+/// `core/quit`: the core closes its threads and quits, so that a client can start another
+/// build of it; an error while a turn runs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Quit {}
 
 /// An item of a thread.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

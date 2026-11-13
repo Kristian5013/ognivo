@@ -1252,12 +1252,19 @@ pub fn project_context(
     instructions: &str,
     mcp: Option<&ognivo_mcp::Gateway>,
     skills: Option<&str>,
+    asks: bool,
 ) -> String {
     let mut text = format!("{PROJECT_AT}{}.", ognivo_os::slashed(root));
     let checks = verify::project_checks(root);
-    if checks.is_empty() {
+    if checks.is_empty() && asks {
+        // 2026-11-13: told to read the lines again instead of testing, models refused to
+        // compile and test a C file the user asked to be checked; with a user there, a run
+        // asks and is the check
+        text.push_str(" It has no build or test files (no Cargo.toml, package.json, pyproject.toml, go.mod, Makefile, tests/ or the like), so no build checks a change: check it by running it, or a small test program of yours in a directory outside the project that you remove after. When nothing here can run it, say so in the answer.");
+    } else if checks.is_empty() {
         // T2, 2026-11-03: told to run "the project's build or tests" in a project of three
-        // files, Gemma wrote test programs of its own and asked to compile them
+        // files, Gemma wrote test programs of its own and asked to compile them; a run
+        // without a user refuses them
         text.push_str(" It has no build or test files (no Cargo.toml, package.json, pyproject.toml, go.mod, Makefile, tests/ or the like), so no build can check a change: read the changed lines again instead, and do not write programs or files only to test it.");
     } else {
         text.push_str(&format!(
@@ -1265,6 +1272,8 @@ pub fn project_context(
             checks.join(", ")
         ));
     }
+    text.push_str("\n\n");
+    text.push_str(&machine_note());
     if let Some(note) = mcp.and_then(mcp_note) {
         text.push_str("\n\n");
         text.push_str(&note);
@@ -1278,6 +1287,42 @@ pub fn project_context(
         text.push_str(instructions);
     }
     text
+}
+
+/// Programs that a project's work often needs, which the model is told are there: the
+/// compilers and runtimes first.
+const TOOLCHAIN: &[&str] = &[
+    "cl", "gcc", "g++", "clang", "cc", "make", "cmake", "ninja", "cargo", "go", "python",
+    "python3", "node", "npm", "java", "dotnet", "git",
+];
+
+/// The machine the commands run on, and the programs of [`TOOLCHAIN`] on its PATH. On
+/// Windows the shell is Git Bash: told nothing, gpt-oss took itself for a Linux
+/// container, looked for gcc with `which` and said it could not compile, with MSVC on the
+/// PATH (2026-11-13).
+fn machine_note() -> String {
+    let found: Vec<&str> = TOOLCHAIN
+        .iter()
+        .copied()
+        // on Windows `python3` may be the Store's stand-in, which opens the Store
+        .filter(|p| !(cfg!(windows) && *p == "python3"))
+        .filter(|p| ognivo_os::on_users_path(p))
+        .collect();
+    let on_path = if found.is_empty() {
+        " None of the usual compilers and runtimes is on the PATH.".to_owned()
+    } else {
+        format!(" On the PATH: {}.", found.join(", "))
+    };
+    if cfg!(windows) {
+        format!(
+            "The machine runs Windows, not Linux. Commands run in Git Bash, the bash of Git for Windows: its syntax and tools (ls, grep, sed, find), paths as C:/Users/me or /c/Users/me, and Windows programs by name (`cl`, `python`, `where`; `.exe` is not needed).{on_path}"
+        )
+    } else {
+        format!(
+            "The machine runs {}; commands run in bash.{on_path}",
+            std::env::consts::OS
+        )
+    }
 }
 
 /// What the session's MCP servers are for. T2, 2026-11-05: with the system prompt's "a
@@ -1343,6 +1388,7 @@ impl Agent {
                     &prompt_instructions.text,
                     opts.mcp.as_deref(),
                     skills_note(family, &opts.skills, opts.mcp.as_deref()).as_deref(),
+                    approver.can_ask(),
                 )),
             ],
             tools: tools_of(family, &opts, toolset, driver.calls_undeclared()),
@@ -1624,6 +1670,7 @@ impl Agent {
                 &self.prompt_instructions.text,
                 self.opts.mcp.as_deref(),
                 skills_note(self.family, &self.skills, self.opts.mcp.as_deref()).as_deref(),
+                self.approver.can_ask(),
             )),
         ];
         self.seen.clear();

@@ -8,8 +8,12 @@
 //!   then SIGTERM, then SIGKILL (on Windows the job's end at once), and the result says so
 //!   with exit code 124; dropping the future kills it too.
 //! - On Windows the bash is Git for Windows' ([`ognivo_os::shell::bash`]).
-//! - The environment loses credentials (`*_API_KEY`, `*_TOKEN`) and the variables that
-//!   make bash source files (`BASH_ENV`, `ENV`), and gains pager-free settings.
+//! - The environment is a new terminal's ([`ognivo_os::env::children`]: on Windows the
+//!   registry's of now, not the core's of when it started); it loses credentials
+//!   (`*_API_KEY`, `*_TOKEN`) and the variables that make bash source files (`BASH_ENV`,
+//!   `ENV`), and gains pager-free settings.
+//! - Output that is not UTF-8 reads in the console's code page on Windows
+//!   ([`ognivo_os::env::decode_output`]).
 //! - The model sees the head and tail of the output within a byte budget; the full log
 //!   goes to a file whose path the result names.
 //! - `cd` persists: the shell writes its final directory to a side file.
@@ -97,8 +101,9 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    for (key, _) in std::env::vars_os() {
-        let k = key.to_string_lossy();
+    // what async_command gave it: a new terminal's environment on Windows
+    for (key, _) in ognivo_os::env::children() {
+        let k = key.to_string_lossy().to_ascii_uppercase();
         if k.ends_with("_API_KEY") || k.ends_with("_TOKEN") || k == "BASH_ENV" || k == "ENV" {
             cmd.env_remove(&key);
         }
@@ -198,9 +203,10 @@ pub async fn run(command: &str, opts: &ShellOptions) -> Result<ShellResult, Exec
 /// The output as the model sees it: everything when it fits, otherwise 30% of the budget
 /// from the head and 70% from the tail, cut at line starts, with the log path between.
 fn budgeted(out: &[u8], budget: usize, log: &Path) -> String {
-    let text = String::from_utf8_lossy(out);
+    // a Windows program's lines in the console's code page read as words
+    let text = ognivo_os::env::decode_output(out);
     if text.len() <= budget {
-        return text.into_owned();
+        return text;
     }
     let head_end = floor_line(&text, budget * 3 / 10);
     let tail_start = ceil_line(&text, text.len() - budget * 7 / 10);

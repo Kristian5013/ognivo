@@ -6,7 +6,11 @@
 //!   0700 and 0600 on Unix; on Windows a new file takes its directory's ACL, the user's
 //!   own in their profile), and paths as the OS spells them.
 //! - [`program`], [`command`] and [`async_command`]: a program by its name, `npx` being
-//!   `npx.cmd` on Windows; and children that open no console window there.
+//!   `npx.cmd` on Windows; and children that open no console window there, with the
+//!   environment a new terminal of the user gets ([`env`]), not the core's of when it
+//!   started.
+//! - [`env::decode_output`]: what a program printed, in the console's code page where it
+//!   is not UTF-8.
 //! - [`shell`]: bash, Git for Windows' on Windows, and paths as bash writes them.
 //! - [`Tree`]: a child and all it starts, ended as a whole.
 //! - [`signal`]: SIGINT, SIGTERM and SIGQUIT, and what stands for them on Windows.
@@ -14,6 +18,7 @@
 //!
 //! Only Linux and Windows are built and tested; the Unix side is POSIX where it can be.
 
+pub mod env;
 pub mod ipc;
 pub mod shell;
 pub mod signal;
@@ -303,15 +308,44 @@ mod wtf8 {
 /// extension, or one not found, stays `name`, for the error to name it.
 pub fn program(name: impl AsRef<OsStr>) -> PathBuf {
     let name = name.as_ref();
+    // the PATH the program will have: a new terminal's on Windows (env.rs)
     #[cfg(windows)]
     if let Some(found) = on_path(
         name,
-        &std::env::var_os("PATH").unwrap_or_default(),
-        &std::env::var("PATHEXT").unwrap_or_default(),
+        &env::var("PATH").unwrap_or_default(),
+        &env::var("PATHEXT")
+            .map(|v| v.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     ) {
         return found;
     }
     PathBuf::from(name)
+}
+
+/// Whether `name` is a program on the PATH a command of the model gets.
+pub fn on_users_path(name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        on_path(
+            OsStr::new(name),
+            &env::var("PATH").unwrap_or_default(),
+            &env::var("PATHEXT")
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+        .is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        env::var("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| executable(&dir.join(name))))
+    }
+}
+
+#[cfg(not(windows))]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// `name` with an extension of `pathext` that a command can start, in a directory of
@@ -351,10 +385,11 @@ fn on_path(name: &OsStr, path: &OsStr, pathext: &str) -> Option<PathBuf> {
 #[cfg(windows)]
 const NO_WINDOW: u32 = windows::Win32::System::Threading::CREATE_NO_WINDOW.0;
 
-/// A command for [`program`]`(name)` that opens no window on Windows.
+/// A command for [`program`]`(name)` that opens no window on Windows, with the
+/// environment of a program the core starts ([`env::children`]).
 pub fn command(name: impl AsRef<OsStr>) -> std::process::Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = std::process::Command::new(program(name));
+    cmd.env_clear().envs(env::children());
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, NO_WINDOW);
     cmd
@@ -362,8 +397,8 @@ pub fn command(name: impl AsRef<OsStr>) -> std::process::Command {
 
 /// [`command`] for tokio.
 pub fn async_command(name: impl AsRef<OsStr>) -> tokio::process::Command {
-    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = tokio::process::Command::new(program(name));
+    cmd.env_clear().envs(env::children());
     #[cfg(windows)]
     cmd.creation_flags(NO_WINDOW);
     cmd

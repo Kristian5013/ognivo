@@ -54,7 +54,12 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   });
   const changes = new Changes(connection);
-  const pages = new Pages(context, bin, changes, () => void connection.get().catch(() => {}));
+  const pages = new Pages(context, bin, changes, () =>
+    connection.get().then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
   const tree = vscode.window.createTreeView("ognivo.changes", { treeDataProvider: changes });
   changes.view = tree;
 

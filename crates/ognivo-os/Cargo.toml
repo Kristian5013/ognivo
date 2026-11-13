@@ -19,6 +19,10 @@ rustix = { workspace = true, features = ["process", "termios"] }
 [target.'cfg(windows)'.dependencies]
 # the version process-wrap builds on, for its creation flags
 windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+# the user's environment as a new terminal gets it, and the console's code page (env.rs)
+windows-registry = "=0.6.1"
+# what console programs print in the console's code page (env.rs)
+encoding_rs = "=0.8.35"
 
 [dev-dependencies]
 tempfile.workspace = true

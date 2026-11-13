@@ -351,6 +351,11 @@ export type Initialized = { protocol: number,
  */
 core: string, 
 /**
+ * The program the core runs as: a client that would start another build asks this one
+ * to quit (`core/quit`) and starts its own.
+ */
+exe: string, 
+/**
  * The last event's place in the stream: the client gets the events after it.
  */
 seq: number, };
@@ -620,6 +625,8 @@ text: string | null, };
 
 export type Done = Record<symbol, never>;
 
+export type Quit = Record<symbol, never>;
+
 export type ItemRef = { thread: ThreadId, item: ItemId, };
 
 export type ApprovalAsked = { 
@@ -834,6 +841,7 @@ export type Methods = {
   "changes/accept": { params: Accept; result: Accepted };
   "changes/revert": { params: Revert; result: Reverted };
   "changes/base": { params: BaseOf; result: Base };
+  "core/quit": { params: Quit; result: Done };
 };
 
 /** What the core asks its clients. */

@@ -1040,3 +1040,55 @@ async fn a_client_is_asked_to_sign_in_and_the_thread_starts_signed_in() {
     mcp.kill().unwrap();
     mcp.wait().unwrap();
 }
+
+/// A client that would start another build of the core finds out which program runs
+/// (`exe`), and asks it to quit: not while a turn runs, at once when none does, however
+/// long its idle time.
+#[tokio::test]
+async fn the_core_names_its_program_and_quits_when_asked_while_no_turn_runs() {
+    let (url, bodies) = fake_server(vec![HANG.to_owned()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let socket = socket(dir.path());
+    let mut child = core(dir.path(), "600");
+    let mut a = Client::connect(&socket).await;
+    let init = a
+        .ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let exe = init["exe"].as_str().unwrap().to_owned();
+    assert!(Path::new(&exe).is_file(), "{exe}");
+
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    a.ok("turn/start", json!({"thread": thread, "text": "wait"}))
+        .await;
+    let began = Instant::now();
+    while bodies.lock().unwrap().is_empty() {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // a turn runs: the core stays
+    let busy = a.call("core/quit", json!({})).await.unwrap_err();
+    assert_eq!(busy["code"], -32002, "{busy}");
+    assert!(child.try_wait().unwrap().is_none());
+
+    a.ok("turn/interrupt", json!({"thread": thread})).await;
+    a.until(|m| event(m, "turn_completed")).await;
+    a.ok("core/quit", json!({})).await;
+    let began = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the core did not quit"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(status.success(), "{status:?}");
+}

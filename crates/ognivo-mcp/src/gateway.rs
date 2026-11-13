@@ -396,7 +396,12 @@ async fn connect(s: &ServerConfig, signed: Option<&Path>) -> Result<Up, Failed> 
     let (client, group) = match &s.transport {
         Transport::Stdio { command, args, env } => {
             let mut cmd = tokio::process::Command::new(ognivo_os::program(command));
-            cmd.args(args).envs(env);
+            // a new terminal's environment (`npx` installed since the core started), then
+            // the server's own
+            cmd.env_clear()
+                .envs(ognivo_os::env::children())
+                .args(args)
+                .envs(env);
             let mut wrap = process_wrap::tokio::CommandWrap::from(cmd);
             // `npx` and its node go together
             ognivo_os::tree_wrap(&mut wrap);

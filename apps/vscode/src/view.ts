@@ -142,8 +142,9 @@ export class Pages implements vscode.WebviewViewProvider {
     private readonly context: vscode.ExtensionContext,
     private readonly bin: () => string,
     private readonly opener: Opener,
-    /** A page connects: the extension's own client too, for the questions only it answers. */
-    private readonly onConnect: () => void,
+    /** A page connects: the extension's own client first, for the questions only it
+     * answers, and to replace a core of another build before the page reaches it. */
+    private readonly onConnect: () => Promise<void>,
   ) {
     this.state = { ...context.globalState.get<Record<string, string>>(STATE, {}) };
     context.subscriptions.push(
@@ -239,8 +240,8 @@ export class Pages implements vscode.WebviewViewProvider {
         page.post({ t: "hello", folders: folders(), state: this.state, place: page.place, session: newSession() });
         break;
       case "connect":
+        await this.onConnect();
         page.connect(this.bin());
-        this.onConnect();
         break;
       case "core":
         this.use(page);

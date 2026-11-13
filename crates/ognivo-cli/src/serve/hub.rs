@@ -37,6 +37,8 @@ pub struct Hub {
     /// Clients connected, and turns running.
     activity: watch::Sender<(usize, usize)>,
     next_client: AtomicU64,
+    /// A client asked the core to quit (`core/quit`).
+    quit: tokio::sync::Notify,
 }
 
 #[derive(Debug)]
@@ -88,11 +90,26 @@ impl Hub {
             threads: Mutex::new(HashMap::new()),
             activity: watch::Sender::new((0, 0)),
             next_client: AtomicU64::new(1),
+            quit: tokio::sync::Notify::new(),
         })
     }
 
     pub fn activity(&self) -> watch::Receiver<(usize, usize)> {
         self.activity.subscribe()
+    }
+
+    /// Asks the core to quit (`core/quit`), unless a turn runs; whether it will.
+    pub fn quit(&self) -> bool {
+        if self.activity.borrow().1 > 0 {
+            return false;
+        }
+        self.quit.notify_one();
+        true
+    }
+
+    /// Ends when a client asked the core to quit.
+    pub async fn quitting(&self) {
+        self.quit.notified().await;
     }
 
     /// A turn began (`1`) or ended (`-1`).

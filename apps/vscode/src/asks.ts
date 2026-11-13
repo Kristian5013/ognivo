@@ -104,6 +104,8 @@ export class Asks {
     this.core = core;
     this.shown.clear();
     core.subscribe(() => this.changed());
+    // the questions that waited when it connected
+    this.changed();
   }
 
   private changed(): void {

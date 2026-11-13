@@ -71,6 +71,7 @@ fn typescript() -> String {
         BaseOf::decl(&cfg),
         Base::decl(&cfg),
         Done::decl(&cfg),
+        Quit::decl(&cfg),
         ItemRef::decl(&cfg),
         ApprovalAsked::decl(&cfg),
         Decision::decl(&cfg),
@@ -125,6 +126,7 @@ fn typescript() -> String {
         method::<Accept, Accepted>(&cfg, rpc::CHANGES_ACCEPT),
         method::<Revert, Reverted>(&cfg, rpc::CHANGES_REVERT),
         method::<BaseOf, Base>(&cfg, rpc::CHANGES_BASE),
+        method::<Quit, Done>(&cfg, rpc::CORE_QUIT),
     ];
     let asks = [
         method::<ApprovalAsked, ApprovalAnswer>(&cfg, rpc::APPROVAL_ASK),

@@ -142,6 +142,10 @@ pub async fn serve(a: CoreArgs) -> anyhow::Result<ExitCode> {
                 eprintln!("ognivo core: idle, quitting");
                 break;
             }
+            _ = hub.quitting() => {
+                eprintln!("ognivo core: a client asked it to quit");
+                break;
+            }
             _ = term.recv() => break,
             _ = int.recv() => break,
         }
@@ -271,8 +275,22 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
             reply(rpc::Initialized {
                 protocol: p::VERSION,
                 core: env!("CARGO_PKG_VERSION").to_owned(),
+                exe: std::env::current_exe()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
                 seq,
             })
+        }
+        rpc::CORE_QUIT => {
+            let _: rpc::Quit = parse(params)?;
+            if hub.quit() {
+                reply(rpc::Done {})
+            } else {
+                Err(RpcError::new(
+                    rpc::error::BUSY,
+                    "a turn is running: the core quits once no turn runs",
+                ))
+            }
         }
         rpc::THREAD_LIST => thread::list(hub, parse(params)?),
         rpc::SERVER_DETECT => detect(parse(params)?).await,
