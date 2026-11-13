@@ -11,13 +11,29 @@ import * as P from "../shared/protocol.ts";
 import profiles from "../shared/profiles.json";
 import { type Core, CoreError } from "../shared/rpc.ts";
 import { samePath } from "../shared/text.ts";
+import type { SettingsTab } from "../shared/messages.ts";
 import { type ApprovalAsk, ApprovalCard } from "./approval.tsx";
 import { Composer, type Sending } from "./composer.tsx";
-import { type Hello, load, newSession, onNew, onOpen, run, save, shown, subscribeFolders, subscribeSession, workspaceFolders } from "./host.ts";
+import { useDetected } from "./detect.ts";
+import {
+  type Hello,
+  load,
+  newSession,
+  onNew,
+  onOpen,
+  onSettings,
+  run,
+  save,
+  shown,
+  subscribeFolders,
+  subscribeSession,
+  workspaceFolders,
+} from "./host.ts";
 import { ending } from "./model/format.ts";
 import { DEFAULT_MODE, isMode, modeInfo } from "./model/modes.ts";
 import type { ThreadStore } from "./model/store.ts";
 import type { Threads } from "./model/threads.ts";
+import { Settings } from "./settings.tsx";
 import { ThreadView } from "./thread.tsx";
 import { Welcome } from "./welcome.tsx";
 
@@ -53,7 +69,11 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
   const [error, setError] = useState<string>();
   /** The threads whose opening notes the user hid. */
   const [read, setRead] = useState(new Set<number>());
+  /** The settings' tab on show; the conversation while none. */
+  const [settings, setSettings] = useState<SettingsTab>();
   const showing = useRef<number | undefined>(undefined);
+  const detected = useDetected(core, session.server, session.model);
+  useEffect(() => onSettings((tab) => setSettings((now) => tab ?? now ?? "model")), []);
 
   // the core's sessions of this workspace, as they start, turn and end
   useEffect(() => {
@@ -200,8 +220,26 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
   const stopped = !running && !parent && last?.kind === "end" && last.end !== "answer" ? last : undefined;
   const planned = !running && !parent && mode === "plan" && last?.kind === "end" && last.end === "answer";
   const context = (thread === undefined ? undefined : opened.get(thread)?.context) ?? summary?.context ?? undefined;
-  const model = thread === undefined ? session.model || session.profile || "" : summary?.model || info?.model || info?.profile || "";
+  const found = detected && detected !== "failed" ? detected : undefined;
+  const model =
+    thread === undefined
+      ? session.model || found?.model || session.profile || found?.profile || ""
+      : summary?.model || info?.model || info?.profile || "";
   const notes = thread === undefined ? undefined : opened.get(thread)?.notes;
+
+  if (settings && core.status.state !== "down") {
+    return (
+      <Settings
+        core={core}
+        project={project ?? ""}
+        thread={thread}
+        session={session}
+        tab={settings}
+        onTab={setSettings}
+        onClose={() => setSettings(undefined)}
+      />
+    );
+  }
 
   if (core.status.state === "down") {
     return (
@@ -211,7 +249,7 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
           <button type="button" className="primary" onClick={() => location.reload()}>
             Connect again
           </button>
-          <button type="button" className="link" onClick={() => run("settings")}>
+          <button type="button" className="link" onClick={() => run("vscodeSettings")}>
             Settings
           </button>
         </div>
@@ -274,7 +312,7 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
         </div>
       )}
       {thread === undefined ? (
-        <Welcome core={core} session={session} project={project} onOpen={(t) => select(t.thread, t.title)} />
+        <Welcome core={core} session={session} project={project} onOpen={(t) => select(t.thread, t.title)} onSettings={setSettings} />
       ) : store ? (
         <ThreadView store={store} thread={thread} onThread={(t) => select(t)} />
       ) : (
@@ -330,6 +368,7 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
             onMode={(m) => void switchMode(m)}
             context={context}
             model={model}
+            onModel={() => setSettings("model")}
           />
         )}
       </div>

@@ -31,7 +31,7 @@ void hello().then(async (h) => {
           <button type="button" className="primary" onClick={() => location.reload()}>
             Try again
           </button>
-          <button type="button" className="link" onClick={() => run("settings")}>
+          <button type="button" className="link" onClick={() => run("vscodeSettings")}>
             Settings
           </button>
         </div>

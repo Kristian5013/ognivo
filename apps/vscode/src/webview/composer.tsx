@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type * as P from "../shared/protocol.ts";
-import { onInsert, run } from "./host.ts";
+import { onInsert } from "./host.ts";
 import { contextSize, mentionAt, sessionFiles } from "./model/context.ts";
 import { count } from "./model/format.ts";
 import { MODES, modeInfo, nextMode } from "./model/modes.ts";
@@ -34,6 +34,7 @@ export function Composer({
   onMode,
   context,
   model,
+  onModel,
   draftKey,
 }: {
   store?: ThreadStore;
@@ -43,6 +44,8 @@ export function Composer({
   context?: P.Context;
   /** The model the session works with, or a new one will. */
   model: string;
+  /** Shows where the model is chosen. */
+  onModel: () => void;
   /** Where the unsent text waits while another thread shows. */
   draftKey: string;
 }) {
@@ -214,7 +217,12 @@ export function Composer({
             </option>
           ))}
         </select>
-        <button type="button" className="link model" title="The server and the model of a new session" onClick={() => run("chooseModel")}>
+        <button
+          type="button"
+          className="link model"
+          title={store ? `The session's model: ${model}` : "The server and the model of a new session"}
+          onClick={onModel}
+        >
           {model || "choose a model"}
         </button>
         {context && (

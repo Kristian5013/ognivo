@@ -97,7 +97,10 @@ export function activate(context: vscode.ExtensionContext): void {
         void vscode.window.showErrorMessage(`ognivo: ${e instanceof Error ? e.message : String(e)}`);
       }
     }),
-    command("ognivo.settings", () => vscode.commands.executeCommand("workbench.action.openSettings", "@ext:ognivo.ognivo")),
+    command("ognivo.settings", () => pages.toPage({ t: "settings" })),
+    command("ognivo.mcpServers", () => pages.toPage({ t: "settings", tab: "mcp" })),
+    command("ognivo.instructions", () => pages.toPage({ t: "settings", tab: "instructions" })),
+    command("ognivo.vscodeSettings", () => vscode.commands.executeCommand("workbench.action.openSettings", "@ext:ognivo.ognivo")),
     command("ognivo.showLog", async () => {
       try {
         await vscode.window.showTextDocument(vscode.Uri.file(logPath()), { preview: true });

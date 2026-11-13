@@ -103,9 +103,25 @@
       },
       {
         "command": "ognivo.settings",
-        "title": "Settings",
+        "title": "Settings, MCP Servers and Instructions",
         "category": "ognivo",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "ognivo.mcpServers",
+        "title": "MCP Servers",
+        "category": "ognivo",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "ognivo.instructions",
+        "title": "Instructions and the System Prompt",
+        "category": "ognivo"
+      },
+      {
+        "command": "ognivo.vscodeSettings",
+        "title": "Open VS Code's Settings of ognivo",
+        "category": "ognivo"
       },
       {
         "command": "ognivo.showLog",
@@ -165,6 +181,11 @@
           "command": "ognivo.openInEditor",
           "when": "view == ognivo.chat",
           "group": "navigation@3"
+        },
+        {
+          "command": "ognivo.mcpServers",
+          "when": "view == ognivo.chat",
+          "group": "more@0"
         },
         {
           "command": "ognivo.settings",

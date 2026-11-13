@@ -13,11 +13,36 @@ import { isAbsolute, join } from "node:path";
 import * as vscode from "vscode";
 
 import { allowed, connectCore, lines, refusal } from "./core.ts";
-import type { FromPage, NewSession, Place, ToPage } from "./shared/messages.ts";
+import * as instructions from "./instructions.ts";
+import { type FromPage, type NewSession, type Place, type Requests, SESSION_SETTINGS, type ToPage } from "./shared/messages.ts";
 
 const STATE = "ognivo.page";
 /** The extension's commands a page may run. */
-const COMMANDS = new Set(["openSession", "chooseModel", "settings", "newSession"]);
+const COMMANDS = new Set(["openSession", "chooseModel", "vscodeSettings", "newSession", "showLog"]);
+
+/** What the extension answers a page's request with. */
+async function answer<M extends keyof Requests>(method: M, params: Requests[M]["params"]): Promise<Requests[M]["result"]> {
+  switch (method) {
+    case "settings/set": {
+      const p = params as Requests["settings/set"]["params"];
+      if (!(SESSION_SETTINGS as readonly string[]).includes(p.key)) throw new Error(`no setting ognivo.${p.key}`);
+      await vscode.workspace.getConfiguration("ognivo").update(p.key, p.value, vscode.ConfigurationTarget.Global);
+      return null as Requests[M]["result"];
+    }
+    case "instructions/list":
+      return instructions.list((params as Requests["instructions/list"]["params"]).project) as Requests[M]["result"];
+    case "instructions/save": {
+      const p = params as Requests["instructions/save"]["params"];
+      instructions.save(p.path, p.text);
+      return null as Requests[M]["result"];
+    }
+    case "instructions/open":
+      await instructions.open((params as Requests["instructions/open"]["params"]).path);
+      return null as Requests[M]["result"];
+    default:
+      throw new Error(`no request ${String(method)}`);
+  }
+}
 
 /** The workspace's folders on disk: the projects of this window. */
 export function folders(): string[] {
@@ -248,6 +273,13 @@ export class Pages implements vscode.WebviewViewProvider {
         if (!COMMANDS.has(m.command)) break;
         this.use(page);
         await vscode.commands.executeCommand(`ognivo.${m.command}`);
+        break;
+      case "request":
+        try {
+          page.post({ t: "response", id: m.id, result: await answer(m.method, m.params as never) });
+        } catch (e) {
+          page.post({ t: "response", id: m.id, error: e instanceof Error ? e.message : String(e) });
+        }
         break;
     }
   }

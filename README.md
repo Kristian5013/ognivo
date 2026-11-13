@@ -181,6 +181,12 @@ directory; the extension starts it when none runs, and every VS Code window shar
   accepted or reverted there, one file or all.
 - **Sessions**: `ognivo: Open a Session…` lists them, this workspace's first. A turn goes
   on when VS Code closes; the core quits a minute after its last client and turn.
+- **Settings** in the panel (its gear): *Model* — the server, the model behind a router,
+  the profile, reasoning, context, mode; *MCP* — Exa's web search ready to switch on with
+  your key, your servers, the project's and Claude Code's, each on or off, added or
+  removed, with the session's servers as they run and their sign-ins; *Instructions* —
+  your own instructions for every project (`~/.ognivo/AGENTS.md`), the project's files,
+  and the exact system prompt of the session on show.
 
 ```sh
 cargo build -p ognivo-cli         # the extension runs the newest of target/{release,debug}/ognivo, else PATH's

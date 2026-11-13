@@ -163,7 +163,7 @@ async function launch(replies: object[][]) {
     // nobody there: the core quits, and its socket (on Windows the name of its pipe) goes
     await expect.poll(() => existsSync(socket), { timeout: 20_000 }).toBe(false);
   };
-  return { app, page, project, close };
+  return { app, page, project, dir, close };
 }
 
 /** Runs a command of VS Code's by its title, from the command palette. */
@@ -239,6 +239,38 @@ test("a session from the first message: a call that asks in the conversation, th
     await expect(row).toHaveCount(0);
     await expect(page.getByText("and 1 command with side effects")).toBeVisible();
     await shot(app, page, "e2e-reverted");
+  } finally {
+    await close();
+  }
+});
+
+test("the settings: Exa switched on with a key and off again, the user's instructions saved", async () => {
+  const { app, page, dir, close } = await launch([]);
+  try {
+    const panel = await agent(page);
+    await command(page, "ognivo: MCP Servers");
+    const exa = panel.getByRole("switch", { name: "Switch Exa on" });
+    await exa.waitFor({ timeout: 30_000 });
+    await exa.click();
+    await panel.getByRole("textbox", { name: "Exa API key" }).fill("test-key");
+    await panel.getByRole("button", { name: "Save and switch on" }).click();
+    await expect(panel.getByRole("switch", { name: "Switch Exa off" })).toBeVisible({ timeout: 30_000 });
+    const config = join(dir, ".ognivo", "mcp.json");
+    const exaEntry = () => (JSON.parse(readFileSync(config, "utf8")) as { mcpServers: Record<string, Record<string, unknown>> }).mcpServers.exa;
+    expect(exaEntry()).toEqual({ command: "npx", args: ["-y", "exa-mcp-server"], env: { EXA_API_KEY: "test-key" } });
+    await shot(app, page, "e2e-mcp");
+    // off: the entry stays, with its key, until it is on again
+    await panel.getByRole("switch", { name: "Switch Exa off" }).click();
+    await expect(panel.getByRole("switch", { name: "Switch Exa on" })).toBeVisible({ timeout: 30_000 });
+    expect(exaEntry()).toMatchObject({ disabled: true, env: { EXA_API_KEY: "test-key" } });
+
+    await panel.getByRole("tab", { name: "Instructions" }).click();
+    const mine = panel.locator("textarea.instructions");
+    await mine.fill("Answer in Russian.");
+    await panel.getByRole("button", { name: "Save", exact: true }).click();
+    await expect(panel.getByText("saved", { exact: true })).toBeVisible();
+    expect(readFileSync(join(dir, ".ognivo", "AGENTS.md"), "utf8")).toBe("Answer in Russian.");
+    await shot(app, page, "e2e-instructions");
   } finally {
     await close();
   }

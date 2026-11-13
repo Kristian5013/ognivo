@@ -3,37 +3,29 @@
 
 import { useEffect, useState } from "react";
 
-import type { NewSession } from "../shared/messages.ts";
+import type { NewSession, SettingsTab } from "../shared/messages.ts";
 import type * as P from "../shared/protocol.ts";
 import type { Core } from "../shared/rpc.ts";
-import { run } from "./host.ts";
 import { ago } from "../shared/text.ts";
+import { useDetected } from "./detect.ts";
+import { run } from "./host.ts";
 
 export function Welcome({
   core,
   session,
   project,
   onOpen,
+  onSettings,
 }: {
   core: Core;
   session: NewSession;
   /** The workspace's folder a new session works in; none without a folder. */
   project?: string;
   onOpen: (t: P.ThreadSummary) => void;
+  onSettings: (tab: SettingsTab) => void;
 }) {
-  const [detected, setDetected] = useState<P.Detected | "failed">();
+  const detected = useDetected(core, session.server, session.model);
   const [recent, setRecent] = useState<P.ThreadSummary[]>([]);
-  useEffect(() => {
-    let live = true;
-    setDetected(undefined);
-    core.call("server/detect", { url: session.server, api_key: null, model: session.model || null }).then(
-      (d) => live && setDetected(d),
-      () => live && setDetected("failed"),
-    );
-    return () => {
-      live = false;
-    };
-  }, [core, session.server, session.model]);
   useEffect(() => {
     if (!project) return;
     let live = true;
@@ -96,11 +88,14 @@ export function Welcome({
           </div>
         )}
         <div className="buttons">
-          <button type="button" className="secondary small" onClick={() => run("chooseModel")}>
+          <button type="button" className="secondary small" onClick={() => onSettings("model")}>
             Change the server or the model
           </button>
-          <button type="button" className="link" onClick={() => run("settings")}>
-            Settings
+          <button type="button" className="link" onClick={() => onSettings("mcp")}>
+            MCP servers
+          </button>
+          <button type="button" className="link" onClick={() => onSettings("instructions")}>
+            Instructions
           </button>
         </div>
       </div>

@@ -4,7 +4,7 @@
 // The page asks the extension to open files, changes and links, keeps its storage there,
 // and runs the extension's commands.
 
-import type { Command, FromPage, NewSession, Place, ToPage } from "../shared/messages.ts";
+import type { Command, FromPage, NewSession, Place, Requests, SettingsTab, ToPage } from "../shared/messages.ts";
 import type { Port } from "../shared/rpc.ts";
 
 interface VsCodeApi {
@@ -32,7 +32,11 @@ const listeners = {
   insert: new Set<(text: string) => void>(),
   new: new Set<() => void>(),
   open: new Set<(thread: number) => void>(),
+  settings: new Set<(tab?: SettingsTab) => void>(),
 };
+/** The page's requests that wait for the extension's answer, by their ids. */
+const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+let nextRequest = 1;
 /** Insertions that came while no message was being written. */
 const pending: string[] = [];
 
@@ -59,6 +63,16 @@ function receive(m: ToPage): void {
     case "open":
       for (const l of listeners.open) l(m.thread);
       break;
+    case "settings":
+      for (const l of listeners.settings) l(m.tab);
+      break;
+    case "response": {
+      const w = waiting.get(m.id);
+      waiting.delete(m.id);
+      if (m.error !== undefined) w?.reject(new Error(m.error));
+      else w?.resolve(m.result);
+      break;
+    }
     case "hello":
       break;
   }
@@ -164,4 +178,19 @@ export function shown(thread: number | undefined, title: string, project: string
 
 export function run(command: Command): void {
   api.postMessage({ t: "command", command });
+}
+
+/** Asks the extension, which answers with what `method` gives. */
+export function request<M extends keyof Requests>(method: M, params: Requests[M]["params"]): Promise<Requests[M]["result"]> {
+  const id = nextRequest++;
+  return new Promise((resolve, reject) => {
+    waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    api.postMessage({ t: "request", id, method, params });
+  });
+}
+
+/** The extension's word to show the settings, at a tab. */
+export function onSettings(l: (tab?: SettingsTab) => void): () => void {
+  listeners.settings.add(l);
+  return () => listeners.settings.delete(l);
 }
