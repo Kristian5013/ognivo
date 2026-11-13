@@ -5,7 +5,7 @@
 // first message to it. The session's changes are in the Changes view, its list in
 // `ognivo: Open a Session…`.
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import * as P from "../shared/protocol.ts";
 import profiles from "../shared/profiles.json";
@@ -19,6 +19,7 @@ import {
   type Hello,
   load,
   newSession,
+  onDeleted,
   onNew,
   onOpen,
   onSettings,
@@ -29,12 +30,13 @@ import {
   subscribeSession,
   workspaceFolders,
 } from "./host.ts";
-import { ending } from "./model/format.ts";
+import { Icon, IconButton } from "./icon.tsx";
 import { DEFAULT_MODE, isMode, modeInfo } from "./model/modes.ts";
 import type { ThreadStore } from "./model/store.ts";
 import type { Threads } from "./model/threads.ts";
+import { ReviewBar } from "./review.tsx";
 import { Settings } from "./settings.tsx";
-import { ThreadView } from "./thread.tsx";
+import { type Editing, ThreadView, TurnActions } from "./thread.tsx";
 import { Welcome } from "./welcome.tsx";
 
 /** Whether the Native path reads a profile's format (scripts/profiles.mjs). */
@@ -126,6 +128,15 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
 
   useEffect(() => onNew(fresh), [fresh]);
   useEffect(() => onOpen((t) => select(t)), [select]);
+  // a deleted session: let go of it, and of the page that showed it
+  useEffect(
+    () =>
+      onDeleted((t) => {
+        if (showing.current === t || threads.info(showing.current ?? -1)?.parent?.thread === t) fresh();
+        threads.forget(t);
+      }),
+    [fresh, threads],
+  );
 
   // the session this workspace's page showed last, once the list says it is there
   const restored = useRef(false);
@@ -163,6 +174,8 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
       await call();
     }
   };
+  const onCoreNow = useRef(onCore);
+  onCoreNow.current = onCore;
 
   const running = thread !== undefined && threads.running(thread);
   const sending: Sending = {
@@ -227,6 +240,26 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
       : summary?.model || info?.model || info?.profile || "";
   const notes = thread === undefined ? undefined : opened.get(thread)?.notes;
 
+  // a message written again: the turns from its turn on go back, and the agent goes on
+  const editing = useMemo<Editing | undefined>(
+    () =>
+      thread === undefined || running || parent
+        ? undefined
+        : { edit: (turn, text) => onCoreNow.current(thread, () => core.call("turn/edit", { thread, turn, text, images: [] })) },
+    [core, thread, running, parent],
+  );
+  const stoppedTurn = stopped?.turn;
+  const goOn = useMemo(
+    () => ({
+      stopped: stoppedTurn,
+      onContinue: () => {
+        if (thread === undefined) return;
+        onCoreNow.current(thread, () => core.call("turn/start", { thread, text: "Continue.", images: [] })).catch((e: unknown) => setError(message(e)));
+      },
+    }),
+    [core, thread, stoppedTurn],
+  );
+
   if (settings && core.status.state !== "down") {
     return (
       <Settings
@@ -244,13 +277,14 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
   if (core.status.state === "down") {
     return (
       <div className="centered">
+        <Icon name="debug-disconnect" className="centered-icon" />
         <p>The connection to the core is gone: {core.status.why}.</p>
         <div className="buttons">
-          <button type="button" className="primary" onClick={() => location.reload()}>
+          <button type="button" className="btn primary" onClick={() => location.reload()}>
             Connect again
           </button>
-          <button type="button" className="link" onClick={() => run("vscodeSettings")}>
-            Settings
+          <button type="button" className="btn ghost" onClick={() => run("showLog")}>
+            The core's log
           </button>
         </div>
       </div>
@@ -261,103 +295,96 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
     <div className="app">
       {hello.place === "editor" && (
         <div className="toolbar">
-          <button type="button" className="icon-button" title="New session" onClick={fresh}>
-            <span className="codicon codicon-add" />
-          </button>
-          <button type="button" className="icon-button" title="Open a session…" onClick={() => run("openSession")}>
-            <span className="codicon codicon-history" />
-          </button>
+          <IconButton icon="add" title="New session" onClick={fresh} />
+          <IconButton icon="history" title="Open a session…" onClick={() => run("openSession")} />
           <span className="toolbar-title">{thread === undefined ? "New session" : title || "Session"}</span>
+          <span className="spacer" />
+          <IconButton icon="settings-gear" title="Settings" onClick={() => setSettings("model")} />
         </div>
       )}
       {parent && (
-        <div className="banner">
+        <div className="callout top">
+          <Icon name="organization" />
           <span>A subagent's thread: it works on one task of the session.</span>
-          <button type="button" className="link" onClick={() => select(parent.thread)}>
-            Back to the session
+          <span className="spacer" />
+          <button type="button" className="btn ghost small" onClick={() => select(parent.thread)}>
+            <Icon name="arrow-left" /> The session
           </button>
         </div>
       )}
       {elsewhere && (
-        <div className="banner warn">
-          <span className="codicon codicon-bell-dot" />
+        <div className="callout top warn">
+          <Icon name="bell-dot" />
           <span>Another session waits for your answer.</span>
-          <button type="button" className="link" onClick={() => select(elsewhere.params.thread)}>
+          <span className="spacer" />
+          <button type="button" className="btn ghost small" onClick={() => select(elsewhere.params.thread)}>
             Open it
           </button>
         </div>
       )}
       {((notes?.length && !read.has(thread!)) || error) && (
-        <div className="notes">
-          <div>
-            {!read.has(thread!) &&
-              notes?.map((n) => (
-                <p key={n} className="muted">
-                  · {n}
-                </p>
-              ))}
-            {error && <p className="error">{error}</p>}
+        <div className={`callout top${error ? " error" : ""}`}>
+          <Icon name={error ? "error" : "info"} />
+          <div className="callout-text">
+            {error && <p>{error}</p>}
+            {!read.has(thread!) && notes?.map((n) => <p key={n}>{n}</p>)}
           </div>
-          <button
-            type="button"
-            className="icon-button"
+          <IconButton
+            icon="close"
             title="Hide"
             onClick={() => {
               setError(undefined);
               if (thread !== undefined) setRead((r) => new Set(r).add(thread));
             }}
-          >
-            <span className="codicon codicon-close" />
-          </button>
+          />
         </div>
       )}
       {thread === undefined ? (
-        <Welcome core={core} session={session} project={project} onOpen={(t) => select(t.thread, t.title)} onSettings={setSettings} />
+        <Welcome
+          core={core}
+          session={session}
+          project={project}
+          version={threadsVersion}
+          onOpen={(t) => select(t.thread, t.title)}
+          onSettings={setSettings}
+        />
       ) : store ? (
-        <ThreadView store={store} thread={thread} onThread={(t) => select(t)} />
+        <TurnActions.Provider value={goOn}>
+          <ThreadView store={store} thread={thread} onThread={(t) => select(t)} editing={editing} />
+        </TurnActions.Provider>
       ) : (
-        <p className="centered muted">{error ?? "Loading…"}</p>
+        <div className="centered muted">{error ?? <Icon name="loading" spin />}</div>
       )}
-      <div className="bottom">
+      <div className="dock">
         {here.map((a, i) => (
           <ApprovalCard key={a.id} ask={a} core={core} first={i === 0} />
         ))}
-        {stopped && (
-          <div className="banner warn">
-            <span>
-              Turn {stopped.turn} {ending(stopped.end)}
-              {stopped.why ? `: ${stopped.why}` : ""}
-            </span>
-            <button type="button" className="primary small" onClick={() => void sending.send("Continue.").catch((e: unknown) => setError(message(e)))}>
-              Continue
-            </button>
-          </div>
-        )}
         {planned && (
-          <div className="banner spark">
-            <span>The plan is ready. Carry it out, or write what to change in it.</span>
-            {(["edit_automatically", "auto", "manual"] as const).map((m, i) => (
-              <button
-                key={m}
-                type="button"
-                className={i === 0 ? "primary small" : "secondary small"}
-                title={modeInfo(m).says}
-                onClick={() =>
-                  void switchMode(m)
-                    .then(() => sending.send("Carry out the plan."))
-                    .catch((e: unknown) => setError(message(e)))
-                }
-              >
-                {i === 0 ? `Carry out · ${modeInfo(m).label}` : modeInfo(m).label}
-              </button>
-            ))}
+          <div className="callout spark">
+            <Icon name="lightbulb" />
+            <span>The plan is ready: carry it out, or write what to change in it.</span>
+            <div className="callout-buttons">
+              {(["edit_automatically", "auto", "manual"] as const).map((m, i) => (
+                <button
+                  key={m}
+                  type="button"
+                  className={`btn small ${i === 0 ? "primary" : "secondary"}`}
+                  title={modeInfo(m).says}
+                  onClick={() =>
+                    void switchMode(m)
+                      .then(() => sending.send("Carry out the plan."))
+                      .catch((e: unknown) => setError(message(e)))
+                  }
+                >
+                  {i === 0 ? `Carry out · ${modeInfo(m).label}` : modeInfo(m).label}
+                </button>
+              ))}
+            </div>
           </div>
         )}
-        {summary && !summary.open && !opened.has(summary.thread) && (
-          <p className="hint muted">The core does not have this session open: a message picks it up again on {summary.server}.</p>
-        )}
+        {thread !== undefined && !parent && <ReviewBar core={core} thread={thread} project={threadProject} store={store} turns={threadsVersion} />}
         {parent ? (
-          <p className="hint muted">A subagent ends with its task; talk to the session that started it.</p>
+          <p className="dock-hint">A subagent ends with its task: talk to the session that started it.</p>
         ) : (
           <Composer
             key={thread ?? "new"}

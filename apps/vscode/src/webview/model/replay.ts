@@ -27,8 +27,7 @@ function size(item: Item): number {
       return JSON.stringify(item.raw ?? null).length;
     case "void":
       return item.calls.reduce((n, c) => n + c.arguments.length, 0);
-    case "notice":
-    case "subagent":
+    default:
       return 0;
   }
 }

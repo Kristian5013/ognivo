@@ -76,6 +76,13 @@
         "icon": "$(history)"
       },
       {
+        "command": "ognivo.deleteSession",
+        "title": "Delete This Session…",
+        "category": "ognivo",
+        "icon": "$(trash)",
+        "enablement": "ognivo.session"
+      },
+      {
         "command": "ognivo.openInEditor",
         "title": "Open the Agent in an Editor Tab",
         "category": "ognivo",
@@ -201,6 +208,11 @@
           "command": "ognivo.showLog",
           "when": "view == ognivo.chat",
           "group": "more@2"
+        },
+        {
+          "command": "ognivo.deleteSession",
+          "when": "view == ognivo.chat && ognivo.session",
+          "group": "session@1"
         },
         {
           "command": "ognivo.changes.acceptAll",
@@ -366,15 +378,17 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "check": "tsc -p tsconfig.json && tsc -p src/webview/tsconfig.json",
+    "check": "tsc -p tsconfig.json && tsc -p src/webview/tsconfig.json && tsc -p gallery/tsconfig.json",
     "test": "vitest run",
     "package": "node scripts/package.mjs",
     "profiles": "node scripts/profiles.mjs",
     "fixtures": "node scripts/fixtures.mjs",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "gallery": "node gallery/shoot.mjs"
   },
   "dependencies": {
     "@vscode/codicons": "0.0.45",
+    "highlight.js": "11.12.0",
     "markdown-it": "14.3.3",
     "react": "19.3.1",
     "react-dom": "19.3.1",

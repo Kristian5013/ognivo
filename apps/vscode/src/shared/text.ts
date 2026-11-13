@@ -14,9 +14,10 @@ export function within(path: string, root: string): boolean {
   return p === r || p.startsWith(`${r}/`);
 }
 
-/** How long ago `unix` (seconds) was, in words. */
-export function ago(unix: number, now = Date.now()): string {
-  const s = Math.max(0, Math.round(now / 1000 - unix));
+/** How long ago `ms` (Unix milliseconds, as the core's threads have their times) was, in
+ * words. */
+export function ago(ms: number, now = Date.now()): string {
+  const s = Math.max(0, Math.round((now - ms) / 1000));
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;

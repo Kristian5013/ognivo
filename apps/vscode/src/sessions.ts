@@ -1,20 +1,48 @@
 // The sessions in VS Code's own pickers: `ognivo: Open a Session…` lists the core's
-// sessions, this workspace's first; `ognivo: Choose the Server and the Model…` asks the
-// server what it runs and keeps the choice in the settings of a new session.
+// sessions, this workspace's first, each with a button that deletes it (as does `ognivo:
+// Delete This Session`); `ognivo: Choose the Server and the Model…` asks the server what it
+// runs and keeps the choice in the settings of a new session.
 
 import * as vscode from "vscode";
 
 import type { Connection } from "./client.ts";
+import { ERRORS } from "./shared/protocol.ts";
 import type * as P from "./shared/protocol.ts";
+import { CoreError } from "./shared/rpc.ts";
 import { ago, samePath } from "./shared/text.ts";
 import { folders } from "./view.ts";
 
-type SessionItem = vscode.QuickPickItem & { thread?: number };
+type SessionItem = vscode.QuickPickItem & { thread?: number; title?: string };
 
-/** The session the user picks: this workspace's first, then the others'. */
-export async function pickSession(connection: Connection): Promise<number | undefined> {
+const DELETE: vscode.QuickInputButton = { iconPath: new vscode.ThemeIcon("trash"), tooltip: "Delete the session" };
+
+/** Deletes a session once the user agrees: its conversation and its subagents' threads go;
+ * the files it changed stay as they are. Whether it did. */
+export async function deleteSession(connection: Connection, thread: number, title: string): Promise<boolean> {
+  const sure = await vscode.window.showWarningMessage(
+    `Delete the session «${title || "New session"}»?`,
+    {
+      modal: true,
+      detail: "Its conversation goes, with its subagents' threads. The files it changed stay as they are: what it left unreviewed counts as accepted.",
+    },
+    "Delete",
+  );
+  if (sure !== "Delete") return false;
   const core = await connection.get();
-  const { threads } = await core.call("thread/list", { project: null, limit: 200 });
+  try {
+    await core.call("thread/delete", { thread });
+  } catch (e) {
+    const busy = e instanceof CoreError && e.code === ERRORS.busy;
+    void vscode.window.showErrorMessage(busy ? "ognivo: a turn of the session runs: stop it first." : `ognivo: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+  return true;
+}
+
+/** The session the user picks: this workspace's first, then the others'. A session's
+ * button deletes it. */
+export async function pickSession(connection: Connection, onDeleted: (thread: number) => void): Promise<number | undefined> {
+  const core = await connection.get();
   const here = new Set(folders().map(samePath));
   const item = (t: P.ThreadSummary): SessionItem => ({
     label: t.title || "New session",
@@ -23,26 +51,54 @@ export async function pickSession(connection: Connection): Promise<number | unde
       .join(" · "),
     detail: `${t.running ? "$(loading~spin) running · " : ""}${ago(t.updated)}${here.has(samePath(t.project)) ? "" : ` · ${t.project}`}`,
     thread: t.thread,
+    title: t.title,
+    buttons: [DELETE],
   });
-  const mine = threads.filter((t) => here.has(samePath(t.project)) && t.kind !== "subagent");
-  const others = threads.filter((t) => !here.has(samePath(t.project)) && t.kind !== "subagent");
-  const items: SessionItem[] = [
-    ...(mine.length ? [{ label: "This workspace", kind: vscode.QuickPickItemKind.Separator }] : []),
-    ...mine.map(item),
-    ...(others.length ? [{ label: "Other projects", kind: vscode.QuickPickItemKind.Separator }] : []),
-    ...others.map(item),
-  ];
+  const list = async (): Promise<SessionItem[]> => {
+    const { threads } = await core.call("thread/list", { project: null, limit: 200 });
+    const mine = threads.filter((t) => here.has(samePath(t.project)) && t.kind !== "subagent");
+    const others = threads.filter((t) => !here.has(samePath(t.project)) && t.kind !== "subagent");
+    return [
+      ...(mine.length ? [{ label: "This workspace", kind: vscode.QuickPickItemKind.Separator }] : []),
+      ...mine.map(item),
+      ...(others.length ? [{ label: "Other projects", kind: vscode.QuickPickItemKind.Separator }] : []),
+      ...others.map(item),
+    ];
+  };
+  const items = await list();
   if (!items.length) {
     void vscode.window.showInformationMessage("ognivo: no sessions yet. Write to the agent to start one.");
     return undefined;
   }
-  const picked = await vscode.window.showQuickPick(items, {
-    title: "ognivo: Open a Session",
-    placeHolder: "A session to go on with",
-    matchOnDescription: true,
-    matchOnDetail: true,
+  const pick = vscode.window.createQuickPick<SessionItem>();
+  pick.title = "ognivo: Open a Session";
+  pick.placeholder = "A session to go on with";
+  pick.matchOnDescription = true;
+  pick.matchOnDetail = true;
+  pick.items = items;
+  return new Promise((resolve) => {
+    let chosen: number | undefined;
+    pick.onDidAccept(() => {
+      chosen = pick.selectedItems[0]?.thread;
+      pick.hide();
+    });
+    pick.onDidTriggerItemButton(async ({ item: it }) => {
+      if (it.thread === undefined) return;
+      // the dialog takes the focus: the picker would close without this
+      pick.ignoreFocusOut = true;
+      const gone = await deleteSession(connection, it.thread, it.title ?? "");
+      pick.ignoreFocusOut = false;
+      if (!gone) return;
+      onDeleted(it.thread);
+      pick.items = await list();
+      if (!pick.items.some((i) => i.thread !== undefined)) pick.hide();
+    });
+    pick.onDidHide(() => {
+      pick.dispose();
+      resolve(chosen);
+    });
+    pick.show();
   });
-  return picked?.thread;
 }
 
 /** The server and, behind llama-server's router, the model of a new session, kept in the

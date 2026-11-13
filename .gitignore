@@ -28,3 +28,4 @@ bench/**/*.server.log
 
 # ik_llama.cpp writes this into the working directory
 llama.log
+apps/vscode/gallery/shots/

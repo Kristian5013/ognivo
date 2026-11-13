@@ -40,6 +40,8 @@ interface AtifStep {
     /** Added by the fixtures script from the session store (scripts/fixtures.mjs). */
     request?: { conversation: number; messages: number };
     reason?: string;
+    /** On the steps of a conversation's start (ognivo-core trace.rs). */
+    conversation?: number | null;
     rejected_calls?: { name?: string; arguments?: unknown }[];
   };
 }

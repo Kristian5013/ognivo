@@ -10,7 +10,7 @@ import { Asks } from "./asks.ts";
 import { BASE, Changes } from "./changes.ts";
 import { Connection } from "./client.ts";
 import { binary, logPath } from "./core.ts";
-import { chooseModel, pickSession } from "./sessions.ts";
+import { chooseModel, deleteSession, pickSession } from "./sessions.ts";
 import { Pages } from "./view.ts";
 
 /** A fence around `text` that no run of backticks in it closes. */
@@ -54,11 +54,26 @@ export function activate(context: vscode.ExtensionContext): void {
     });
   });
   const changes = new Changes(connection);
-  const pages = new Pages(context, bin, changes, () =>
-    connection.get().then(
-      () => undefined,
-      () => undefined,
-    ),
+  /** Deletes a session once the user agrees, and lets the pages know. */
+  const removeSession = async (thread: number, title: string) => {
+    const gone = await deleteSession(connection, thread, title);
+    if (gone) pages.deleted(thread);
+    return gone;
+  };
+  const pages = new Pages(
+    context,
+    bin,
+    {
+      diff: (thread, path, project) => changes.diff(thread, path, project),
+      acceptOf: (thread, path) => changes.acceptOf(thread, path),
+      revertOf: (thread, path) => changes.revertOf(thread, path),
+      deleteSession: removeSession,
+    },
+    () =>
+      connection.get().then(
+        () => undefined,
+        () => undefined,
+      ),
   );
   const tree = vscode.window.createTreeView("ognivo.changes", { treeDataProvider: changes });
   changes.view = tree;
@@ -73,13 +88,26 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerWebviewViewProvider("ognivo.chat", pages, { webviewOptions: { retainContextWhenHidden: true } }),
     vscode.workspace.registerTextDocumentContentProvider(BASE, changes),
     vscode.workspace.onDidCloseTextDocument((d) => d.uri.scheme === BASE && changes.closed(d.uri)),
-    pages.onShown((s) => changes.show(s && { thread: s.thread, project: s.project })),
+    pages.onShown((s) => {
+      changes.show(s && { thread: s.thread, project: s.project });
+      // `ognivo: Delete This Session` in the view's menu while a session shows
+      void vscode.commands.executeCommand("setContext", "ognivo.session", s !== undefined);
+    }),
     command("ognivo.focus", () => vscode.commands.executeCommand("ognivo.chat.focus")),
     command("ognivo.newSession", () => pages.toPage({ t: "new" })),
     command("ognivo.openSession", async () => {
       try {
-        const thread = await pickSession(connection);
+        const thread = await pickSession(connection, (gone) => pages.deleted(gone));
         if (thread !== undefined) await pages.toPage({ t: "open", thread });
+      } catch (e) {
+        void vscode.window.showErrorMessage(`ognivo: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }),
+    command("ognivo.deleteSession", async () => {
+      const shown = pages.shown();
+      if (!shown) return;
+      try {
+        await removeSession(shown.thread, shown.title);
       } catch (e) {
         void vscode.window.showErrorMessage(`ognivo: ${e instanceof Error ? e.message : String(e)}`);
       }

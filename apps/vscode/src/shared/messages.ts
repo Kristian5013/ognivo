@@ -42,6 +42,15 @@ export interface Requests {
   "instructions/save": { params: { path: string; text: string }; result: null };
   /** Opens the file in the editor, made empty first when it is not there. */
   "instructions/open": { params: { path: string }; result: null };
+  /** Accepts a file's unreviewed change, or every file's (`null`) once the user agrees;
+   * whether it did. */
+  "changes/accept": { params: { thread: number; path: string | null }; result: boolean };
+  /** Puts back a file, or every file (`null`), once the user agrees; whether it did. */
+  "changes/revert": { params: { thread: number; path: string | null }; result: boolean };
+  /** Deletes a session once the user agrees in VS Code's dialog; whether it did. */
+  "sessions/delete": { params: { thread: number; title: string }; result: boolean };
+  /** Whether Exa takes the key: one search of a result, as its MCP server would make. */
+  "exa/check": { params: { key: string }; result: { ok: boolean; says: string } };
 }
 
 /** What a page sends the extension. */
@@ -69,6 +78,8 @@ export type ToPage =
   | { t: "open"; thread: number }
   /** Shows the settings, at a tab of them. */
   | { t: "settings"; tab?: SettingsTab }
+  /** A session was deleted: a page that shows it goes to a new one. */
+  | { t: "deleted"; thread: number }
   | { t: "response"; id: number; result?: unknown; error?: string };
 
 export type SettingsTab = "model" | "mcp" | "instructions";

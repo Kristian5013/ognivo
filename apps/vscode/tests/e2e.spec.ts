@@ -239,6 +239,14 @@ test("a session from the first message: a call that asks in the conversation, th
     await expect(row).toHaveCount(0);
     await expect(page.getByText("and 1 command with side effects")).toBeVisible();
     await shot(app, page, "e2e-reverted");
+
+    // a new session's page lists this one, which deletes after VS Code's dialog
+    await command(page, "ognivo: New Session");
+    const recent = panel.locator(".recent li").filter({ hasText: "make a file" });
+    await recent.hover();
+    await recent.getByRole("button", { name: /^Delete «make a file»/ }).click();
+    await page.locator(".monaco-dialog-box").getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(recent).toHaveCount(0, { timeout: 30_000 });
   } finally {
     await close();
   }
@@ -268,9 +276,18 @@ test("the settings: Exa switched on with a key and off again, the user's instruc
     const mine = panel.locator("textarea.instructions");
     await mine.fill("Answer in Russian.");
     await panel.getByRole("button", { name: "Save", exact: true }).click();
-    await expect(panel.getByText("saved", { exact: true })).toBeVisible();
+    await expect(panel.getByText("Saved", { exact: true })).toBeVisible();
     expect(readFileSync(join(dir, ".ognivo", "AGENTS.md"), "utf8")).toBe("Answer in Russian.");
     await shot(app, page, "e2e-instructions");
+
+    // the mode of a new session, from the panel's own menu, into VS Code's settings
+    await panel.getByRole("tab", { name: "Model" }).click();
+    await panel.getByRole("button", { name: /^Mode: / }).click();
+    await shot(app, page, "e2e-mode-menu");
+    await panel.getByRole("option", { name: /^Manual/ }).click();
+    await expect(panel.getByRole("button", { name: "Mode: Manual" })).toBeVisible({ timeout: 10_000 });
+    const settings = JSON.parse(readFileSync(join(dir, "vscode", "User", "settings.json"), "utf8")) as Record<string, unknown>;
+    expect(settings["ognivo.mode"]).toBe("manual");
   } finally {
     await close();
   }

@@ -8,8 +8,8 @@ export interface ModeInfo {
   label: string;
   /** What it lets the agent do, as the menu says it. */
   says: string;
-  glyph: string;
-  tone: string;
+  /** Its codicon, in the menus and on the composer's button. */
+  icon: string;
 }
 
 export const MODES: ModeInfo[] = [
@@ -17,29 +17,25 @@ export const MODES: ModeInfo[] = [
     mode: "manual",
     label: "Manual",
     says: "Asks before every edit, and before every command that does more than read.",
-    glyph: "⏸",
-    tone: "text-muted-foreground",
+    icon: "debug-pause",
   },
   {
     mode: "edit_automatically",
     label: "Edit automatically",
     says: "Edits apply at once, to review in Changes; commands ask as usual.",
-    glyph: "⏵",
-    tone: "text-foreground",
+    icon: "edit",
   },
   {
     mode: "plan",
     label: "Plan",
     says: "Reads and plans, and changes nothing: you carry the plan out when it is ready.",
-    glyph: "◇",
-    tone: "text-spark",
+    icon: "lightbulb",
   },
   {
     mode: "auto",
     label: "Auto",
     says: "Edits and runs commands without asking; protected files, files outside the project and your rules still ask.",
-    glyph: "⏵⏵",
-    tone: "text-warn",
+    icon: "run-all",
   },
 ];
 

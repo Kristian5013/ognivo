@@ -33,6 +33,7 @@ const listeners = {
   new: new Set<() => void>(),
   open: new Set<(thread: number) => void>(),
   settings: new Set<(tab?: SettingsTab) => void>(),
+  deleted: new Set<(thread: number) => void>(),
 };
 /** The page's requests that wait for the extension's answer, by their ids. */
 const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -65,6 +66,9 @@ function receive(m: ToPage): void {
       break;
     case "settings":
       for (const l of listeners.settings) l(m.tab);
+      break;
+    case "deleted":
+      for (const l of listeners.deleted) l(m.thread);
       break;
     case "response": {
       const w = waiting.get(m.id);
@@ -193,4 +197,10 @@ export function request<M extends keyof Requests>(method: M, params: Requests[M]
 export function onSettings(l: (tab?: SettingsTab) => void): () => void {
   listeners.settings.add(l);
   return () => listeners.settings.delete(l);
+}
+
+/** A session was deleted, here or from VS Code's picker. */
+export function onDeleted(l: (thread: number) => void): () => void {
+  listeners.deleted.add(l);
+  return () => listeners.deleted.delete(l);
 }

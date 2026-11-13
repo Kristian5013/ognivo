@@ -25,7 +25,15 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
     case "generation":
       return [{ type: "generation", generation: toGeneration(e.generation, offset) }];
     case "turn_completed":
-      return [{ type: "turn_completed", index: e.turn, end: e.end, why: e.why ?? undefined }];
+      return [
+        {
+          type: "turn_completed",
+          index: e.turn,
+          end: e.end,
+          why: e.why ?? undefined,
+          verification: e.verification ?? undefined,
+        },
+      ];
     case "thread_rewound":
       return [{ type: "rewound", turn: e.turn }];
     case "call_draft":
@@ -62,28 +70,38 @@ function toItem(item: P.Item, offset: number): Item {
         raw: parsed(item.arguments),
         call: item.call ? toCall(item.call) : undefined,
         result: item.result ? toResult(item.result) : undefined,
+        changes: item.changes.map((c) => ({
+          path: c.path,
+          created: c.created,
+          hunks: c.hunks.map((h) => ({ oldStart: h.old_start, newStart: h.new_start, removed: h.removed, added: h.added })),
+        })),
       };
     case "notice":
       return { kind: "notice", id, text: item.text };
     case "void":
       return { kind: "void", id, generation, why: item.why, calls: item.calls };
-    // the store has no rows of their own for these yet
     case "compaction":
-      return { kind: "notice", id, text: `compacting: about ${item.tokens} tokens, over the ${item.limit} budget` };
-    case "approval": {
-      const answer = item.allowed === null ? "waits for your answer" : item.allowed ? "allowed" : "denied";
       return {
-        kind: "notice",
+        kind: "compaction",
         id,
-        text: `${item.agent ? `subagent «${item.agent}» asks` : "asks"}: ${item.tool} ${item.action} (${item.reason}) · ${answer}`,
+        tokens: item.tokens,
+        limit: item.limit,
+        replaced: item.replaced ?? undefined,
+        kept: item.kept ?? undefined,
+        summary: item.summary ?? undefined,
       };
-    }
+    case "approval":
+      return {
+        kind: "approval",
+        id,
+        tool: item.tool,
+        action: item.action,
+        reason: item.reason,
+        agent: item.agent ?? undefined,
+        allowed: item.allowed ?? undefined,
+      };
     case "instructions":
-      return {
-        kind: "notice",
-        id,
-        text: `instructions: ${item.files.join(", ")}${item.skipped.map((s) => ` · not read: ${s.path} (${s.why})`).join("")}`,
-      };
+      return { kind: "instructions", id, files: item.files, skipped: item.skipped };
     case "subagent":
       return {
         kind: "subagent",

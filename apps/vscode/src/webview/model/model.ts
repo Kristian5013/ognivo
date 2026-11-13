@@ -105,6 +105,22 @@ export interface MessageItem extends Base {
   text: string;
 }
 
+/** Lines a change took out at `oldStart` and put in at `newStart` (from 1). */
+export interface Hunk {
+  oldStart: number;
+  newStart: number;
+  removed: string[];
+  added: string[];
+}
+
+/** A file a call changed, against what it was (the core's events carry them). */
+export interface FileChange {
+  /** Relative to the project root inside it, absolute outside. */
+  path: string;
+  created: boolean;
+  hunks: Hunk[];
+}
+
 export interface ToolItem extends Base {
   kind: "tool";
   /** The model's own name for the tool. */
@@ -115,12 +131,45 @@ export interface ToolItem extends Base {
   call?: Call;
   /** `undefined` while it runs. */
   result?: ToolResult;
+  /** The files it changed; a recorded trajectory has none. */
+  changes?: FileChange[];
 }
 
 /** What ognivo told the model between generations: notes, limits, corrections. */
 export interface NoticeItem extends Base {
   kind: "notice";
   text: string;
+}
+
+/** A question the agent, or a subagent, asked the user. */
+export interface ApprovalItem extends Base {
+  kind: "approval";
+  tool: string;
+  action: string;
+  reason: string;
+  /** The subagent that asked, by its task's title. */
+  agent?: string;
+  /** `undefined` while it waits for the answer. */
+  allowed?: boolean;
+}
+
+/** The instruction files a turn gave the model (AGENTS.md, CLAUDE.md, ...). */
+export interface InstructionsItem extends Base {
+  kind: "instructions";
+  files: string[];
+  skipped: { path: string; why: string }[];
+}
+
+/** The conversation, summed up to make room. */
+export interface CompactionItem extends Base {
+  kind: "compaction";
+  /** About how many tokens it held, over `limit`. */
+  tokens: number;
+  limit: number;
+  /** Messages the summary replaced, and those kept; `undefined` while it runs. */
+  replaced?: number;
+  kept?: number;
+  summary?: string;
 }
 
 /** A generation that ran nothing: calls that did not parse, an empty answer, one cut at its
@@ -148,7 +197,16 @@ export interface SubagentItem extends Base {
   changed: string[];
 }
 
-export type Item = ReasoningItem | MessageItem | ToolItem | NoticeItem | VoidItem | SubagentItem;
+export type Item =
+  | ReasoningItem
+  | MessageItem
+  | ToolItem
+  | NoticeItem
+  | VoidItem
+  | SubagentItem
+  | ApprovalItem
+  | InstructionsItem
+  | CompactionItem;
 
 export interface Turn {
   index: number;
@@ -160,6 +218,8 @@ export interface Turn {
   end?: string;
   /** Why it ended so, when it did not end with an answer. */
   why?: string;
+  /** What the facts of the turn say of its answer: `verified: …`, `NOT verified: …`. */
+  verification?: string;
 }
 
 export interface Thread {

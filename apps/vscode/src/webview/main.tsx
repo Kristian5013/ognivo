@@ -9,12 +9,19 @@ import { createRoot } from "react-dom/client";
 import { Core } from "../shared/rpc.ts";
 import { App } from "./app.tsx";
 import { hello, port, run } from "./host.ts";
+import { Icon } from "./icon.tsx";
 import { Threads } from "./model/threads.ts";
+import { Spark } from "./welcome.tsx";
 
 const element = document.getElementById("root");
 if (!element) throw new Error("the page has no #root");
 const root = createRoot(element);
-root.render(<p className="centered muted">Connecting to the core…</p>);
+root.render(
+  <div className="centered muted">
+    <Spark size={28} />
+    <p>Connecting to the core…</p>
+  </div>,
+);
 
 void hello().then(async (h) => {
   const core = new Core(port());
@@ -26,12 +33,16 @@ void hello().then(async (h) => {
   } catch (e) {
     root.render(
       <div className="centered">
+        <Icon name="debug-disconnect" className="centered-icon" />
         <p>The core did not answer: {e instanceof Error ? e.message : String(e)}</p>
         <div className="buttons">
-          <button type="button" className="primary" onClick={() => location.reload()}>
+          <button type="button" className="btn primary" onClick={() => location.reload()}>
             Try again
           </button>
-          <button type="button" className="link" onClick={() => run("vscodeSettings")}>
+          <button type="button" className="btn ghost" onClick={() => run("showLog")}>
+            The core's log
+          </button>
+          <button type="button" className="btn ghost" onClick={() => run("vscodeSettings")}>
             Settings
           </button>
         </div>

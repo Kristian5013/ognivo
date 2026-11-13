@@ -126,6 +126,32 @@ class Page {
 export interface Opener {
   /** Opens a changed file's change in the editor's diff. */
   diff(thread: number, path: string, project: string): Promise<void>;
+  /** Accepts or puts back a file's change, or every file's, asking the user first where it
+   * should; whether it did. */
+  acceptOf(thread: number, path: string | null): Promise<boolean>;
+  revertOf(thread: number, path: string | null): Promise<boolean>;
+  /** Deletes a session once the user agrees; whether it did. */
+  deleteSession(thread: number, title: string): Promise<boolean>;
+}
+
+/** Whether Exa takes `key`: one search of one result, as its MCP server would make it. */
+async function checkExa(key: string): Promise<Requests["exa/check"]["result"]> {
+  try {
+    const res = await fetch("https://api.exa.ai/search", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key },
+      body: JSON.stringify({ query: "Exa", numResults: 1 }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.ok) return { ok: true, says: "Exa takes the key: searches work" };
+    const body = (await res.text()).slice(0, 300);
+    const why = /"(?:error|message)"\s*:\s*"([^"]+)"/.exec(body)?.[1] ?? body;
+    if (res.status === 401 || res.status === 403) return { ok: false, says: `Exa does not take the key (${res.status}): ${why}` };
+    if (res.status === 402 || res.status === 429) return { ok: false, says: `Exa takes the key but answers ${res.status}: ${why}` };
+    return { ok: false, says: `Exa answers ${res.status}: ${why}` };
+  } catch (e) {
+    return { ok: false, says: `Exa did not answer: ${e instanceof Error ? e.message : String(e)}` };
+  }
 }
 
 export class Pages implements vscode.WebviewViewProvider {
@@ -197,6 +223,11 @@ export class Pages implements vscode.WebviewViewProvider {
 
   private broadcast(m: ToPage): void {
     for (const p of this.all) p.post(m);
+  }
+
+  /** A session was deleted: the pages let go of it. */
+  deleted(thread: number): void {
+    this.broadcast({ t: "deleted", thread });
   }
 
   private attach(
@@ -277,7 +308,19 @@ export class Pages implements vscode.WebviewViewProvider {
         break;
       case "request":
         try {
-          page.post({ t: "response", id: m.id, result: await answer(m.method, m.params as never) });
+          let result: unknown;
+          if (m.method === "changes/accept" || m.method === "changes/revert") {
+            const p = m.params as Requests["changes/accept"]["params"];
+            result = await (m.method === "changes/accept" ? this.opener.acceptOf(p.thread, p.path) : this.opener.revertOf(p.thread, p.path));
+          } else if (m.method === "sessions/delete") {
+            const p = m.params as Requests["sessions/delete"]["params"];
+            result = await this.opener.deleteSession(p.thread, p.title);
+          } else if (m.method === "exa/check") {
+            result = await checkExa((m.params as Requests["exa/check"]["params"]).key);
+          } else {
+            result = await answer(m.method, m.params as never);
+          }
+          page.post({ t: "response", id: m.id, result });
         } catch (e) {
           page.post({ t: "response", id: m.id, error: e instanceof Error ? e.message : String(e) });
         }

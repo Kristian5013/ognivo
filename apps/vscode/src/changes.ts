@@ -161,26 +161,60 @@ export class Changes implements vscode.TreeDataProvider<FileNode>, vscode.TextDo
   }
 
   async revert(node: FileNode): Promise<void> {
-    const f = node.file;
-    const what = f.created ? "delete it: the agent created it" : "put it back as it was before the session";
-    const sure = await vscode.window.showWarningMessage(
-      `Revert ${f.path}?`,
-      {
-        modal: true,
-        detail: f.drifted
-          ? `Something else changed it too since the agent's edit, and a revert loses that. A revert will ${what}.`
-          : `A revert will ${what}.`,
-      },
-      f.drifted ? "Revert Anyway" : "Revert",
-    );
-    if (!sure) return;
     try {
-      const core = await this.connection.get();
-      await core.call("changes/revert", { thread: node.thread, path: f.path, force: f.drifted });
+      await this.revertOf(node.thread, node.file.path);
     } catch (e) {
       void vscode.window.showErrorMessage(`ognivo: ${e instanceof Error ? e.message : String(e)}`);
     }
+  }
+
+  /** From a page: accepts one file as it is, or every file once the user agrees. */
+  async acceptOf(thread: number, path: string | null): Promise<boolean> {
+    if (path === null) {
+      const all = await vscode.window.showInformationMessage(
+        "Accept every unreviewed change of the session?",
+        { modal: true, detail: "Builds and tests then run without asking. Nothing on disk changes." },
+        "Accept All",
+      );
+      if (all !== "Accept All") return false;
+    }
+    const core = await this.connection.get();
+    await core.call("changes/accept", { thread, path });
     await this.refresh();
+    return true;
+  }
+
+  /** Puts back one file, or every file, as it was before the session, once the user agrees:
+   * a file the agent created goes, and a file something else changed too loses that. */
+  async revertOf(thread: number, path: string | null): Promise<boolean> {
+    const core = await this.connection.get();
+    const { files } = await core.call("changes/list", { thread });
+    const chosen = path === null ? files : files.filter((f) => f.path === path);
+    if (!chosen.length) return false;
+    const drifted = chosen.filter((f) => f.drifted);
+    let title: string;
+    let detail: string;
+    if (path !== null) {
+      const f = chosen[0]!;
+      const what = f.created ? "delete it: the agent created it" : "put it back as it was before the session";
+      title = `Revert ${f.path}?`;
+      detail = f.drifted
+        ? `Something else changed it too since the agent's edit, and a revert loses that. A revert will ${what}.`
+        : `A revert will ${what}.`;
+    } else {
+      title = `Revert every change of the session (${chosen.length} ${chosen.length === 1 ? "file" : "files"})?`;
+      detail =
+        "Each file goes back to what it held before the session; the files the agent created are deleted." +
+        (drifted.length ? ` Something else changed ${drifted.map((f) => f.path).join(", ")} too, and a revert loses that.` : "");
+    }
+    const sure = await vscode.window.showWarningMessage(title, { modal: true, detail }, drifted.length ? "Revert Anyway" : "Revert");
+    if (!sure) return false;
+    try {
+      for (const f of chosen) await core.call("changes/revert", { thread, path: f.path, force: f.drifted });
+    } finally {
+      await this.refresh();
+    }
+    return true;
   }
 
   /** The file itself, in the editor. */

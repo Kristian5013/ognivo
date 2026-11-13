@@ -36,7 +36,7 @@ export type LiveEvent =
   /** A call's result, or the whole item as it ended (the core's events carry it). */
   | { type: "item_completed"; id: string; result?: ToolResult; item?: Item }
   | { type: "generation"; generation: Generation }
-  | { type: "turn_completed"; index: number; end: string; why?: string }
+  | { type: "turn_completed"; index: number; end: string; why?: string; verification?: string }
   /** The turns from `turn` on were taken back: out of the conversation. */
   | { type: "rewound"; turn: number }
   /** More of call `index` of generation `generation` as the model writes it. */
@@ -44,9 +44,10 @@ export type LiveEvent =
 
 export type Row =
   | { kind: "user"; key: string; turn: number; text: string; images: Picture[] }
-  /** `live` while it streams, or runs. */
-  | { kind: "item"; key: string; item: Item; open: boolean; live: boolean }
-  | { kind: "end"; key: string; turn: number; end: string; why?: string }
+  /** `live` while it streams, or runs; `open` once the user opened or closed it, else
+   * what its kind shows (a failed command opens, a diff shows its first lines). */
+  | { kind: "item"; key: string; item: Item; open?: boolean; live: boolean }
+  | { kind: "end"; key: string; turn: number; end: string; why?: string; verification?: string }
   /** Where the user took turns `from` to `to` back. */
   | { kind: "rewound"; key: string; from: number; to: number }
   /** A call being written, until its item takes the row. */
@@ -59,12 +60,32 @@ type Schedule = (flush: () => void) => void;
 const frame: Schedule = (flush) =>
   typeof requestAnimationFrame === "function" ? requestAnimationFrame(flush) : queueMicrotask(flush);
 
+/** Whether an item that starts is still going: text that streams, a call that runs, a
+ * question that waits, a summary being written. */
+function liveOf(item: Item): boolean {
+  switch (item.kind) {
+    case "tool":
+      return !item.result;
+    case "subagent":
+      return !item.end;
+    case "approval":
+      return item.allowed === undefined;
+    case "compaction":
+      return item.replaced === undefined;
+    case "reasoning":
+    case "message":
+      return true;
+    default:
+      return false;
+  }
+}
+
 export class ThreadStore {
   readonly info: Info;
   readonly generations: Generation[] = [];
   private byIndex = new Map<number, Generation>();
-  /** Whether a call starts open: changes do, the rest when everything opens. */
-  private readonly opens: (item: Item) => boolean;
+  /** Whether every call starts open; else each as its kind shows it. */
+  private readonly opens: (item: Item) => boolean | undefined;
   private readonly schedule: Schedule;
   private rows: Row[] = [];
   /** The turn each row belongs to, and the last turn begun. */
@@ -93,7 +114,7 @@ export class ThreadStore {
 
   constructor(info: Info, opts: { openAll?: boolean; schedule?: Schedule } = {}) {
     this.info = info;
-    this.opens = (i) => Boolean(opts.openAll) || (i.kind === "tool" && i.call?.name === "Edit");
+    this.opens = () => (opts.openAll ? true : undefined);
     this.schedule = opts.schedule ?? frame;
   }
 
@@ -108,7 +129,7 @@ export class ThreadStore {
         store.apply({ type: "item_completed", id: item.id });
       }
       if (turn.end) {
-        store.apply({ type: "turn_completed", index: turn.index, end: turn.end, why: turn.why });
+        store.apply({ type: "turn_completed", index: turn.index, end: turn.end, why: turn.why, verification: turn.verification });
       }
     }
     for (const g of generations) store.addGeneration(g);
@@ -158,12 +179,7 @@ export class ThreadStore {
           key: e.item.id,
           item: e.item,
           open: this.opens(e.item),
-          live:
-            e.item.kind === "tool"
-              ? !e.item.result
-              : e.item.kind === "subagent"
-                ? !e.item.end
-                : e.item.kind !== "notice" && e.item.kind !== "void",
+          live: liveOf(e.item),
         });
         return;
       case "item_delta":
@@ -190,7 +206,7 @@ export class ThreadStore {
         return;
       case "turn_completed":
         for (const g of new Set([...this.drafts.keys()].map((k) => Number(k.split(":")[0])))) this.endDrafts(g, false);
-        this.add({ kind: "end", key: `e${e.index}`, turn: e.index, end: e.end, why: e.why });
+        this.add({ kind: "end", key: `e${e.index}`, turn: e.index, end: e.end, why: e.why, verification: e.verification });
         return;
       case "draft":
         this.draft(e);
