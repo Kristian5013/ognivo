@@ -77,10 +77,19 @@ impl View {
             self.reasoning(text);
             return;
         }
+        // how far a generation got, a subagent's too: the stream and the thinking line say
+        // it, and it ends no stretch of thinking
+        if e.is_progress() {
+            return;
+        }
         self.end_thinking();
         match e {
             // a call shows once it runs
-            AgentEvent::CallDraft { .. } => {}
+            AgentEvent::CallDraft { .. } | AgentEvent::Progress { .. } => {}
+            AgentEvent::Steered { text } => {
+                let line = format!("↳ {}", printable(&text));
+                self.screen.line(&short(&line, LINE_CHARS), Paint::Dim)
+            }
             AgentEvent::Text { text } => self.screen.write(&printable(&text), Paint::Plain),
             AgentEvent::ToolStarted {
                 tool,

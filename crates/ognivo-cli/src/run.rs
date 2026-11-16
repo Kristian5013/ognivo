@@ -191,17 +191,24 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
         stream.write(started);
         stream
     });
-    let mut on = |e: AgentEvent| match events.as_mut() {
-        Some(stream) => {
-            let turn = matches!(e, AgentEvent::TurnStarted { .. });
-            let out = stream.projector.event(e);
-            stream.write(out);
-            if let (true, Some(e)) = (turn, first.take()) {
+    let mut on = |e: AgentEvent| {
+        // how far a generation got, a subagent's too, is for a user who waits on it, which
+        // a run has not
+        if e.is_progress() {
+            return;
+        }
+        match events.as_mut() {
+            Some(stream) => {
+                let turn = matches!(e, AgentEvent::TurnStarted { .. });
                 let out = stream.projector.event(e);
                 stream.write(out);
+                if let (true, Some(e)) = (turn, first.take()) {
+                    let out = stream.projector.event(e);
+                    stream.write(out);
+                }
             }
+            None => show(&e, jsonl),
         }
-        None => show(&e, jsonl),
     };
     let mut term = ognivo_os::signal::terminate()?;
     let mut int = ognivo_os::signal::interrupt()?;
@@ -218,7 +225,8 @@ pub async fn run(a: RunArgs) -> anyhow::Result<ExitCode> {
     if let Err((name, _)) = &end {
         agent.abandon_turn(&format!("ognivo was stopped by {name}."));
         if let Some(stream) = events.as_mut() {
-            let out = stream.projector.interrupted();
+            // nobody writes to a run's turn
+            let out = stream.projector.interrupted(Vec::new());
             stream.write(out);
         }
     }
@@ -335,11 +343,14 @@ fn write_trajectory(args: &SessionArgs, id: ognivo_store::SessionId, file: &Path
 }
 
 /// Text mode: the model's words on stdout as they stream, tool activity on stderr. A call
-/// the model is writing shows once it runs, in the JSON lines too.
+/// the model is writing shows once it runs, in the JSON lines too; how far a generation got
+/// shows nowhere.
 fn show(e: &AgentEvent, jsonl: bool) {
     if jsonl {
-        if !matches!(e, AgentEvent::CallDraft { .. })
-            && let Ok(line) = serde_json::to_string(e)
+        if !matches!(
+            e,
+            AgentEvent::CallDraft { .. } | AgentEvent::Progress { .. }
+        ) && let Ok(line) = serde_json::to_string(e)
         {
             println!("{line}");
         }
@@ -350,7 +361,10 @@ fn show(e: &AgentEvent, jsonl: bool) {
             print!("{text}");
             let _ = std::io::stdout().flush();
         }
-        AgentEvent::Reasoning { .. } | AgentEvent::CallDraft { .. } => {}
+        AgentEvent::Reasoning { .. }
+        | AgentEvent::CallDraft { .. }
+        | AgentEvent::Progress { .. } => {}
+        AgentEvent::Steered { text } => eprintln!("↳ {text}"),
         AgentEvent::Restarted { reason } => eprintln!("\n· restarted: {reason}"),
         AgentEvent::ToolStarted {
             tool, arguments, ..

@@ -1,11 +1,13 @@
 // The page's side of the extension (src/view.ts, src/shared/messages.ts): the extension's
 // hello comes first, with the page's storage, the workspace and the settings of a new
 // session; then the core's messages, the editor's insertions and the extension's commands.
-// The page asks the extension to open files, changes and links, keeps its storage there,
-// and runs the extension's commands.
+// What the user's editor and terminals do, and the prompts from elsewhere in VS Code, go
+// to the page's workspace store (model/workspace.ts). The page asks the extension to open
+// files, changes and links, keeps its storage there, and runs the extension's commands.
 
 import type { Command, FromPage, NewSession, Place, Requests, SettingsTab, ToPage } from "../shared/messages.ts";
 import type { Port } from "../shared/rpc.ts";
+import workspace from "./model/workspace.ts";
 
 interface VsCodeApi {
   postMessage(message: FromPage): void;
@@ -70,6 +72,15 @@ function receive(m: ToPage): void {
     case "deleted":
       for (const l of listeners.deleted) l(m.thread);
       break;
+    case "editor":
+      workspace.setEditor(m.editor);
+      break;
+    case "failures":
+      workspace.setFailures(m.failures);
+      break;
+    case "prompt":
+      workspace.emitPrompt({ text: m.text, chips: m.chips, send: m.send });
+      break;
     case "response": {
       const w = waiting.get(m.id);
       waiting.delete(m.id);
@@ -92,6 +103,8 @@ export function hello(): Promise<Hello> {
         kept = new Map(Object.entries(m.state));
         folders = m.folders;
         session = m.session;
+        workspace.setEditor(m.editor ?? null);
+        workspace.setFailures(m.failures ?? []);
         document.documentElement.dataset.place = m.place;
         resolve({ place: m.place });
       } else {
@@ -191,6 +204,23 @@ export function request<M extends keyof Requests>(method: M, params: Requests[M]
     waiting.set(id, { resolve: resolve as (v: unknown) => void, reject });
     api.postMessage({ t: "request", id, method, params });
   });
+}
+
+/** The workspace's files that match `query`, the best first, relative to the workspace
+ * with `/`: at most `limit`, the extension's 20 when not given. */
+export function findFiles(query: string, limit?: number): Promise<string[]> {
+  return request("files/find", limit === undefined ? { query } : { query, limit });
+}
+
+/** The review of a thread's unreviewed changes in the editor: every file's in one tab
+ * (`path` `null`), or a file's diff. */
+export function openReview(thread: number, path: string | null = null): Promise<null> {
+  return request("review/open", { thread, path });
+}
+
+/** The "ognivo" terminal, which shows the agent's commands as they ran. */
+export function showCommands(): Promise<null> {
+  return request("terminal/show", {});
 }
 
 /** The extension's word to show the settings, at a tab. */

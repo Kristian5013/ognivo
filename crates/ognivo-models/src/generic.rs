@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::engine::{EngineError, SamplerSpec, Usage};
+use crate::engine::{EngineError, PromptProgress, SamplerSpec, Usage};
 use crate::guard::Guard;
 use crate::image::Image;
 
@@ -254,6 +254,10 @@ pub fn chat_body(req: &ChatRequest) -> Value {
         "stream": true,
         // ask for the final usage/timings chunk, so cache-hit telemetry is available
         "stream_options": { "include_usage": true },
+        // how far the prompt is read, and the server's counts with each token, for the user
+        // who waits on the step; a server that has neither ignores them
+        "return_progress": true,
+        "timings_per_token": true,
         "cache_prompt": true,
         "temperature": s.temperature,
         "top_p": s.top_p,
@@ -408,11 +412,16 @@ pub enum ChatEvent {
         arguments: String,
     },
     Finish(FinishReason),
+    /// The server's counts: those with each token (`timings_per_token`), then the final ones.
     Usage(Usage),
+    /// How far the server read the prompt (`return_progress`).
+    Progress(PromptProgress),
 }
 
 /// Maps one SSE chunk to its events. An `error` chunk becomes an error, as the Native path
-/// does; the final `include_usage` chunk has empty `choices` and carries only usage.
+/// does; the final `include_usage` chunk has empty `choices` and carries only usage. A chunk
+/// of the prompt's progress has the delta `{"role": "assistant", "content": null}`, which is
+/// no text.
 pub fn chat_events(v: &Value) -> Result<Vec<ChatEvent>, EngineError> {
     if let Some(err) = v.get("error") {
         let status = err["code"]
@@ -455,6 +464,7 @@ pub fn chat_events(v: &Value) -> Result<Vec<ChatEvent>, EngineError> {
     if v.get("usage").is_some() || v.get("timings").is_some() {
         out.push(ChatEvent::Usage(usage_of(v)));
     }
+    out.extend(PromptProgress::of(v).map(ChatEvent::Progress));
     Ok(out)
 }
 
@@ -515,7 +525,9 @@ impl ChatCompletion {
                 call.arguments.push_str(&arguments);
             }
             ChatEvent::Finish(reason) => self.finish = Some(reason),
+            // with a count at each token, the last one is the final count
             ChatEvent::Usage(u) => self.usage = u,
+            ChatEvent::Progress(_) => {}
         }
     }
 
@@ -799,6 +811,11 @@ mod tests {
         let b = chat_body(&req);
         assert_eq!(b["stream"], json!(true));
         assert_eq!(b["stream_options"], json!({ "include_usage": true }));
+        // the user sees how far the step got
+        assert_eq!(
+            (&b["return_progress"], &b["timings_per_token"]),
+            (&json!(true), &json!(true))
+        );
         assert_eq!(b["temperature"], json!(1.0));
         assert_eq!(b["top_k"], json!(64));
         assert_eq!(b["mirostat"], json!(0));
@@ -911,6 +928,68 @@ mod tests {
             panic!("{:?}", c.outcome(&Guard::default()))
         };
         assert_eq!(calls.calls(), c.tool_calls.as_slice());
+    }
+
+    /// Upstream llama-server with `return_progress` and `timings_per_token`: chunks of the
+    /// prompt's progress, each with the delta of an assistant message without content, then
+    /// the counts with every token, then the final ones.
+    #[test]
+    fn the_prompts_progress_is_no_text_and_the_counts_end_as_the_final_ones() {
+        let timings = |prompt: u32, predicted: u32| json!({"cache_n": 4000, "prompt_n": prompt, "prompt_ms": 900.0, "predicted_n": predicted, "predicted_ms": 30.0 * f64::from(predicted), "predicted_per_second": 33.3});
+        let progress = |processed: u32| {
+            json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": null}}],
+                "object": "chat.completion.chunk", "timings": timings(processed - 4000, 0),
+                "prompt_progress": {"total": 12400, "cache": 4000, "processed": processed, "time_ms": 120}})
+        };
+        let first = progress(4000);
+        assert_eq!(
+            chat_events(&first).unwrap(),
+            [
+                ChatEvent::Usage(Usage {
+                    prompt_n: Some(0),
+                    cache_n: Some(4000),
+                    predicted_n: Some(0),
+                    prompt_ms: Some(900.0),
+                    predicted_ms: Some(0.0),
+                }),
+                ChatEvent::Progress(PromptProgress {
+                    total: 12400,
+                    cache: 4000,
+                    processed: 4000,
+                    time_ms: Some(120),
+                }),
+            ]
+        );
+        let token = |delta: Value, predicted: u32| {
+            let mut c = json!({"choices": [{"index": 0, "delta": delta, "finish_reason": null}]});
+            c["timings"] = timings(8400, predicted);
+            c
+        };
+        let chunks = [
+            first,
+            progress(12400),
+            token(json!({"role": "assistant", "content": null}), 1),
+            token(json!({"reasoning_content": "think"}), 2),
+            token(json!({"content": "Hello"}), 3),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+            json!({"choices": [], "usage": {"prompt_tokens": 12400, "completion_tokens": 3}, "timings": timings(8400, 3)}),
+        ];
+        let mut c = ChatCompletion::default();
+        for chunk in &chunks {
+            for ev in chat_events(chunk).unwrap() {
+                c.apply(ev);
+            }
+        }
+        // the deltas without content added nothing to the text
+        assert_eq!(
+            (c.content.as_str(), c.reasoning.as_str()),
+            ("Hello", "think")
+        );
+        assert_eq!(
+            (c.usage.prompt_n, c.usage.cache_n, c.usage.predicted_n),
+            (Some(8400), Some(4000), Some(3))
+        );
+        assert_eq!(c.outcome(&Guard::default()), Outcome::Answer);
     }
 
     #[test]

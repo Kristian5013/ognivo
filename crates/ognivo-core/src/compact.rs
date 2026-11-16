@@ -35,6 +35,9 @@ const MAX_KEPT_STEPS: usize = 4;
 const MAX_REQUESTS: usize = 8;
 /// Characters of one request in the note.
 const REQUEST_CHARS: usize = 2000;
+/// What comes before each text the user wrote while a turn ran (`turn/steer`), as the
+/// agent appends it to the turn's request: the note quotes it apart from the request.
+pub const STEERED: &str = "\nThen, while you worked: ";
 /// Idle compactions in a row (nothing new read, nothing changed since the one before)
 /// that end the turn: the work does not fit the context.
 pub const MAX_IDLE: u32 = 2;
@@ -183,7 +186,7 @@ pub fn note(
         }
         s.push_str(":\n");
         for (i, r) in requests.iter().enumerate().skip(skipped) {
-            s.push_str(&format!("{}. {}\n", i + 1, clip(r.trim(), REQUEST_CHARS)));
+            s.push_str(&format!("{}. {}\n", i + 1, quoted(r)));
         }
     }
     match summary {
@@ -218,6 +221,19 @@ pub fn counts(c: &FileChange) -> String {
     } else {
         format!("+{added} -{removed}")
     }
+}
+
+/// A request as the note quotes it: cut to [`REQUEST_CHARS`], with what the user wrote
+/// while its turn ran after it ([`STEERED`]), each cut alike. Cut whole, a long request
+/// (a selection or a command's output from the editor comes with it) would cut those off.
+fn quoted(request: &str) -> String {
+    let mut parts = request.split(STEERED);
+    let mut s = clip(parts.next().unwrap_or_default().trim(), REQUEST_CHARS);
+    for steer in parts {
+        s.push_str(STEERED);
+        s.push_str(&clip(steer.trim(), REQUEST_CHARS));
+    }
+    s
 }
 
 fn clip(text: &str, max: usize) -> String {
@@ -365,5 +381,21 @@ mod tests {
             "{bare}"
         );
         assert!(bare.ends_with("\nGo on with the latest request."), "{bare}");
+    }
+
+    /// What the user wrote while a turn ran is quoted after its request, also when the
+    /// request is too long to be quoted whole.
+    #[test]
+    fn the_note_keeps_what_the_user_wrote_while_a_long_request_ran() {
+        let long = "x".repeat(3 * REQUEST_CHARS);
+        let request = format!("{long}{STEERED}Use tabs.{STEERED}And say why.");
+        let note = note(&[request, "short".into()], None, &[], false);
+        let cut = "x".repeat(REQUEST_CHARS);
+        assert!(
+            note.contains(&format!(
+                "\n1. {cut}…{STEERED}Use tabs.{STEERED}And say why.\n2. short\n"
+            )),
+            "{note}"
+        );
     }
 }

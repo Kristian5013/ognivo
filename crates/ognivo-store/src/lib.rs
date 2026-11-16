@@ -288,6 +288,23 @@ struct HashedFile {
     drifted: bool,
 }
 
+/// A content a journal save keeps in `blobs`: its hash, and its bytes compressed when the
+/// store lacked it as the save got ready.
+#[derive(Debug)]
+struct Blob<'a> {
+    bytes: &'a [u8],
+    hash: Vec<u8>,
+    data: Option<Vec<u8>>,
+}
+
+/// A file a journal save puts, with its contents ready.
+#[derive(Debug)]
+struct ReadyFile<'a> {
+    file: &'a JournalFile,
+    base: Option<Blob<'a>>,
+    current: Blob<'a>,
+}
+
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
@@ -458,7 +475,7 @@ impl Store {
 
     /// Removes a session and everything kept for it.
     pub fn delete_session(&mut self, id: SessionId) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         tx.execute("DELETE FROM transcript WHERE session = ?1", [id])?;
         tx.execute("DELETE FROM wire WHERE root = ?1 OR thread = ?1", [id])?;
         tx.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
@@ -521,7 +538,7 @@ impl Store {
         from: usize,
         bodies: &[String],
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         for (i, body) in bodies.iter().enumerate() {
             tx.execute(
                 "INSERT OR REPLACE INTO messages (session, conversation, idx, body)
@@ -561,7 +578,7 @@ impl Store {
         added: &[PathBuf],
         removed: &[PathBuf],
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.write()?;
         for p in added {
             tx.execute(
                 "INSERT OR IGNORE INTO paths (session, conversation, kind, path) VALUES (?1, ?2, ?3, ?4)",
@@ -688,14 +705,51 @@ impl Store {
         id: SessionId,
         changes: &JournalChanges,
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
-        for f in &changes.put {
-            let base = f.base.as_deref().map(|b| put_blob(&tx, b)).transpose()?;
+        let files = self.ready(changes)?;
+        self.write_journal(id, changes, &files)
+    }
+
+    /// The files a journal save puts, their contents hashed, and compressed where the store
+    /// lacks them. This is done before the save takes the write lock, as every other writer
+    /// waits while it is held.
+    fn ready<'a>(&self, changes: &'a JournalChanges) -> Result<Vec<ReadyFile<'a>>, StoreError> {
+        let blob = |bytes: &'a [u8]| -> Result<Blob<'a>, StoreError> {
+            let hash = blake3::hash(bytes).as_bytes().to_vec();
+            let data = if has_blob(&self.conn, &hash)? {
+                None
+            } else {
+                Some(compress(bytes)?)
+            };
+            Ok(Blob { bytes, hash, data })
+        };
+        changes
+            .put
+            .iter()
+            .map(|file| {
+                Ok(ReadyFile {
+                    file,
+                    base: file.base.as_deref().map(&blob).transpose()?,
+                    current: blob(file.current.as_slice())?,
+                })
+            })
+            .collect()
+    }
+
+    /// The write of [`Store::save_journal`], with the files it puts ready.
+    fn write_journal(
+        &mut self,
+        id: SessionId,
+        changes: &JournalChanges,
+        files: &[ReadyFile<'_>],
+    ) -> Result<(), StoreError> {
+        let tx = self.write()?;
+        for f in files {
+            let base = f.base.as_ref().map(|b| put_blob(&tx, b)).transpose()?;
             let current = put_blob(&tx, &f.current)?;
             tx.execute(
                 "INSERT OR REPLACE INTO journal_files (session, path, base, current, drifted)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, bytes(&f.path), base, current, f.drifted],
+                params![id, bytes(&f.file.path), base, current, f.file.drifted],
             )?;
         }
         for p in &changes.removed {
@@ -731,6 +785,9 @@ impl Store {
 
     /// A session's edit journal, contents included.
     pub fn journal(&self, id: SessionId) -> Result<SavedJournal, StoreError> {
+        // all of it from one snapshot, which only reads: a save between two of the reads,
+        // as a running turn makes while a client looks, drops the contents the first named
+        let _snapshot = Transaction::new_unchecked(&self.conn, TransactionBehavior::Deferred)?;
         let mut st = self.conn.prepare(
             "SELECT path, base, current, drifted FROM journal_files WHERE session = ?1 ORDER BY path",
         )?;
@@ -807,27 +864,48 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// A transaction that writes. It takes the write lock as it begins, and there SQLite
+    /// waits for another connection's write as long as the busy timeout allows. In WAL mode
+    /// a transaction that has read cannot wait for the lock its first write needs: it fails
+    /// at once with "database is locked", and also when another connection committed after
+    /// its read.
+    fn write(&mut self) -> rusqlite::Result<Transaction<'_>> {
+        self.conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+    }
 }
 
-/// Stores `bytes` once, compressed, and returns their hash.
-fn put_blob(tx: &Transaction<'_>, bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
-    let hash = blake3::hash(bytes).as_bytes().to_vec();
-    let known: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM blobs WHERE hash = ?1)",
-        [&hash],
-        |r| r.get(0),
+/// Stores a content once and returns its hash. A content the store had as the save got
+/// ready may have gone since, with the last journal that needed it, so it is looked for
+/// again and compressed now if it is gone.
+fn put_blob(tx: &Transaction<'_>, b: &Blob<'_>) -> Result<Vec<u8>, StoreError> {
+    let data = match &b.data {
+        Some(data) => Cow::Borrowed(data.as_slice()),
+        None if has_blob(tx, &b.hash)? => return Ok(b.hash.clone()),
+        None => Cow::Owned(compress(b.bytes)?),
+    };
+    // another connection may have stored the same content since the save got ready
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs (hash, size, data) VALUES (?1, ?2, ?3)",
+        params![b.hash, b.bytes.len() as i64, data],
     )?;
-    if !known {
-        let data = zstd::encode_all(bytes, ZSTD_LEVEL).map_err(|e| StoreError::Io {
-            path: "zstd".into(),
-            source: e,
-        })?;
-        tx.execute(
-            "INSERT INTO blobs (hash, size, data) VALUES (?1, ?2, ?3)",
-            params![hash, bytes.len() as i64, data],
-        )?;
-    }
-    Ok(hash)
+    Ok(b.hash.clone())
+}
+
+fn has_blob(conn: &Connection, hash: &[u8]) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM blobs WHERE hash = ?1)",
+        [hash],
+        |r| r.get(0),
+    )
+}
+
+fn compress(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+    zstd::encode_all(bytes, ZSTD_LEVEL).map_err(|e| StoreError::Io {
+        path: "zstd".into(),
+        source: e,
+    })
 }
 
 fn session_row(r: &Row<'_>) -> rusqlite::Result<SessionRow> {
@@ -872,6 +950,8 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn new(root: &str, kind: &str) -> NewSession {
         NewSession {
@@ -1172,6 +1252,114 @@ mod tests {
         store.delete_session(b).unwrap();
         assert_eq!(blobs(&store), 0);
         assert_eq!(store.session(b).unwrap(), None);
+    }
+
+    /// The journal of one file, `/p/x`, changed from "old" to `current`.
+    fn x_now(current: &[u8]) -> JournalChanges {
+        JournalChanges {
+            put: vec![JournalFile {
+                path: "/p/x".into(),
+                base: Some(b"old".to_vec()),
+                current: current.to_vec(),
+                drifted: false,
+            }],
+            ..JournalChanges::default()
+        }
+    }
+
+    /// Another connection holds the write lock a while: a journal save waits for it, as the
+    /// store's other writes do, and does not fail at once with "database is locked". So it
+    /// does with contents the store has already.
+    #[test]
+    fn a_journal_save_waits_for_another_connections_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ognivo.db");
+        let mut store = Store::open(&path).unwrap();
+        let id = store.create_session(&new("/p", "chat")).unwrap();
+        store.save_journal(id, &x_now(b"first")).unwrap();
+        for current in [b"second".as_slice(), b"first"] {
+            let (held, holding) = std::sync::mpsc::channel();
+            let other = {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let mut conn = Connection::open(&path).unwrap();
+                    let tx = conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .unwrap();
+                    tx.execute("UPDATE sessions SET title = 'other'", [])
+                        .unwrap();
+                    held.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(300));
+                    tx.commit().unwrap();
+                })
+            };
+            holding.recv().unwrap();
+            store.save_journal(id, &x_now(current)).unwrap();
+            other.join().unwrap();
+        }
+        assert_eq!(store.journal(id).unwrap().files[0].current, b"first");
+        assert_eq!(store.session(id).unwrap().unwrap().title, "other");
+    }
+
+    /// Another connection commits a row every millisecond, as the core's log of another
+    /// thread's events does: journal saves of new contents go through all the same, though
+    /// such a commit comes while each is under way.
+    #[test]
+    fn a_journal_save_goes_through_another_connections_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ognivo.db");
+        let mut store = Store::open(&path).unwrap();
+        let id = store.create_session(&new("/p", "chat")).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let log = {
+            let (stop, path) = (stop.clone(), path.clone());
+            std::thread::spawn(move || {
+                let mut log = Store::open(&path).unwrap();
+                let mut seq = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    seq += 1;
+                    log.append_wire(seq, id, id, "{}").unwrap();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                seq
+            })
+        };
+        for n in 0..3 {
+            // a megabyte of code takes long enough to compress for commits to come meanwhile
+            let mut current = String::new();
+            for i in 0..40_000u64 {
+                current.push_str(&format!(
+                    "let v{i} = f{n}({i}, {});\n",
+                    i.wrapping_mul(2_654_435_761) % 1_000_003
+                ));
+            }
+            store.save_journal(id, &x_now(current.as_bytes())).unwrap();
+        }
+        stop.store(true, Ordering::Relaxed);
+        assert!(log.join().unwrap() > 0);
+        assert!(
+            store.journal(id).unwrap().files[0]
+                .current
+                .starts_with(b"let v0 = f2(")
+        );
+    }
+
+    /// A content the store had when a save got ready, and that went before the save could
+    /// write, with the last journal that needed it, is stored all the same.
+    #[test]
+    fn a_content_gone_while_a_save_got_ready_is_stored_again() {
+        let mut store = Store::memory().unwrap();
+        let a = store.create_session(&new("/p", "chat")).unwrap();
+        let b = store.create_session(&new("/p", "chat")).unwrap();
+        store.save_journal(b, &x_now(b"b's")).unwrap();
+        let changes = x_now(b"a's");
+        let ready = store.ready(&changes).unwrap();
+        // the store had the base, so it was not compressed
+        assert!(ready[0].base.as_ref().is_some_and(|b| b.data.is_none()));
+        // another connection removes `b`, and the base goes with it
+        store.delete_session(b).unwrap();
+        store.write_journal(a, &changes, &ready).unwrap();
+        assert_eq!(store.journal(a).unwrap().files, x_now(b"a's").put);
     }
 
     #[test]

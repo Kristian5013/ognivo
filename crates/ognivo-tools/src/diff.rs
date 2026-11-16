@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use similar::{ChangeTag, DiffTag, TextDiff};
+use similar::{ChangeTag, DiffTag, DiffableStr, TextDiff};
 
 /// Past this the diff gets coarser rather than slower: it only shows a change.
 const TIMEOUT: Duration = Duration::from_millis(200);
@@ -52,6 +52,12 @@ pub fn hunks(before: &str, after: &str) -> Vec<Hunk> {
         .collect()
 }
 
+/// The lines of `text` as [`hunks`] counts them, each with its line end: `\n`, `\r\n` or a
+/// lone `\r`; the last line may have none. Joined, they are `text` again.
+pub fn lines(text: &str) -> Vec<&str> {
+    text.tokenize_lines()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +95,15 @@ mod tests {
             hunks("a\r\nb\r\n", "a\r\nc\r\n"),
             [hunk(2, 2, &["b"], &["c"])]
         );
+    }
+
+    #[test]
+    fn lines_keep_their_ends_as_the_hunks_count_them() {
+        let text = "a\nb\r\nc\rd";
+        assert_eq!(lines(text), ["a\n", "b\r\n", "c\r", "d"]);
+        assert_eq!(lines(text).concat(), text);
+        assert!(lines("").is_empty());
+        // a lone `\r` ends a line for the diff too: the hunk is the fourth line
+        assert_eq!(hunks(text, "a\nb\r\nc\rD"), [hunk(4, 4, &["d"], &["D"])]);
     }
 }

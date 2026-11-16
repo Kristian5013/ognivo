@@ -118,7 +118,7 @@ export class Threads {
     // nothing kept: what happened before, from its trajectory
     const { trajectory } = await this.core.call("thread/trajectory", { thread });
     const recorded = fromAtif(trajectory as AtifTrace);
-    entry.store = ThreadStore.of({ ...recorded, title: title || recorded.title }, this.opts);
+    entry.store = ThreadStore.of({ ...recorded, title: title || recorded.title }, { ...this.opts, source: { core: this.core, thread } });
     entry.offset = recorded.generations.length;
     return entry.store;
   }
@@ -169,7 +169,9 @@ export class Threads {
       conversations: {},
       tools: [],
     };
-    return new ThreadStore(base, this.opts);
+    // the store knows where its thread lives: its view asks the core what waits for a
+    // review and for an answer
+    return new ThreadStore(base, { ...this.opts, source: { core: this.core, thread } });
   }
 
   private changed(): void {

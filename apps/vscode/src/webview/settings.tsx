@@ -20,7 +20,7 @@ import { forget, useDetected } from "./detect.ts";
 import { openLink, request, run } from "./host.ts";
 import { Icon, IconButton } from "./icon.tsx";
 import type { AtifTrace } from "./model/atif.ts";
-import { type Budget, contextChoices, contextSize, windowChoice } from "./model/context.ts";
+import { type Budget, contextChoices, contextSize, profileLevels, startLevel, windowChoice } from "./model/context.ts";
 import { MODES } from "./model/modes.ts";
 
 type Profile = { context: Budget; reasoning: { levels: string[]; default: string }; native: boolean };
@@ -50,6 +50,12 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
   const check = (url: string) => {
     forget();
     void set("server", url);
+  };
+  /** The level chosen goes back to the profile's default where the profile a new session
+   * gets now has not that level (the core would not start one at it): `levels`, the new
+   * profile's, where they are known. */
+  const keepLevel = (levels: readonly string[] | undefined) => {
+    if (session.reasoning && startLevel(session.reasoning, levels) === null) void set("reasoning", "");
   };
   const profileId = session.profile || d?.profile || "";
   const profile = PROFILES[profileId];
@@ -118,7 +124,10 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
             <Select
               label="Model behind the router"
               value={session.model}
-              onChange={(v) => void set("model", v)}
+              onChange={(v) => {
+                void set("model", v);
+                keepLevel(profileLevels(session.profile || d.models.find((m) => m.id === v)?.profile));
+              }}
               choices={[
                 { value: "", label: "The one it runs" },
                 ...d.models.map((m) => ({
@@ -134,7 +143,16 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
 
       <Section title="A new session">
         <Row className="choice" title="Profile" hint="How ognivo talks to the model: its format, its tools, its limits">
-          <Select label="Profile" value={session.profile} choices={profileChoices} onChange={(v) => void set("profile", v)} />
+          <Select
+            label="Profile"
+            value={session.profile}
+            choices={profileChoices}
+            onChange={(v) => {
+              void set("profile", v);
+              // Auto: the profile of the model the server runs
+              keepLevel(v ? profileLevels(v) : d?.levels);
+            }}
+          />
         </Row>
         <Row className="choice" title="Reasoning" hint="Higher levels think longer: more time and context, not fewer mistakes of memory" stack={levels.length > 3}>
           {levels.length ? (

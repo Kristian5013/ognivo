@@ -181,6 +181,12 @@ export interface VoidItem extends Base {
   calls: { name: string; arguments: string }[];
 }
 
+/** What the user wrote while the turn ran, where the model got it (`turn/steer`). */
+export interface SteerItem extends Base {
+  kind: "steer";
+  text: string;
+}
+
 /** A task of `delegate`, which a subagent works on in a thread of its own. */
 export interface SubagentItem extends Base {
   kind: "subagent";
@@ -206,7 +212,8 @@ export type Item =
   | SubagentItem
   | ApprovalItem
   | InstructionsItem
-  | CompactionItem;
+  | CompactionItem
+  | SteerItem;
 
 export interface Turn {
   index: number;

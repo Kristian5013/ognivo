@@ -43,6 +43,8 @@ fn typescript() -> String {
         TurnEnd::decl(&cfg),
         Mode::decl(&cfg),
         CallDraft::decl(&cfg),
+        Progress::decl(&cfg),
+        ProgressPhase::decl(&cfg),
         Image::decl(&cfg),
         Initialize::decl(&cfg),
         Initialized::decl(&cfg),
@@ -56,11 +58,13 @@ fn typescript() -> String {
         Opened::decl(&cfg),
         SetMode::decl(&cfg),
         ThreadRef::decl(&cfg),
+        Vision::decl(&cfg),
         ReadThread::decl(&cfg),
         ThreadEvents::decl(&cfg),
         Trajectory::decl(&cfg),
         StartTurn::decl(&cfg),
         EditTurn::decl(&cfg),
+        SteerTurn::decl(&cfg),
         NewImage::decl(&cfg),
         Changes::decl(&cfg),
         ChangedFile::decl(&cfg),
@@ -68,6 +72,7 @@ fn typescript() -> String {
         Accepted::decl(&cfg),
         Revert::decl(&cfg),
         Reverted::decl(&cfg),
+        HunkRef::decl(&cfg),
         BaseOf::decl(&cfg),
         Base::decl(&cfg),
         Done::decl(&cfg),
@@ -121,10 +126,14 @@ fn typescript() -> String {
         method::<ThreadRef, Done>(&cfg, rpc::TURN_INTERRUPT),
         method::<ThreadRef, Done>(&cfg, rpc::TURN_ANSWER_NOW),
         method::<EditTurn, Done>(&cfg, rpc::TURN_EDIT),
+        method::<SteerTurn, Done>(&cfg, rpc::TURN_STEER),
         method::<SetMode, Done>(&cfg, rpc::THREAD_MODE),
+        method::<ThreadRef, Vision>(&cfg, rpc::THREAD_VISION),
         method::<ThreadRef, Changes>(&cfg, rpc::CHANGES_LIST),
         method::<Accept, Accepted>(&cfg, rpc::CHANGES_ACCEPT),
         method::<Revert, Reverted>(&cfg, rpc::CHANGES_REVERT),
+        method::<HunkRef, Changes>(&cfg, rpc::CHANGES_ACCEPT_HUNK),
+        method::<HunkRef, Changes>(&cfg, rpc::CHANGES_REVERT_HUNK),
         method::<BaseOf, Base>(&cfg, rpc::CHANGES_BASE),
         method::<Quit, Done>(&cfg, rpc::CORE_QUIT),
     ];
@@ -154,13 +163,15 @@ fn typescript() -> String {
         rpc::CANCEL
     ));
     out.push_str(&format!(
-        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {}, unsupported: {}, noTurn: {} }} as const;\n",
+        "\nexport const ERRORS = {{ noThread: {}, busy: {}, notStarted: {}, journal: {}, unsupported: {}, noTurn: {}, stale: {}, idle: {} }} as const;\n",
         rpc::error::NO_THREAD,
         rpc::error::BUSY,
         rpc::error::NOT_STARTED,
         rpc::error::JOURNAL,
         rpc::error::UNSUPPORTED,
-        rpc::error::NO_TURN
+        rpc::error::NO_TURN,
+        rpc::error::STALE,
+        rpc::error::IDLE
     ));
     out
 }
@@ -204,6 +215,7 @@ fn the_extension_lets_the_page_call_every_method() {
         .filter_map(|l| l.trim().strip_prefix('"')?.split('"').next())
         .collect();
     assert!(names.contains(&rpc::THREAD_MODE), "{names:?}");
+    assert!(names.contains(&rpc::THREAD_VISION), "{names:?}");
     for name in names {
         assert!(
             allowed.contains(&format!("\"{name}\"")),

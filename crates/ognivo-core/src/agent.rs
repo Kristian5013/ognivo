@@ -35,7 +35,7 @@ use ognivo_models::image::{self, Image};
 use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
     Channel, ChatMessage, DriverError, DriverEvent, Family, FinishReason, Finished, ModelDriver,
-    Outcome, StepRequest, ToolCall, ToolChoice, ToolDecl,
+    Outcome, PromptProgress, StepRequest, ToolCall, ToolChoice, ToolDecl,
 };
 use ognivo_tools::diff::Hunk;
 use ognivo_tools::exec::{self, ShellOptions};
@@ -282,6 +282,31 @@ pub enum AgentEvent {
         agent: Option<String>,
         allowed: Option<bool>,
     },
+    /// How far the running generation got, for display while the user waits on it: one as
+    /// its request goes out, one at each change of `phase`, and the rest at most one every
+    /// [`PROGRESS_EVERY`]. Not kept, as call drafts are not: the generation's own event has
+    /// the numbers once it ends.
+    Progress {
+        phase: Phase,
+        /// The prompt's tokens in all, of them those the server took from its cache, and
+        /// those in its slot so far, the cached ones included; `None` where the server does
+        /// not say.
+        prompt_total: Option<u32>,
+        prompt_cached: Option<u32>,
+        prompt_done: Option<u32>,
+        /// The tokens generated so far, reasoning and calls included: the driver's count
+        /// where it gives one, else the fragments streamed.
+        generated: u32,
+        /// Since the request went out.
+        elapsed_ms: u64,
+        /// Tokens a second since the first token; `None` before the second.
+        tokens_per_second: Option<f64>,
+    },
+    /// What the user wrote while the turn ran (`turn/steer`), here where the model got it:
+    /// with the next step's request, after the results of the step before.
+    Steered {
+        text: String,
+    },
     /// The turn ended: `end` as [`AgentEvent::SubagentFinished`] has it.
     TurnEnded {
         end: String,
@@ -289,7 +314,92 @@ pub enum AgentEvent {
         answer: Option<String>,
         /// What the facts of the turn say of the answer.
         verification: Option<String>,
+        /// What the user wrote while it ran that the model never got, as the turn ended
+        /// first, oldest first: for the next turn.
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        undelivered: Vec<String>,
     },
+}
+
+impl AgentEvent {
+    /// Whether it only says how far a generation got, a subagent's too: for a user who
+    /// waits on it.
+    pub fn is_progress(&self) -> bool {
+        match self {
+            AgentEvent::Progress { .. } => true,
+            AgentEvent::Subagent { event, .. } => event.is_progress(),
+            _ => false,
+        }
+    }
+}
+
+/// What a generation does now ([`AgentEvent::Progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Phase {
+    /// The request went out and the server says nothing yet: it is busy with another
+    /// request, loads the model, or reads the prompt without saying how far it got.
+    Waiting,
+    /// The server reads the prompt, and says how far it got.
+    Prompt,
+    /// The model reasons.
+    Reasoning,
+    /// The model writes its answer or its calls.
+    Writing,
+}
+
+/// The least time between two [`AgentEvent::Progress`] of one phase.
+pub const PROGRESS_EVERY: Duration = Duration::from_millis(200);
+
+/// What the user writes to a running turn (`turn/steer`). The model gets it at the top of
+/// its next step, after the results of the step before, as a note of ognivo's appended to
+/// the newest message, so the prompt only grows (docs/architecture.md §5.6). The thread keeps
+/// a handle to the agent's, as a running turn borrows the agent. A subagent has an inbox of
+/// its own that nobody writes to: what the user writes is for the agent they talk to.
+#[derive(Debug, Clone, Default)]
+pub struct Inbox(Arc<std::sync::Mutex<Letters>>);
+
+#[derive(Debug, Default)]
+struct Letters {
+    /// A turn runs, and takes what comes.
+    open: bool,
+    texts: Vec<String>,
+}
+
+impl Inbox {
+    fn letters(&self) -> std::sync::MutexGuard<'_, Letters> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A turn begins: what the user writes from now on is for it.
+    pub fn open(&self) {
+        self.letters().open = true;
+    }
+
+    /// What the user wrote, for the running turn; `false`, and it is not taken, when no
+    /// turn runs.
+    pub fn push(&self, text: String) -> bool {
+        let mut letters = self.letters();
+        if letters.open {
+            letters.texts.push(text);
+        }
+        letters.open
+    }
+
+    /// What came since the last look, oldest first.
+    fn take(&self) -> Vec<String> {
+        std::mem::take(&mut self.letters().texts)
+    }
+
+    /// The turn ends: what it did not take, oldest first. Nothing more is taken until the
+    /// next turn begins.
+    pub fn close(&self) -> Vec<String> {
+        let mut letters = self.letters();
+        letters.open = false;
+        std::mem::take(&mut letters.texts)
+    }
 }
 
 /// Counters behind the M1 exit metrics.
@@ -509,6 +619,106 @@ impl Drafts {
     }
 }
 
+/// How far the running generation got ([`AgentEvent::Progress`]): from the driver's events,
+/// with when the user last saw it.
+#[derive(Debug)]
+struct Gauge {
+    /// When the request went out.
+    started: Instant,
+    phase: Phase,
+    prompt: Option<PromptProgress>,
+    /// The tokens generated so far as the driver counts them, once it did.
+    counted: Option<u32>,
+    /// The fragments streamed, for a driver that does not count.
+    fragments: u32,
+    /// When the first token came, and the count then.
+    first: Option<(Instant, u32)>,
+    /// When the user last saw it.
+    shown: Option<Instant>,
+}
+
+impl Gauge {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            phase: Phase::Waiting,
+            prompt: None,
+            counted: None,
+            fragments: 0,
+            first: None,
+            shown: None,
+        }
+    }
+
+    fn generated(&self) -> u32 {
+        self.counted.unwrap_or(self.fragments)
+    }
+
+    /// Takes in one of the driver's events; what the user sees of it now, if anything: a
+    /// change of phase at once, the rest at most every [`PROGRESS_EVERY`].
+    fn update(&mut self, ev: &DriverEvent, now: Instant) -> Option<AgentEvent> {
+        let was = self.phase;
+        match ev {
+            DriverEvent::Reasoning(_) => {
+                self.fragments += 1;
+                self.phase = Phase::Reasoning;
+            }
+            DriverEvent::Text(_) | DriverEvent::ToolCallDelta { .. } => {
+                self.fragments += 1;
+                self.phase = Phase::Writing;
+            }
+            DriverEvent::Progress(p) => {
+                if let Some(prompt) = p.prompt {
+                    self.prompt = Some(prompt);
+                    // a request that continues the step reads a prompt too, after tokens
+                    if self.phase == Phase::Waiting {
+                        self.phase = Phase::Prompt;
+                    }
+                }
+                if let Some(n) = p.generated {
+                    self.counted = Some(n);
+                }
+            }
+            // the step starts over, and what it wrote is void
+            DriverEvent::Restarted { .. } => {
+                *self = Self {
+                    shown: self.shown,
+                    ..Self::new(self.started)
+                };
+            }
+            DriverEvent::Finished(_) => return None,
+        }
+        let generated = self.generated();
+        if self.first.is_none() && generated > 0 {
+            self.first = Some((now, generated));
+        }
+        let due = self
+            .shown
+            .is_none_or(|at| now.duration_since(at) >= PROGRESS_EVERY);
+        (self.phase != was || due).then(|| self.show(now))
+    }
+
+    /// The progress as the user sees it now.
+    fn show(&mut self, now: Instant) -> AgentEvent {
+        self.shown = Some(now);
+        let generated = self.generated();
+        let tokens_per_second = self.first.and_then(|(at, then)| {
+            let secs = now.duration_since(at).as_secs_f64();
+            (generated > then && secs > 0.0).then(|| f64::from(generated - then) / secs)
+        });
+        AgentEvent::Progress {
+            phase: self.phase,
+            prompt_total: self.prompt.map(|p| p.total),
+            prompt_cached: self.prompt.map(|p| p.cache),
+            prompt_done: self.prompt.map(|p| p.processed),
+            generated,
+            elapsed_ms: u64::try_from(now.duration_since(self.started).as_millis())
+                .unwrap_or(u64::MAX),
+            tokens_per_second,
+        }
+    }
+}
+
 /// The bytes of `path` when it is an image file, whatever its name: the read gives the
 /// image, not its text. Only the first bytes are read of any other file.
 fn image_file(path: &Path) -> Option<Vec<u8>> {
@@ -627,6 +837,9 @@ pub struct Agent {
     stopped: Option<String>,
     /// Files the user reverted since the model's last turn, for its next message.
     reverted: Vec<String>,
+    /// Files the user undid part of the change to since the model's last turn, hunk by
+    /// hunk, for its next message.
+    undone: Vec<String>,
     /// What this turn changed, ran and was refused.
     ledger: Ledger,
     /// This turn's calls and results, for the repeat detector.
@@ -649,7 +862,8 @@ pub struct Agent {
     /// Where the running turn's request is in the history.
     turn_start: usize,
     /// Files the turn has read, and whether, since the last compaction, the agent read one
-    /// it had not or changed anything: a compaction without that is idle.
+    /// it had not or changed anything, or the user wrote to the turn: a compaction without
+    /// that is idle.
     turn_reads: HashSet<PathBuf>,
     news: bool,
     /// Idle compactions in a row.
@@ -662,6 +876,8 @@ pub struct Agent {
     told_plan: bool,
     /// The calls the running generation writes, as far as they came.
     drafts: Drafts,
+    /// What the user writes while a turn runs, for its next step.
+    inbox: Inbox,
     pub stats: Stats,
 }
 
@@ -1411,6 +1627,7 @@ impl Agent {
             journal: Journal::new(opts.workspace.unreviewed_changes),
             stopped: None,
             reverted: Vec::new(),
+            undone: Vec::new(),
             ledger: Ledger::default(),
             repeats: Repeats::default(),
             stuck: None,
@@ -1428,9 +1645,16 @@ impl Agent {
             in_turn: false,
             told_plan: false,
             drafts: Drafts::default(),
+            inbox: Inbox::default(),
             stats: Stats::default(),
             opts,
         }
+    }
+
+    /// Where what the user writes to a running turn goes ([`Inbox`]): the thread keeps it,
+    /// as the turn borrows the agent.
+    pub fn inbox(&self) -> Inbox {
+        self.inbox.clone()
     }
 
     /// The messages that start the conversation: the system prompt, and the project's
@@ -1489,6 +1713,7 @@ impl Agent {
             agent.seen = seen.into_iter().collect();
             agent.stopped = notes.stopped;
             agent.reverted = notes.reverted;
+            agent.undone = notes.undone;
             agent.requests = notes.requests;
         }
         agent.session = Some(session);
@@ -1508,9 +1733,23 @@ impl Agent {
         self.session.as_ref().map(Session::id)
     }
 
-    /// Why the store stopped saving the session, once: the session goes on in memory.
+    /// Why the store stopped saving the session, once: the session goes on in memory. A
+    /// failure while a turn runs is told by the turn itself, as ognivo's notice right after
+    /// the next thing it shows, and at the latest before its next step or its end; this has
+    /// the rest, such as a failure between turns.
     pub fn store_failure(&mut self) -> Option<String> {
         self.session.as_mut().and_then(Session::failure)
+    }
+
+    /// [`Agent::store_failure`] as the notice a turn tells it with, for a turn that was
+    /// dropped before its end: its caller tells it in that turn before it ends, as the saves
+    /// that put the turn away may be the first to fail. The model is not told.
+    pub fn store_failure_notice(&mut self) -> Option<AgentEvent> {
+        self.store_failure().map(|why| AgentEvent::Notice {
+            text: format!(
+                "[ognivo] The session store failed: {why}. The session goes on in memory and is no longer saved."
+            ),
+        })
     }
 
     /// Stops keeping the session: one without a turn is removed from the store. Returns
@@ -1609,8 +1848,41 @@ impl Agent {
         if !self.reverted.contains(&item) {
             self.reverted.push(item);
         }
+        // reverted whole, it is no longer undone in part
+        let shown = name.display().to_string();
+        self.undone.retain(|f| *f != shown);
         self.save();
         Ok(how)
+    }
+
+    /// Keeps one hunk of a file's unreviewed change ([`Journal::accept_hunk`]): the file
+    /// stays as the model left it.
+    pub fn accept_hunk(&mut self, path: &Path, hunk: &Hunk) -> Result<(), JournalError> {
+        let kept = self.journal.accept_hunk(path, hunk);
+        self.save();
+        kept
+    }
+
+    /// Undoes one hunk of a file's unreviewed change ([`Journal::revert_hunk`]). The model
+    /// learns of it with the next message, and reads the file again before it writes it
+    /// whole.
+    pub fn revert_hunk(&mut self, path: &Path, hunk: &Hunk) -> Result<(), JournalError> {
+        let undone = self.journal.revert_hunk(path, hunk);
+        if undone.is_err() {
+            // one that failed may still have pruned the journal
+            self.save();
+        }
+        undone?;
+        self.seen.remove(path);
+        let shown = Target::new(path.to_owned(), &self.opts.root)
+            .shown
+            .display()
+            .to_string();
+        if !self.undone.contains(&shown) {
+            self.undone.push(shown);
+        }
+        self.save();
+        Ok(())
     }
 
     /// Ends a turn that was dropped before its end (the user stopped it, or the server
@@ -1746,6 +2018,8 @@ impl Agent {
         on: &mut (dyn FnMut(AgentEvent) + Send),
     ) -> Result<TurnEnd, DriverError> {
         self.in_turn = true;
+        // what the user writes from now on is for this turn
+        self.inbox.open();
         if let Some(s) = self.session.as_mut() {
             s.user(user, &images);
         }
@@ -1756,51 +2030,33 @@ impl Agent {
         });
         let end = self.steps(user, images, on).await;
         self.in_turn = false;
+        // what the user wrote that the model never got goes back, for the next turn
+        let undelivered = self.inbox.close();
         // a skill's allowed-tools count in the turn that ran it
         self.opts.rules.deactivate();
         let facts = || verify::summary(&self.ledger.status(&self.opts.root));
-        on(match &end {
-            Ok(TurnEnd::Answer(a)) => AgentEvent::TurnEnded {
-                end: "answer".into(),
-                why: None,
-                answer: Some(a.text.clone()),
-                verification: verify::summary(&a.verification),
-            },
-            Ok(TurnEnd::StepLimit(a)) => AgentEvent::TurnEnded {
-                end: "step_limit".into(),
-                why: Some(format!(
+        let (ended, why, answer, verification) = match &end {
+            Ok(TurnEnd::Answer(a)) => (
+                "answer",
+                None,
+                Some(a.text.clone()),
+                verify::summary(&a.verification),
+            ),
+            Ok(TurnEnd::StepLimit(a)) => (
+                "step_limit",
+                Some(format!(
                     "the step limit ({}) came first",
                     self.opts.max_steps
                 )),
-                answer: a.as_ref().map(|a| a.text.clone()),
-                verification: facts(),
-            },
-            Ok(TurnEnd::Stuck(why)) => AgentEvent::TurnEnded {
-                end: "stuck".into(),
-                why: Some(why.clone()),
-                answer: None,
-                verification: facts(),
-            },
-            Ok(TurnEnd::TimeLimit) => AgentEvent::TurnEnded {
-                end: "time_limit".into(),
-                why: None,
-                answer: None,
-                verification: facts(),
-            },
-            Ok(TurnEnd::NotRun(why)) => AgentEvent::TurnEnded {
-                end: "not_run".into(),
-                why: Some(why.clone()),
-                answer: None,
-                verification: None,
-            },
-            Err(e) => AgentEvent::TurnEnded {
-                end: "error".into(),
-                why: Some(e.to_string()),
-                answer: None,
-                verification: None,
-            },
-        });
-        let (end_data, answer) = match &end {
+                a.as_ref().map(|a| a.text.clone()),
+                facts(),
+            ),
+            Ok(TurnEnd::Stuck(why)) => ("stuck", Some(why.clone()), None, facts()),
+            Ok(TurnEnd::TimeLimit) => ("time_limit", None, None, facts()),
+            Ok(TurnEnd::NotRun(why)) => ("not_run", Some(why.clone()), None, None),
+            Err(e) => ("error", Some(e.to_string()), None, None),
+        };
+        let (end_data, indexed) = match &end {
             Ok(TurnEnd::Answer(a)) => (
                 json!({"end": "answer", "verification": a.verification, "unsupported_claim": a.unsupported_claim}),
                 Some(a.text.as_str()),
@@ -1814,10 +2070,20 @@ impl Agent {
             Ok(TurnEnd::NotRun(why)) => (json!({"end": "not_run", "why": why}), None),
             Err(e) => (json!({"end": "error", "why": e.to_string()}), None),
         };
+        // saved before the end goes out, so that the turn tells a store that failed at its
+        // last saves too
         self.save();
         if let Some(s) = self.session.as_mut() {
-            s.end_turn(end_data, answer, &self.stats);
+            s.end_turn(end_data, indexed, &self.stats);
         }
+        self.tell_store_failure(on);
+        on(AgentEvent::TurnEnded {
+            end: ended.into(),
+            why,
+            answer,
+            verification,
+            undelivered,
+        });
         end
     }
 
@@ -1828,6 +2094,7 @@ impl Agent {
             skipped: self.prompt_instructions.skipped.clone(),
             stopped: self.stopped.clone(),
             reverted: self.reverted.clone(),
+            undone: self.undone.clone(),
             requests: self.requests.clone(),
             in_turn: self.in_turn,
         }
@@ -1845,12 +2112,28 @@ impl Agent {
         s.save_notes(&notes);
     }
 
-    /// Shows an event and keeps it in the session's log.
+    /// Shows an event and keeps it in the session's log. While a turn runs, a store that
+    /// failed at the event, or at a save before it, is told right after it, though not inside
+    /// streamed text. Outside a turn `on` may show nothing, as for the SessionEnd hooks.
     fn emit(&mut self, on: &mut (dyn FnMut(AgentEvent) + Send), e: AgentEvent) {
+        let streams = matches!(e, AgentEvent::Text { .. } | AgentEvent::Reasoning { .. });
         if let Some(s) = self.session.as_mut() {
             s.event(&e);
         }
         on(e);
+        if self.in_turn && !streams {
+            self.tell_store_failure(on);
+        }
+    }
+
+    /// The store stopped saving the session since the last look: the user hears of it once,
+    /// as ognivo's notice in the running turn, and [`Agent::store_failure`] has nothing more
+    /// to say about it. The model is not told, and the session's log, which failed, does not
+    /// keep it.
+    fn tell_store_failure(&mut self, on: &mut (dyn FnMut(AgentEvent) + Send)) {
+        if let Some(notice) = self.store_failure_notice() {
+            on(notice);
+        }
     }
 
     /// The next generation's request; it counts as a step, and its seed follows from that.
@@ -1890,6 +2173,10 @@ impl Agent {
         let mut events = self.driver.step(req);
         let mut finished = None;
         self.drafts = Drafts::default();
+        // how far it got, shown only (a summary's too: the user waits on it as well), from
+        // the moment its request goes out
+        let mut gauge = Gauge::new(started);
+        on(gauge.show(started));
         loop {
             let next = match deadline {
                 Some(d) => match tokio::time::timeout_at(d, events.next()).await {
@@ -1899,7 +2186,12 @@ impl Agent {
                 None => events.next().await,
             };
             let Some(ev) = next else { break };
-            let ev = match ev? {
+            let ev = ev?;
+            if let Some(progress) = gauge.update(&ev, Instant::now()) {
+                on(progress);
+            }
+            let ev = match ev {
+                DriverEvent::Progress(_) => continue,
                 DriverEvent::Reasoning(text) => AgentEvent::Reasoning { text },
                 DriverEvent::Text(text) => AgentEvent::Text { text },
                 DriverEvent::ToolCallDelta {
@@ -2267,6 +2559,13 @@ impl Agent {
             ));
             self.reverted.clear();
         }
+        if !self.undone.is_empty() {
+            user.push_str(&format!(
+                "\n\n[ognivo] Since your last turn the user undid part of your changes to {}. Read them again before you edit them.",
+                self.undone.join(", ")
+            ));
+            self.undone.clear();
+        }
         // a compaction keeps the request, and says it had images
         let kept = match images.len() {
             0 => request.to_owned(),
@@ -2281,6 +2580,8 @@ impl Agent {
         let mut unusable = 0;
         let mut stop_continues = 0;
         for step in 0..self.opts.max_steps {
+            // a store that failed at the saves of the step before, or of the turn's start
+            self.tell_store_failure(on);
             if let Some(note) = self.mode_note(step == 0) {
                 self.emit(
                     on,
@@ -2307,9 +2608,19 @@ impl Agent {
             if deadline.is_some_and(|d| Instant::now() >= d) {
                 return Ok(TurnEnd::TimeLimit);
             }
+            // what the user wrote meanwhile goes with this step, before a compaction that
+            // its length may call for
+            self.steered(on);
             if let Some(end) = self.compact_if_needed(on, deadline).await? {
                 return Ok(end);
             }
+            // and so does what they wrote while the summary was written, unless the time ran
+            // out meanwhile: a step that is not sent takes nothing. The compacted history is a
+            // new cache epoch, and without a compaction the newest message is still unsent.
+            if deadline.is_some_and(|d| Instant::now() >= d) {
+                return Ok(TurnEnd::TimeLimit);
+            }
+            self.steered(on);
             let req = self.request(ToolChoice::Auto, self.messages.clone());
             let Some(f) = self.generate(req, deadline, on, true, "step").await? else {
                 return Ok(TurnEnd::TimeLimit);
@@ -3162,6 +3473,37 @@ impl Agent {
         }
     }
 
+    /// What the user wrote while the turn ran ([`Inbox`]), for the step about to go out: a
+    /// note appended to the newest message, which the server has not been sent yet (the
+    /// results of the step before, or ognivo's note), so the prompt only grows. Never a
+    /// system message, which the Generic path moves to the head, nor a message between a
+    /// call and its result. A compaction quotes it with the turn's request. It is news, so
+    /// the compaction after it is not idle.
+    fn steered(&mut self, on: &mut (dyn FnMut(AgentEvent) + Send)) {
+        let texts = self.inbox.take();
+        if texts.is_empty() {
+            return;
+        }
+        self.news = true;
+        let quoted: Vec<String> = texts.iter().map(|t| format!("«{t}»")).collect();
+        self.append_to_last(&format!(
+            "[ognivo] The user wrote while you worked: {}",
+            quoted.join(", then ")
+        ));
+        // one request a turn, as `rewind` counts them; the note of a compaction quotes each
+        // text apart from the request
+        if let Some(request) = self.requests.last_mut() {
+            for text in &texts {
+                request.push_str(compact::STEERED);
+                request.push_str(text);
+            }
+        }
+        for text in texts {
+            self.emit(on, AgentEvent::Steered { text });
+        }
+        self.save();
+    }
+
     /// Adds a note to the newest message, a tool result or ognivo's own note, so that no
     /// extra message enters the history.
     fn append_to_last(&mut self, note: &str) {
@@ -3241,6 +3583,13 @@ impl Agent {
     /// The mode from the next call on, the subagents' too.
     pub fn set_mode(&self, mode: Mode) {
         self.opts.mode.set(mode);
+    }
+
+    /// Whether the model takes images ([`AgentOptions::vision`]), from the next turn on: its
+    /// server may have been started with its projector, or without it, since the session
+    /// began. The subagents of the turn's `delegate` take it with the rest of the options.
+    pub fn set_vision(&mut self, vision: bool) {
+        self.opts.vision = vision;
     }
 
     /// An edit's decision in the thread's mode, and why it asks when it does.
@@ -4049,6 +4398,16 @@ mod tests {
     enum Step {
         Done(Box<Finished>),
         Hang,
+        /// The user writes `text` to the running turn as the step's request goes out, and
+        /// the step plays.
+        Steered(&'static str, Box<Step>),
+    }
+
+    impl Step {
+        /// The step, with the user writing `text` while it runs.
+        fn steered(text: &'static str, step: impl Into<Step>) -> Step {
+            Step::Steered(text, Box::new(step.into()))
+        }
     }
 
     impl From<ChatCompletion> for Step {
@@ -4070,15 +4429,30 @@ mod tests {
     struct Script {
         steps: Mutex<Vec<Step>>,
         seen: Arc<Mutex<Vec<StepRequest>>>,
+        /// The inbox of the agent the user writes to, once there is one.
+        inbox: Arc<Mutex<Option<Inbox>>>,
+    }
+
+    impl Script {
+        fn play(&self, step: Step) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
+            match step {
+                Step::Done(f) => stream::iter(vec![Ok(DriverEvent::Finished(f))]).boxed(),
+                Step::Hang => stream::pending().boxed(),
+                Step::Steered(text, step) => {
+                    let inbox = self.inbox.lock().unwrap().clone();
+                    let inbox = inbox.expect("the inbox of the agent the user writes to");
+                    assert!(inbox.push(text.to_owned()), "no turn took {text:?}");
+                    self.play(*step)
+                }
+            }
+        }
     }
 
     impl ModelDriver for Script {
         fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
             self.seen.lock().unwrap().push(req);
-            match self.steps.lock().unwrap().remove(0) {
-                Step::Done(f) => stream::iter(vec![Ok(DriverEvent::Finished(f))]).boxed(),
-                Step::Hang => stream::pending().boxed(),
-            }
+            let step = self.steps.lock().unwrap().remove(0);
+            self.play(step)
         }
     }
 
@@ -4137,13 +4511,16 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
         let (driver, seen) = played(steps);
+        let inbox = driver.inbox.clone();
+        let agent = Agent::new(
+            Box::new(driver),
+            Family::Harmony,
+            approver,
+            options(&root, workspace, time_limit),
+        );
+        *inbox.lock().unwrap() = Some(agent.inbox());
         Run {
-            agent: Agent::new(
-                Box::new(driver),
-                Family::Harmony,
-                approver,
-                options(&root, workspace, time_limit),
-            ),
+            agent,
             seen,
             root,
             _dir: dir,
@@ -4155,6 +4532,7 @@ mod tests {
         let driver = Script {
             steps: Mutex::new(steps),
             seen: seen.clone(),
+            inbox: Arc::default(),
         };
         (driver, seen)
     }
@@ -4410,6 +4788,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_model_whose_server_comes_to_see_gets_the_conversations_images_from_the_next_turn() {
+        let shot = Image::new(&png(4, 2)).unwrap();
+        let mut r = agent(
+            vec![answer("I see no image."), answer("A cat.")],
+            WorkspaceState::CLEAN,
+        );
+        r.agent
+            .turn_with("What is it?", vec![shot.clone()], &mut |_| {})
+            .await
+            .unwrap();
+        // the server is started with its projector between the turns
+        r.agent.set_vision(true);
+        r.agent.turn("And now?", &mut |_| {}).await.unwrap();
+        let seen = r.seen.lock().unwrap();
+        let images = |at: usize| -> Vec<Image> {
+            seen[at]
+                .messages
+                .iter()
+                .flat_map(|m| m.images().to_vec())
+                .collect()
+        };
+        assert!(images(0).is_empty());
+        assert_eq!(images(1), [shot]);
+    }
+
+    #[tokio::test]
+    async fn subagents_see_as_their_session_does_at_the_turn() {
+        for vision in [true, false] {
+            let tasks = json!({"tasks": [
+                {"title": "Look", "goal": "What does shot.png show?", "mode": "read"}
+            ]});
+            let (mut r, subagents) = delegating(
+                vec![
+                    calls(&[("delegate", tasks)], FinishReason::ToolCalls),
+                    answer("Done."),
+                ],
+                vec![vec![
+                    calls(
+                        &[("read", json!({"path": "shot.png"}))],
+                        FinishReason::ToolCalls,
+                    ),
+                    answer("A cat."),
+                ]],
+            );
+            std::fs::write(r.root.join("shot.png"), png(8, 6)).unwrap();
+            r.agent.set_vision(vision);
+            let (end, _) = turn(&mut r).await;
+            assert_eq!(answered(end).text, "Done.");
+            let subs = subagents.lock().unwrap();
+            let asked = subs[0].lock().unwrap();
+            let Some(ChatMessage::Tool { images, .. }) = asked[1].messages.last() else {
+                panic!("{:?}", asked[1].messages.last());
+            };
+            assert_eq!(images.len(), usize::from(vision));
+        }
+    }
+
     #[test]
     fn a_request_carries_the_newest_images_that_fit_and_older_ones_as_what_they_are() {
         let shot = |w| Image::new(&png(w, 2)).unwrap();
@@ -4534,24 +4970,29 @@ mod tests {
             matches!(&end, TurnEnd::Answer(a) if a.text == "done"),
             "{end:?}"
         );
-        // the turn starts, its first generation ends with its usage, then the call runs
+        // the turn starts, its first request goes out, the generation ends with its usage,
+        // then the call runs
         let first: Vec<&str> = events
             .iter()
-            .take(3)
+            .take(4)
             .map(|e| match e {
                 AgentEvent::TurnStarted { .. } => "turn",
+                AgentEvent::Progress {
+                    phase: Phase::Waiting,
+                    ..
+                } => "waiting",
                 AgentEvent::Generation { .. } => "generation",
                 AgentEvent::ToolStarted { .. } => "call",
                 _ => "other",
             })
             .collect();
-        assert_eq!(first, ["turn", "generation", "call"]);
+        assert_eq!(first, ["turn", "waiting", "generation", "call"]);
         assert!(
             matches!(events.last(), Some(AgentEvent::TurnEnded { end, .. }) if end == "answer")
         );
         // the UI gets the parsed call and, for a change, the diff
         assert!(matches!(
-            &events[2],
+            &events[3],
             AgentEvent::ToolStarted { call: Some(Call::Read { path, .. }), .. } if path == "lib.rs"
         ));
         let changed: Vec<_> = events
@@ -5410,6 +5851,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hunk_kept_stays_and_one_undone_goes_and_the_model_hears_of_it() {
+        // two edits a line apart: two hunks
+        let edits = calls(
+            &[
+                (
+                    "edit",
+                    json!({"path": "lib.rs", "old_string": "fn a", "new_string": "fn b"}),
+                ),
+                (
+                    "edit",
+                    json!({"path": "lib.rs", "old_string": "}", "new_string": "} // b"}),
+                ),
+            ],
+            FinishReason::ToolCalls,
+        );
+        let mut r = agent(
+            vec![edits, answer("done"), answer("ok")],
+            WorkspaceState::CLEAN,
+        );
+        turn(&mut r).await;
+        let lib = r.root.join("lib.rs");
+        let hunks = r.agent.changes()[0].hunks.clone();
+        assert_eq!(hunks.len(), 2, "{hunks:?}");
+        // kept, the file stays as the model left it: nothing to tell it
+        r.agent.accept_hunk(&lib, &hunks[0]).unwrap();
+        assert!(r.agent.undone.is_empty() && r.agent.seen.contains(&lib));
+        r.agent.revert_hunk(&lib, &hunks[1]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&lib).unwrap(),
+            "fn b() -> u32 {\n    1\n}\n"
+        );
+        assert!(!r.agent.unreviewed_changes());
+        // it reads the file again before it writes it whole
+        assert!(!r.agent.seen.contains(&lib));
+        assert!(matches!(
+            r.agent.revert_hunk(&lib, &hunks[1]),
+            Err(JournalError::NotChanged(_))
+        ));
+        turn(&mut r).await;
+        let seen = r.seen.lock().unwrap();
+        let last = seen.last().unwrap().messages.last().unwrap().clone();
+        assert_eq!(
+            last,
+            ChatMessage::user(
+                "fix it\n\n[ognivo] Since your last turn the user undid part of your changes to lib.rs. Read them again before you edit them."
+            )
+        );
+        drop(seen);
+        assert!(r.agent.undone.is_empty());
+    }
+
+    #[tokio::test]
     async fn accepted_changes_leave_nothing_unreviewed() {
         let mut r = agent(vec![edit_lib(), answer("done")], WorkspaceState::DIRTY);
         turn(&mut r).await;
@@ -5612,7 +6105,7 @@ mod tests {
         };
         let finished = |c: ChatCompletion| match Step::from(c) {
             Step::Done(f) => DriverEvent::Finished(f),
-            Step::Hang => unreachable!(),
+            Step::Hang | Step::Steered(..) => unreachable!(),
         };
         let driver = Writing(Mutex::new(vec![
             vec![
@@ -5663,6 +6156,475 @@ mod tests {
             std::fs::read_to_string(root.join("a.rs")).unwrap(),
             "fn a() {}\n"
         );
+    }
+
+    fn prompt_read(processed: u32) -> DriverEvent {
+        DriverEvent::Progress(ognivo_models::Progress {
+            prompt: Some(PromptProgress {
+                total: 12_400,
+                cache: 4_000,
+                processed,
+                time_ms: None,
+            }),
+            generated: Some(0),
+        })
+    }
+
+    fn counted(n: u32) -> DriverEvent {
+        DriverEvent::Progress(ognivo_models::Progress {
+            prompt: None,
+            generated: Some(n),
+        })
+    }
+
+    /// What the user sees of a progress event: what the generation does, how far the
+    /// prompt was read, the tokens, the milliseconds since the request, and the tokens a
+    /// second to two decimals.
+    fn seen_of(e: &AgentEvent) -> (Phase, Option<u32>, u32, u64, Option<f64>) {
+        let AgentEvent::Progress {
+            phase,
+            prompt_done,
+            generated,
+            elapsed_ms,
+            tokens_per_second,
+            ..
+        } = e
+        else {
+            panic!("{e:?}")
+        };
+        (
+            *phase,
+            *prompt_done,
+            *generated,
+            *elapsed_ms,
+            tokens_per_second.map(|t| (t * 100.0).round() / 100.0),
+        )
+    }
+
+    /// How far a generation got, as the user sees it: as its request goes out, at each
+    /// change of what it does, and else at most every 200 ms; the server's count of tokens
+    /// where it gives one, else the fragments streamed; the speed from the second token on.
+    #[test]
+    fn a_gauge_shows_each_change_at_once_and_the_rest_every_200_ms() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut g = Gauge::new(start);
+        assert_eq!(seen_of(&g.show(start)), (Phase::Waiting, None, 0, 0, None));
+        let mut shown = Vec::new();
+        for (ms, ev) in [
+            (300, prompt_read(4_000)),
+            // too soon after the last
+            (350, prompt_read(8_096)),
+            (520, prompt_read(12_400)),
+            // the first token, which shows nothing yet
+            (600, counted(1)),
+            (630, DriverEvent::Reasoning("Read".into())),
+            (630, counted(2)),
+            (900, counted(10)),
+            (950, DriverEvent::Text("It".into())),
+            (950, counted(11)),
+        ] {
+            shown.extend(g.update(&ev, at(ms)).as_ref().map(seen_of));
+        }
+        assert_eq!(
+            shown,
+            [
+                (Phase::Prompt, Some(4_000), 0, 300, None),
+                (Phase::Prompt, Some(12_400), 0, 520, None),
+                (Phase::Reasoning, Some(12_400), 1, 630, None),
+                // nine tokens in the 300 ms since the first
+                (Phase::Reasoning, Some(12_400), 10, 900, Some(30.0)),
+                (Phase::Writing, Some(12_400), 10, 950, Some(25.71)),
+            ]
+        );
+        let end = DriverEvent::Finished(Box::new(Finished {
+            content: "It".into(),
+            reasoning: "Read".into(),
+            outcome: Outcome::Answer,
+            finish: Some(FinishReason::Stop),
+            usage: Default::default(),
+            seed: 1,
+            tokens: None,
+        }));
+        assert!(g.update(&end, at(2_000)).is_none(), "its end shows nothing");
+
+        // a driver that does not count, and a step that starts over: counted anew
+        let mut g = Gauge::new(start);
+        g.show(start);
+        let restarted = DriverEvent::Restarted {
+            seed: 9,
+            reason: "the server could not parse it".into(),
+        };
+        let mut shown = Vec::new();
+        for (ms, ev) in [
+            (0, DriverEvent::Text("A".into())),
+            (100, DriverEvent::Text("B".into())),
+            (250, DriverEvent::Text("C".into())),
+            (300, restarted),
+            (
+                400,
+                DriverEvent::ToolCallDelta {
+                    index: 0,
+                    name: Some("write".into()),
+                    arguments: String::new(),
+                },
+            ),
+        ] {
+            shown.extend(g.update(&ev, at(ms)).as_ref().map(seen_of));
+        }
+        assert_eq!(
+            shown,
+            [
+                (Phase::Writing, None, 1, 0, None),
+                (Phase::Writing, None, 3, 250, Some(8.0)),
+                (Phase::Waiting, None, 0, 300, None),
+                (Phase::Writing, None, 1, 400, None),
+            ]
+        );
+    }
+
+    /// The user sees how far each generation of a turn got, in the server's numbers, from
+    /// the moment its request goes out; none of it is kept in the session's log.
+    #[tokio::test]
+    async fn the_user_sees_how_far_a_generation_got_and_none_of_it_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let finished = |c: ChatCompletion| match Step::from(c) {
+            Step::Done(f) => DriverEvent::Finished(f),
+            Step::Hang | Step::Steered(..) => unreachable!(),
+        };
+        let driver = Writing(Mutex::new(vec![vec![
+            prompt_read(4_000),
+            prompt_read(12_400),
+            counted(1),
+            DriverEvent::Reasoning("Read".into()),
+            counted(2),
+            DriverEvent::Text("It".into()),
+            counted(3),
+            finished(answer("It")),
+        ]]));
+        let agent = Agent::new(
+            Box::new(driver),
+            Family::Gemma4,
+            Box::new(NoUser),
+            options(&root, WorkspaceState::CLEAN, None),
+        );
+        let mut r = Run {
+            agent,
+            seen: Arc::default(),
+            root,
+            _dir: dir,
+        };
+        let id = kept(&mut r);
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "It");
+        // each phase as it began: the times are the machine's, the rest is the stream's
+        let mut began: Vec<(Phase, Option<u32>, u32)> = Vec::new();
+        for e in &events {
+            if let AgentEvent::Progress {
+                phase,
+                prompt_done,
+                generated,
+                ..
+            } = e
+                && began.last().is_none_or(|(p, ..)| p != phase)
+            {
+                began.push((*phase, *prompt_done, *generated));
+            }
+        }
+        assert_eq!(
+            began,
+            [
+                (Phase::Waiting, None, 0),
+                (Phase::Prompt, Some(4_000), 0),
+                (Phase::Reasoning, Some(12_400), 1),
+                (Phase::Writing, Some(12_400), 2),
+            ]
+        );
+        // the first goes out with the request, before anything of the generation
+        assert!(matches!(
+            &events[1],
+            AgentEvent::Progress {
+                phase: Phase::Waiting,
+                ..
+            }
+        ));
+        // the session's log has the generation, not how far it got
+        let Run { agent, root, .. } = r;
+        drop(agent);
+        let kinds = event_kinds(&root, id);
+        assert!(kinds.contains(&"generation".to_owned()), "{kinds:?}");
+        assert!(!kinds.iter().any(|k| k == "progress"), "{kinds:?}");
+    }
+
+    /// What the user writes while the model works reaches the model with its next step,
+    /// after the results of the step before, as ognivo's note: the prompt only grows, the
+    /// note is an event of its own there, and a compaction quotes it with the turn's request.
+    #[tokio::test]
+    async fn what_the_user_writes_meanwhile_reaches_the_next_step_after_the_results() {
+        let read = calls(
+            &[("read", json!({"path": "lib.rs"}))],
+            FinishReason::ToolCalls,
+        );
+        let mut r = script(
+            vec![
+                Step::Steered("Use tabs.", Box::new(Step::steered("And say why.", read))),
+                answer("Done.").into(),
+            ],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
+        );
+        // no turn runs: nothing is taken
+        assert!(!r.agent.inbox().push("early".into()));
+        let id = kept(&mut r);
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        let seen = r.seen.lock().unwrap();
+        assert!(
+            !format!("{:?}", seen[0].messages).contains("Use tabs."),
+            "the first request went out before the user wrote"
+        );
+        let ChatMessage::Tool { content, .. } = seen[1].messages.last().unwrap() else {
+            panic!("{:?}", seen[1].messages.last())
+        };
+        let note = "[ognivo] The user wrote while you worked: «Use tabs.», then «And say why.»";
+        assert!(
+            content.starts_with("[read: lib.rs") && content.ends_with(&format!("\n\n{note}")),
+            "{content}"
+        );
+        // the second prompt is the first one and more, nothing in it changed
+        let before = seen[0].messages.len();
+        assert_eq!(seen[1].messages[..before], seen[0].messages[..]);
+        assert_eq!(seen[1].messages.len(), before + 2);
+        drop(seen);
+        let order: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Generation { .. } => Some("generation".to_owned()),
+                AgentEvent::ToolFinished { .. } => Some("result".to_owned()),
+                AgentEvent::Steered { text } => Some(format!("steered {text}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "generation",
+                "result",
+                "steered Use tabs.",
+                "steered And say why.",
+                "generation"
+            ]
+        );
+        assert_eq!(
+            r.agent.requests,
+            ["fix it\nThen, while you worked: Use tabs.\nThen, while you worked: And say why."]
+        );
+        // nothing is left for the next turn, and the ended turn takes nothing more
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnEnded { undelivered, .. }) if undelivered.is_empty()
+        ));
+        assert!(!r.agent.inbox().push("late".into()));
+        // the session keeps it where the model got it, and its trajectory has the user's
+        // words there
+        let Run { agent, root, .. } = r;
+        drop(agent);
+        let kinds = event_kinds(&root, id);
+        let at = kinds.iter().position(|k| k == "steered").unwrap();
+        assert_eq!(kinds[at - 1], "tool_finished", "{kinds:?}");
+        assert_eq!(kinds[at + 1], "steered", "{kinds:?}");
+        let store = ognivo_store::Store::open(&store_path(&root)).unwrap();
+        let t = crate::trace::atif(&store, id).unwrap();
+        atif_shape(&t).unwrap();
+        let sources: Vec<(&str, &str)> = t["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["source"] != "system")
+            .map(|s| {
+                let said = s["message"].as_str().unwrap_or_default();
+                (s["source"].as_str().unwrap(), said)
+            })
+            .collect();
+        assert_eq!(
+            sources,
+            [
+                ("user", "fix it"),
+                ("agent", ""),
+                ("user", "Use tabs."),
+                ("user", "And say why."),
+                ("agent", "Done.")
+            ]
+        );
+        let steered = &t["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rfind(|s| s["source"] == "user")
+            .unwrap();
+        assert_eq!(steered["extra"], json!({"steered": true}));
+    }
+
+    /// What the user writes after the last step never reaches the model: the turn's end
+    /// gives it back, for the next turn. So at the step limit too, whose answer is asked for
+    /// without tools to act on it with.
+    #[tokio::test]
+    async fn what_the_user_writes_after_the_last_step_comes_back_with_the_turns_end() {
+        let mut r = script(
+            vec![Step::steered("And the README.", answer("Done."))],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
+        );
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnEnded { end, undelivered, .. })
+                if end == "answer" && *undelivered == ["And the README."]
+        ));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Steered { .. }))
+        );
+        assert!(!format!("{:?}", r.agent.messages()).contains("And the README."));
+        assert_eq!(r.agent.requests, ["fix it"]);
+
+        let read = calls(
+            &[("read", json!({"path": "lib.rs"}))],
+            FinishReason::ToolCalls,
+        );
+        let mut r = script(
+            vec![
+                Step::steered("And lib2.rs.", read),
+                answer("lib.rs holds a().").into(),
+            ],
+            WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
+        );
+        r.agent.opts.max_steps = 1;
+        let (end, events) = turn(&mut r).await;
+        assert!(
+            matches!(&end, TurnEnd::StepLimit(Some(a)) if a.text == "lib.rs holds a()."),
+            "{end:?}"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnEnded { end, undelivered, .. })
+                if end == "step_limit" && *undelivered == ["And lib2.rs."]
+        ));
+        let seen = r.seen.lock().unwrap();
+        assert!(!format!("{:?}", seen[1].messages).contains("And lib2.rs."));
+    }
+
+    /// What the user writes while a compaction's summary is written goes with the first step
+    /// after the compaction, not one step later: the compacted history is a new cache epoch,
+    /// which only grows by it.
+    #[tokio::test]
+    async fn what_the_user_writes_during_a_compaction_reaches_the_step_after_it() {
+        let mut r = filling(Step::steered(
+            "Do not touch lib.rs.",
+            answer("Task: fix it.\nNext: change lib.rs."),
+        ));
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "done");
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen.len(), 5);
+        // the summary went out before the user wrote
+        assert_eq!(seen[3].tool_choice, ToolChoice::None);
+        assert!(!format!("{:?}", seen[3].messages).contains("Do not touch lib.rs."));
+        let Some(ChatMessage::Tool { content, .. } | ChatMessage::User { text: content, .. }) =
+            seen[4].messages.last()
+        else {
+            panic!("{:?}", seen[4].messages.last())
+        };
+        assert!(
+            content
+                .ends_with("\n\n[ognivo] The user wrote while you worked: «Do not touch lib.rs.»"),
+            "{content}"
+        );
+        drop(seen);
+        let order: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Generation { purpose, .. } => Some(purpose.as_str()),
+                AgentEvent::Compacted { .. } => Some("compacted"),
+                AgentEvent::Steered { .. } => Some("steered"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "step",
+                "step",
+                "step",
+                "summary",
+                "compacted",
+                "steered",
+                "step"
+            ]
+        );
+        assert_eq!(
+            r.agent.requests,
+            ["fix it\nThen, while you worked: Do not touch lib.rs."]
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::TurnEnded { undelivered, .. }) if undelivered.is_empty()
+        ));
+    }
+
+    /// What the user writes while a subagent works is the main agent's: the subagent never
+    /// takes it, and the main agent's next step has it after the reports.
+    #[tokio::test]
+    async fn what_the_user_writes_while_a_subagent_works_is_the_main_agents() {
+        let tasks =
+            json!({"tasks": [{"title": "Find", "goal": "What does b.txt say?", "mode": "read"}]});
+        let read = calls(
+            &[("read", json!({"path": "b.txt"}))],
+            FinishReason::ToolCalls,
+        );
+        let (mut r, subagents) = delegating_steps(
+            vec![
+                calls(&[("delegate", tasks)], FinishReason::ToolCalls).into(),
+                answer("b.txt says b.").into(),
+            ],
+            vec![vec![
+                Step::steered("Then a.txt.", read),
+                answer("b.txt says b.").into(),
+            ]],
+        );
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "b.txt says b.");
+        let subs = subagents.lock().unwrap();
+        let sub = subs[0].lock().unwrap();
+        assert!(
+            !format!("{:?}", sub[1].messages).contains("Then a.txt."),
+            "{:?}",
+            sub[1].messages
+        );
+        let main = r.seen.lock().unwrap();
+        let ChatMessage::Tool { content, .. } = main[1].messages.last().unwrap() else {
+            panic!("{:?}", main[1].messages.last())
+        };
+        assert!(
+            content.starts_with("[delegate]")
+                && content.ends_with("\n\n[ognivo] The user wrote while you worked: «Then a.txt.»"),
+            "{content}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Steered { text } if text == "Then a.txt."))
+        );
+        assert!(!events.iter().any(|e| matches!(e,
+            AgentEvent::Subagent { event, .. } if matches!(**event, AgentEvent::Steered { .. }))));
     }
 
     #[tokio::test]
@@ -5841,6 +6803,162 @@ mod tests {
         assert_eq!(row.unreviewed_files, 0);
     }
 
+    const STORE_FAILED: &str = "[ognivo] The session store failed: ";
+
+    /// What a turn showed of its generations, results and end, and where it told that the
+    /// store failed.
+    fn store_told(events: &[AgentEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Generation { .. } => Some("generation"),
+                AgentEvent::ToolFinished { .. } => Some("result"),
+                AgentEvent::Notice { text } if text.starts_with(STORE_FAILED) => Some("told"),
+                AgentEvent::TurnEnded { .. } => Some("end"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The store fails (here it lost the session, so every save of it breaks a foreign key):
+    /// the session goes on in memory, and the turn tells the user once, before its first
+    /// step, as ognivo's notice. The model is not told.
+    #[tokio::test]
+    async fn a_store_that_fails_is_told_once_in_the_turn_and_not_to_the_model() {
+        let mut r = agent(
+            vec![edit_lib(), answer("done"), answer("still done")],
+            WorkspaceState::CLEAN,
+        );
+        let id = kept(&mut r);
+        let mut other = ognivo_store::Store::open(&store_path(&r.root)).unwrap();
+        other.delete_session(id).unwrap();
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "done");
+        assert_eq!(
+            store_told(&events),
+            ["told", "generation", "result", "generation", "end"]
+        );
+        let told = events
+            .iter()
+            .find_map(|e| match e {
+                AgentEvent::Notice { text } if text.starts_with(STORE_FAILED) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            told,
+            "[ognivo] The session store failed: FOREIGN KEY constraint failed. The session goes on in memory and is no longer saved."
+        );
+        assert_eq!(r.agent.store_failure(), None);
+        // the next turn has nothing more to tell
+        let (_, events) = turn(&mut r).await;
+        assert_eq!(store_told(&events), ["generation", "end"]);
+        assert!(
+            !format!("{:?}", r.seen.lock().unwrap()).contains("store failed"),
+            "the model was told"
+        );
+        // the edit is in the journal in memory, for a review or an undo while ognivo runs
+        assert_eq!(r.agent.changes().len(), 1);
+    }
+
+    /// A driver that has the store lose its sessions when step `at` is asked for, so that
+    /// the saves of the session fail from then on.
+    #[derive(Debug)]
+    struct Unkeeping {
+        script: Script,
+        store: PathBuf,
+        at: usize,
+        steps: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ModelDriver for Unkeeping {
+        fn step(&self, req: StepRequest) -> BoxStream<'static, Result<DriverEvent, DriverError>> {
+            if self.steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == self.at {
+                let mut store = ognivo_store::Store::open(&self.store).unwrap();
+                for s in store.sessions(None, u32::MAX).unwrap() {
+                    store.delete_session(s.id).unwrap();
+                }
+            }
+            self.script.step(req)
+        }
+    }
+
+    /// The store fails while a turn runs: the turn tells it right after the next thing it
+    /// shows, here the call that starts, or before its end when nothing more comes.
+    #[tokio::test]
+    async fn a_store_that_fails_while_a_turn_runs_is_told_as_it_goes_on() {
+        for (at, shown) in [
+            (0, ["generation", "told", "result", "generation", "end"]),
+            (1, ["generation", "result", "generation", "told", "end"]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("lib.rs"), "fn a() -> u32 {\n    1\n}\n").unwrap();
+            let (script, seen) = played(vec![edit_lib().into(), answer("done").into()]);
+            let driver = Unkeeping {
+                script,
+                store: store_path(&root),
+                at,
+                steps: Default::default(),
+            };
+            let opts = options(&root, WorkspaceState::CLEAN, None);
+            let mut r = Run {
+                agent: Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts),
+                seen,
+                root,
+                _dir: dir,
+            };
+            kept(&mut r);
+            let (end, events) = turn(&mut r).await;
+            assert_eq!(answered(end).text, "done");
+            assert_eq!(store_told(&events), shown, "the store failed at step {at}");
+            assert_eq!(r.agent.store_failure(), None);
+        }
+    }
+
+    /// A store that fails outside a turn, here at a `/clear`, is left for the caller to tell:
+    /// the SessionEnd hooks after it say what they say to nobody, and do not take it along.
+    #[tokio::test]
+    async fn a_store_that_fails_outside_a_turn_is_left_for_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
+        let home = root.parent().unwrap().join("home");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"hooks": {"SessionEnd": [{"hooks": [
+                {"type": "command", "command": "echo '{\"systemMessage\": \"bye\"}'"}
+            ]}]}}"#,
+        )
+        .unwrap();
+        let loaded = hooks::load(&crate::rules::Places {
+            root: root.clone(),
+            home: Some(home),
+            claude_dir: None,
+        });
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let mut opts = options(&root, WorkspaceState::CLEAN, None);
+        opts.hooks = Arc::new(loaded.hooks);
+        let (driver, seen) = played(Vec::new());
+        let mut r = Run {
+            agent: Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts),
+            seen,
+            root,
+            _dir: dir,
+        };
+        let id = kept(&mut r);
+        let mut other = ognivo_store::Store::open(&store_path(&r.root)).unwrap();
+        other.delete_session(id).unwrap();
+        r.agent.clear();
+        r.agent.end_session("other").await;
+        assert_eq!(
+            r.agent.store_failure().as_deref(),
+            Some("FOREIGN KEY constraint failed")
+        );
+    }
+
     #[tokio::test]
     async fn a_turn_ognivo_stopped_in_is_closed_when_the_session_goes_on() {
         // the edit is applied, then the generation after it never ends: ognivo dies there
@@ -5913,7 +7031,7 @@ mod tests {
 
     /// A turn that reads two files of 20 KB, under the limit, and then a small one, after
     /// which the server says it holds more than the limit.
-    fn filling(summary: ChatCompletion) -> Run {
+    fn filling(summary: impl Into<Step>) -> Run {
         let read = |path: &str| {
             calls(
                 &[("read", serde_json::json!({ "path": path }))],
@@ -5922,15 +7040,17 @@ mod tests {
         };
         let mut full = read("lib.rs");
         full.usage.prompt_n = Some(30_000);
-        let mut r = agent(
+        let mut r = script(
             vec![
-                read("big1.txt"),
-                read("big2.txt"),
-                full,
-                summary,
-                answer("done"),
+                read("big1.txt").into(),
+                read("big2.txt").into(),
+                full.into(),
+                summary.into(),
+                answer("done").into(),
             ],
             WorkspaceState::CLEAN,
+            Box::new(NoUser),
+            None,
         );
         let line = format!("{}\n", "x".repeat(59));
         for name in ["big1.txt", "big2.txt"] {
@@ -6141,6 +7261,59 @@ mod tests {
             .count();
         assert_eq!(compactions, 2);
         assert_eq!(r.seen.lock().unwrap().len(), 11);
+    }
+
+    /// What the user writes is news: the compaction after it is not idle, though nothing new
+    /// was read or changed since the one before, and the model gets the text after it.
+    #[tokio::test]
+    async fn a_compaction_after_what_the_user_wrote_is_not_idle() {
+        let read = |path: &str, held: Option<u32>| {
+            let mut c = calls(
+                &[("read", serde_json::json!({ "path": path }))],
+                FinishReason::ToolCalls,
+            );
+            c.usage.prompt_n = held;
+            c
+        };
+        // the same three files each time, the last read leaving the context full; the user
+        // writes as the third round's last read goes out
+        let round = || {
+            vec![
+                Step::from(read("big1.txt", None)),
+                read("big2.txt", None).into(),
+                read("lib.rs", Some(30_000)).into(),
+            ]
+        };
+        let mut steps = round();
+        steps.push(answer("Task: one.").into());
+        steps.extend(round());
+        steps.push(answer("Task: two.").into());
+        let mut third = round();
+        third[2] = Step::steered("Use the small file instead.", read("lib.rs", Some(30_000)));
+        steps.extend(third);
+        steps.push(answer("Task: three.").into());
+        steps.push(answer("Done.").into());
+        let mut r = script(steps, WorkspaceState::CLEAN, Box::new(NoUser), None);
+        let line = format!("{}\n", "x".repeat(59));
+        for name in ["big1.txt", "big2.txt"] {
+            std::fs::write(r.root.join(name), line.repeat(340)).unwrap();
+        }
+        r.agent.opts.n_ctx = Some(40_000);
+        r.agent.opts.max_steps = 20;
+        let (end, events) = turn(&mut r).await;
+        assert_eq!(answered(end).text, "Done.");
+        let compactions = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::Compacted { .. }))
+            .count();
+        assert_eq!(compactions, 3);
+        // the third summary was asked with the text, and the step after it has it
+        let seen = r.seen.lock().unwrap();
+        assert_eq!(seen.len(), 13);
+        assert_eq!(seen[11].tool_choice, ToolChoice::None);
+        for q in &seen[11..] {
+            assert!(format!("{:?}", q.messages).contains("Use the small file instead."));
+        }
     }
 
     #[tokio::test]
@@ -6506,17 +7679,20 @@ mod tests {
     type Seen = Arc<Mutex<Vec<Arc<Mutex<Vec<StepRequest>>>>>>;
 
     /// Subagents whose drivers play prepared steps, one script per subagent in the order
-    /// they are made, and keep what each was sent.
+    /// they are made, and keep what each was sent. What the user writes in their steps goes
+    /// to the main agent, as the user writes to it.
     #[derive(Debug)]
     struct Scripts {
-        scripts: Mutex<Vec<Vec<ChatCompletion>>>,
+        scripts: Mutex<Vec<Vec<Step>>>,
         seen: Seen,
+        inbox: Arc<Mutex<Option<Inbox>>>,
     }
 
     impl Subagents for Scripts {
         fn driver(&self) -> Box<dyn ModelDriver> {
             let steps = self.scripts.lock().unwrap().remove(0);
-            let (driver, seen) = played(steps.into_iter().map(Step::from).collect());
+            let (mut driver, seen) = played(steps);
+            driver.inbox = self.inbox.clone();
             self.seen.lock().unwrap().push(seen);
             Box::new(driver)
         }
@@ -6529,12 +7705,18 @@ mod tests {
     /// The main agent playing `main` in a project with a.txt and b.txt, its subagents
     /// playing `scripts`; and what each subagent was sent.
     fn delegating(main: Vec<ChatCompletion>, scripts: Vec<Vec<ChatCompletion>>) -> (Run, Seen) {
+        let steps = |s: Vec<ChatCompletion>| s.into_iter().map(Step::from).collect();
+        delegating_steps(steps(main), scripts.into_iter().map(steps).collect())
+    }
+
+    fn delegating_steps(main: Vec<Step>, scripts: Vec<Vec<Step>>) -> (Run, Seen) {
         let dir = tempfile::tempdir().unwrap();
         let root = ognivo_os::canonicalize(dir.path()).unwrap().join("proj");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.txt"), "one\n").unwrap();
         std::fs::write(root.join("b.txt"), "b\n").unwrap();
-        let (driver, seen) = played(main.into_iter().map(Step::from).collect());
+        let (driver, seen) = played(main);
+        let inbox = driver.inbox.clone();
         let subagents = Arc::new(Mutex::new(Vec::new()));
         // a tree with unreviewed changes: nobody may run the project's code, so no answer
         // goes back for a build
@@ -6543,8 +7725,10 @@ mod tests {
         opts.subagents = Some(Arc::new(Scripts {
             scripts: Mutex::new(scripts),
             seen: subagents.clone(),
+            inbox: inbox.clone(),
         }));
         let agent = Agent::new(Box::new(driver), Family::Harmony, Box::new(NoUser), opts);
+        *inbox.lock().unwrap() = Some(agent.inbox());
         let r = Run {
             agent,
             seen,
@@ -6903,14 +8087,16 @@ mod tests {
     #[test]
     fn each_family_calls_skills_by_its_own_names() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".claude/skills/pdf")).unwrap();
+        // as a session's root is (Windows names the temporary directory `RUNNER~1`)
+        let root = ognivo_os::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(root.join(".claude/skills/pdf")).unwrap();
         std::fs::write(
-            dir.path().join(".claude/skills/pdf/SKILL.md"),
+            root.join(".claude/skills/pdf/SKILL.md"),
             "Fills PDF forms.\n",
         )
         .unwrap();
         let skills = skills::load(&crate::rules::Places {
-            root: dir.path().to_owned(),
+            root,
             home: None,
             claude_dir: None,
         });
@@ -7049,10 +8235,12 @@ mod tests {
                 calls(
                     &[("shell", json!({"command": "ls"}))],
                     FinishReason::ToolCalls,
-                ),
-                answer("a.txt is fine."),
+                )
+                .into(),
+                answer("a.txt is fine.").into(),
             ]]),
             seen: subagents.clone(),
+            inbox: Arc::default(),
         }));
         opts.agents = Templates {
             all: vec![crate::agents::Template {

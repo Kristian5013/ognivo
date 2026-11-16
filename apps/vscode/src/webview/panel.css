@@ -1,33 +1,79 @@
 /* The agent's panel in VS Code: the editor theme's colours and fonts (the --vscode-*
    variables VS Code puts on the page), its icons (codicons), and ognivo's ember for the
    spark and what runs. Every colour comes from the theme, mixed: the panel looks at home
-   in a dark, a light and a high-contrast theme alike. */
+   in a dark, a light and a high-contrast theme alike.
+
+   The thread (thread.css), the dock (dock.css) and the empty state (welcome.css) speak one
+   language, the tokens below: their colours, the sizes of their words and icons, the room
+   between things (a scale of 2px steps) and the rounding of their corners. */
 
 :root {
   --ember: #f0883e;
   --font: var(--vscode-font-family, system-ui, sans-serif);
   --mono: var(--vscode-editor-font-family, ui-monospace, Consolas, monospace);
+  /* words: what is read (messages, the composer); a line of the thread, a card, a button,
+     a chip; facts (times, counts, the meta line, small headings); code in a block, and
+     among a line's words; a file's name on a card; the empty state's question */
   --fs: var(--vscode-font-size, 13px);
   --fs-sm: 12px;
   --fs-xs: 11px;
+  --fs-code: 12px;
+  --fs-code-sm: 11.5px;
+  --fs-name: 12.5px;
+  --fs-h: 16px;
+  /* the room between things */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --pad: 14px;
+  /* a line of the thread (a step, a note, a command) and of a list (a file, a session) */
+  --row: 24px;
+  --row-lg: 28px;
+  /* corners: code; buttons, rows and pills; cards; what holds the others (the message, the
+     composer, the question, the summary, a popover); chips and tags */
+  --r-sm: 4px;
+  --r: 6px;
+  --r-lg: 8px;
+  --r-xl: 10px;
+  --r-pill: 999px;
   --bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
   --fg: var(--vscode-foreground);
   --muted: var(--vscode-descriptionForeground);
-  --subtle: color-mix(in srgb, var(--muted) 75%, var(--bg));
+  /* the quietest words (facts, notes) still read at 4.5:1 on the side bar */
+  --subtle: color-mix(in srgb, var(--muted) 82%, var(--bg));
   --line: color-mix(in srgb, var(--fg) 11%, transparent);
   --line-strong: color-mix(in srgb, var(--fg) 20%, transparent);
   --hover: color-mix(in srgb, var(--fg) 6%, transparent);
   --press: color-mix(in srgb, var(--fg) 10%, transparent);
+  --list-hover: var(--vscode-list-hoverBackground, var(--hover));
+  --list-chosen: var(--vscode-list-activeSelectionBackground, var(--press));
+  --list-chosen-fg: var(--vscode-list-activeSelectionForeground, var(--fg));
+  /* a widget over the page (the agent's question), and a field's border */
+  --widget-bg: var(--vscode-editorWidget-background, var(--card));
+  --input-border: var(--vscode-input-border, var(--line-strong));
   --surface: var(--vscode-input-background, color-mix(in srgb, var(--fg) 6%, var(--bg)));
   --card: color-mix(in srgb, var(--fg) 3%, var(--bg));
   --card-head: color-mix(in srgb, var(--fg) 5%, var(--bg));
   --code-bg: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--fg) 7%, var(--bg)));
+  /* code's words: the theme's for preformatted text, which high-contrast themes pair with
+     a background of its own (white on dark blue), so there the panel's foreground */
+  --code-fg: var(--vscode-textPreformat-foreground, var(--fg));
+  --term-bg: var(--vscode-terminal-background, var(--code-bg));
   --chip-bg: color-mix(in srgb, var(--fg) 9%, transparent);
   --accent: var(--vscode-button-background);
   --accent-fg: var(--vscode-button-foreground);
   --accent-hover: var(--vscode-button-hoverBackground, var(--accent));
+  --accent-border: var(--vscode-button-border, transparent);
   --focus: var(--vscode-focusBorder);
+  /* what is under the pointer in a high-contrast theme: a dashed outline, as VS Code's lists */
+  --active-border: var(--vscode-contrastActiveBorder, var(--focus));
   --link: var(--vscode-textLink-foreground);
+  --link-active: var(--vscode-textLink-activeForeground, var(--link));
+  --file-icon: var(--vscode-symbolIcon-fileForeground, var(--muted));
+  --purple: var(--vscode-charts-purple, var(--muted));
   --ok: var(--vscode-charts-green, #4caf50);
   --err: var(--vscode-errorForeground, #f14c4c);
   --warn: var(--vscode-editorWarning-foreground, #cca700);
@@ -38,11 +84,6 @@
   --menu-bg: var(--vscode-menu-background, var(--vscode-editorWidget-background, var(--bg)));
   --menu-border: var(--vscode-menu-border, var(--line-strong));
   --shadow: 0 6px 24px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3));
-  --r-sm: 4px;
-  --r: 6px;
-  --r-lg: 8px;
-  --r-xl: 12px;
-  --pad: 14px;
 }
 
 :root[data-place="editor"] {
@@ -59,10 +100,26 @@ body.vscode-high-contrast-light {
   --del-bg: color-mix(in srgb, var(--vscode-charts-red, #e51400) 10%, transparent);
 }
 
+/* a light theme's warning and green are made for marks, not for words on a light side bar
+   (2.9:1 and 4.1:1): darkened towards the text, they read at 4.5:1 and more */
+body.vscode-light {
+  --warn: color-mix(in srgb, var(--vscode-editorWarning-foreground, #bf8803) 60%, var(--fg));
+  --ok: color-mix(in srgb, var(--vscode-charts-green, #388a34) 80%, var(--fg));
+}
+
 body.vscode-high-contrast,
 body.vscode-high-contrast-light {
   --line: var(--vscode-contrastBorder, var(--fg));
   --line-strong: var(--vscode-contrastBorder, var(--fg));
+  --code-fg: var(--fg);
+  --accent-border: var(--vscode-button-border, var(--vscode-contrastBorder, var(--fg)));
+}
+
+/* An icon's size. codicon.css gives every icon 16px by a rule of two classes, which a part's
+   rule of one class would not beat: a part says the size of its icons in --icon (a line of
+   the thread 14px, a chip 12px), and an icon button keeps VS Code's 16px. */
+.codicon[class*="codicon-"] {
+  font-size: var(--icon, 16px);
 }
 
 html,
@@ -111,9 +168,23 @@ p {
   margin: 0;
 }
 
+/* code among words: a chip of the panel's own colours (VS Code's default pairs the
+   preformat colours, which high-contrast themes invert); in a block, only its words */
 code {
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-sm);
+  background: var(--chip-bg);
+  color: var(--code-fg);
   font-family: var(--mono);
   font-size: 0.92em;
+  /* the chip is the font's box: a line with code in it is as tall as one without */
+  line-height: 1;
+}
+pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  line-height: inherit;
 }
 
 kbd {
@@ -151,7 +222,7 @@ kbd {
   background: var(--vscode-scrollbarSlider-background);
   border: 3px solid transparent;
   background-clip: content-box;
-  border-radius: 10px;
+  border-radius: var(--r-pill);
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--vscode-scrollbarSlider-hoverBackground);
@@ -185,6 +256,7 @@ kbd {
   font-size: var(--fs-xs);
 }
 .btn.primary {
+  border-color: var(--accent-border);
   background: var(--accent);
   color: var(--accent-fg);
 }
@@ -213,8 +285,8 @@ kbd {
 .btn:disabled {
   opacity: 0.45;
 }
-.btn .codicon {
-  font-size: 14px;
+.btn {
+  --icon: 14px;
 }
 
 /* the settings' buttons, as they were named before */
@@ -230,6 +302,7 @@ kbd {
   font-weight: 500;
 }
 .primary:not(.btn) {
+  border: 1px solid var(--accent-border);
   background: var(--accent);
   color: var(--accent-fg);
 }
@@ -259,11 +332,12 @@ kbd {
   color: var(--link);
 }
 .link:hover {
-  color: var(--vscode-textLink-activeForeground, var(--link));
+  color: var(--link-active);
   text-decoration: underline;
 }
 
 .icon-button {
+  --icon: 16px;
   display: inline-grid;
   place-items: center;
   width: 22px;
@@ -291,8 +365,8 @@ kbd {
   align-items: center;
   flex-shrink: 0;
   height: 17px;
-  padding: 0 6px;
-  border-radius: 9px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-pill);
   font-size: 10.5px;
   font-weight: 500;
   line-height: 1;
@@ -332,7 +406,7 @@ kbd {
   text-align: center;
 }
 .centered-icon {
-  font-size: 28px !important;
+  --icon: 28px;
   color: var(--muted);
 }
 svg.spark {
@@ -349,48 +423,30 @@ svg.spark {
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
 }
-.toolbar-title {
-  margin-left: 6px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-}
 
-/* a word above the conversation or the message: what to know, what to do */
+/* a word above the conversation or the message: what to know, what to do; the words wrap
+   beside the icon, the buttons go under them */
 .callout {
+  --icon: 14px;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding: 8px 10px;
+  align-items: flex-start;
+  gap: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   background: var(--card);
   font-size: var(--fs-sm);
+  line-height: 18px;
 }
 .callout > .codicon {
   flex-shrink: 0;
+  margin-top: var(--sp-1);
   color: var(--muted);
 }
-.callout.top {
-  margin: 8px var(--pad) 0;
-  flex-wrap: nowrap;
-  align-items: flex-start;
-}
-.callout.top > .codicon {
-  margin-top: 2px;
-}
-.callout.top .btn {
-  margin: -2px 0;
-}
-.callout-text {
+.callout > span:not(.spacer, .codicon) {
   flex: 1;
   min-width: 0;
-  display: grid;
-  gap: 2px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
 }
 .callout.warn > .codicon,
 .callout.warn > span:not(.spacer) {
@@ -399,8 +455,7 @@ svg.spark {
 .callout.error {
   border-color: color-mix(in srgb, var(--err) 45%, var(--line));
 }
-.callout.error > .codicon,
-.callout.error .callout-text p:first-child {
+.callout.error > .codicon {
   color: var(--err);
 }
 .callout.spark {
@@ -412,25 +467,48 @@ svg.spark {
 .callout-buttons {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--sp-3);
   width: 100%;
+}
+
+/* a chip: what a message carries (a file, a selection, a command's output, an image), in
+   the composer (dock.css) and on a sent message (thread.css) alike */
+.chip {
+  --icon: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+  height: 22px;
+  padding: 0 var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--chip-bg);
+  color: var(--fg);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+.chip > .codicon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---------------------------------------------------------------- the conversation */
 
-.thread-wrap {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
 .thread {
   flex: 1;
   min-height: 0;
 }
 /* back to the end, once the user scrolled away from it */
 .to-end {
+  --icon: 16px;
   position: absolute;
   left: 50%;
   bottom: 10px;
@@ -446,7 +524,7 @@ svg.spark {
   box-shadow: var(--shadow);
 }
 .to-end:hover {
-  background: var(--vscode-list-hoverBackground, var(--hover));
+  background: var(--list-hover);
 }
 .thread-top {
   height: 10px;
@@ -467,34 +545,34 @@ svg.spark {
   padding-bottom: 5px;
 }
 .row.v-text {
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-3);
 }
 .row.v-user {
   padding-top: 18px;
-  padding-bottom: 8px;
+  padding-bottom: var(--sp-4);
 }
 .row.v-verdict {
-  padding-top: 6px;
-  padding-bottom: 4px;
+  padding-top: var(--sp-3);
+  padding-bottom: var(--sp-2);
 }
 .row.v-divider {
-  padding-top: 10px;
-  padding-bottom: 10px;
+  padding-top: var(--sp-5);
+  padding-bottom: var(--sp-5);
 }
 .row.dropped {
   opacity: 0.4;
 }
 .thread [data-index="0"] .row.v-user {
-  padding-top: 4px;
+  padding-top: var(--sp-2);
 }
 
-/* the user's message */
+/* the user's message: a container, as the composer it came from */
 .msg-user {
   position: relative;
-  padding: 9px 12px;
+  padding: 9px var(--sp-6);
   border: 1px solid var(--line);
-  border-radius: var(--r-lg);
+  border-radius: var(--r-xl);
   background: var(--surface);
 }
 .msg-user-text {
@@ -508,7 +586,7 @@ svg.spark {
   mask-image: linear-gradient(to bottom, black 70%, transparent);
 }
 .more {
-  margin-top: 2px;
+  margin-top: var(--sp-1);
   font-size: var(--fs-xs);
   color: var(--link);
 }
@@ -525,18 +603,18 @@ svg.spark {
   outline: none;
   background: transparent;
   color: var(--fg);
-  padding: 9px 12px 4px;
+  padding: 9px var(--sp-6) var(--sp-2);
   line-height: 1.5;
 }
 .msg-user.editing .error {
-  padding: 0 12px 4px;
+  padding: 0 var(--sp-6) var(--sp-2);
   font-size: var(--fs-sm);
 }
 .msg-edit-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px 6px 12px;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3) var(--sp-6);
   font-size: var(--fs-xs);
 }
 
@@ -568,59 +646,25 @@ svg.spark {
   background: var(--bg);
   z-index: 1;
 }
+/* a message's own: on its top border, in the room above it, not over its first line */
+.msg-user > .msg-actions {
+  top: -12px;
+  right: var(--sp-4);
+  border: 1px solid var(--line);
+  z-index: 1;
+}
 
 .pictures {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 6px;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
 }
 .pictures img {
   max-height: 120px;
   max-width: 100%;
   border-radius: var(--r);
   border: 1px solid var(--line);
-}
-
-/* the model's reasoning */
-.think-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-.think-head .chev {
-  font-size: 12px;
-  opacity: 0;
-  transition: opacity 0.1s;
-}
-.think-head:hover {
-  color: var(--fg);
-}
-.think-head:hover .chev,
-.think-head[aria-expanded="true"] .chev,
-.think-head:focus-visible .chev {
-  opacity: 1;
-}
-.think-text {
-  margin: 2px 0 6px;
-  padding: 2px 0 2px 12px;
-  border-left: 2px solid var(--line-strong);
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  line-height: 1.55;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.think-text.tail {
-  max-height: calc(1.55em * 3 + 4px);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column-reverse;
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 55%);
-  mask-image: linear-gradient(to bottom, transparent, black 55%);
 }
 
 /* what runs: the ember passes over its words */
@@ -641,22 +685,24 @@ svg.spark {
   }
 }
 
-/* a note of ognivo's: one line, all of it on a click */
+/* a note of ognivo's: one line, all of it on a click; as tall as a step's line, its icon
+   and words where a step has them */
 .note {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: var(--sp-3);
   width: 100%;
-  min-height: 22px;
-  padding: 2px 0;
+  min-height: var(--row);
+  padding: 3px 0;
   color: var(--muted);
   font-size: var(--fs-sm);
+  line-height: 18px;
   text-align: left;
 }
 .note > .codicon {
+  --icon: 14px;
   flex-shrink: 0;
-  font-size: 14px;
-  margin-top: 1px;
+  margin-top: var(--sp-1);
 }
 .note-text {
   min-width: 0;
@@ -675,17 +721,12 @@ button.note:hover {
 .note.warn {
   color: var(--warn);
 }
-.note code {
-  padding: 0 4px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
-}
 
 .stopped {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 10px;
+  gap: var(--sp-2) var(--sp-5);
 }
 .stopped .note {
   width: auto;
@@ -697,8 +738,8 @@ button.note:hover {
 .verdict {
   display: inline-flex;
   align-items: flex-start;
-  gap: 6px;
-  padding: 3px 10px 3px 8px;
+  gap: var(--sp-3);
+  padding: 3px var(--sp-5) 3px var(--sp-4);
   border-radius: var(--r);
   font-size: var(--fs-sm);
   color: var(--muted);
@@ -706,8 +747,8 @@ button.note:hover {
 }
 .verdict > .codicon {
   flex-shrink: 0;
-  margin-top: 2px;
-  font-size: 14px;
+  margin-top: var(--sp-1);
+  --icon: 14px;
   color: var(--ok);
 }
 .verdict strong {
@@ -726,12 +767,12 @@ button.note:hover {
 .divider-block {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
+  gap: var(--sp-3);
 }
 .divider {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--sp-4);
   width: 100%;
   color: var(--muted);
   font-size: var(--fs-xs);
@@ -750,9 +791,9 @@ button.divider:hover:not(:disabled) {
 .sub {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--sp-5);
   width: 100%;
-  padding: 8px 10px;
+  padding: var(--sp-4) var(--sp-5);
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   background: var(--card);
@@ -806,18 +847,18 @@ button.divider:hover:not(:disabled) {
   display: flex;
   flex: 1;
   align-items: center;
-  gap: 6px;
+  gap: var(--sp-3);
   min-width: 0;
-  height: 24px;
-  padding: 0 6px;
-  margin-left: -6px;
+  height: var(--row);
+  padding: 0 var(--sp-3);
+  margin-left: calc(-1 * var(--sp-3));
   text-align: left;
   color: var(--muted);
   font-size: var(--fs-sm);
 }
 .tline-icon {
   flex-shrink: 0;
-  font-size: 14px;
+  --icon: 14px;
 }
 .tline-verb {
   flex-shrink: 0;
@@ -825,7 +866,7 @@ button.divider:hover:not(:disabled) {
 .tline-target {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: var(--sp-3);
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
@@ -837,10 +878,7 @@ button.divider:hover:not(:disabled) {
 }
 .tline-target code {
   flex-shrink: 1;
-  padding: 0 5px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
-  font-size: 11.5px;
+  font-size: var(--fs-code-sm);
 }
 .fname {
   flex-shrink: 0;
@@ -852,17 +890,23 @@ button.divider:hover:not(:disabled) {
   color: var(--subtle);
   font-size: var(--fs-xs);
 }
+/* what a line found ("lines 1198–1207 of 1500") takes the room its target leaves, and goes
+   before the target's name does */
 .tline-meta {
-  flex-shrink: 0;
+  flex: 1 1 0;
+  min-width: 0;
+  max-width: max-content;
   margin-left: auto;
-  padding-left: 6px;
+  padding-left: var(--sp-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
   color: var(--subtle);
   font-size: var(--fs-xs);
   white-space: nowrap;
 }
 .tline-toggle .chev {
   flex-shrink: 0;
-  font-size: 12px;
+  --icon: 12px;
   opacity: 0;
   transition:
     opacity 0.1s,
@@ -884,8 +928,7 @@ button.divider:hover:not(:disabled) {
 .tline-toggle:hover .tline-icon {
   color: var(--fg);
 }
-.tline.is-running .tline-icon,
-.tline.draft.is-writing .tline-icon {
+.tline.is-running .tline-icon {
   color: var(--ember);
 }
 .tline.is-failed .tline-icon {
@@ -894,19 +937,15 @@ button.divider:hover:not(:disabled) {
 .tline.is-refused .tline-icon {
   color: var(--warn);
 }
-.tline.draft.is-void {
-  opacity: 0.5;
-}
 .reveal {
   opacity: 0;
 }
 .tline-head:hover .reveal,
-.fdiff-head:hover .reveal,
 .reveal:focus-visible {
   opacity: 1;
 }
 .tline-body {
-  margin: 2px 0 6px 20px;
+  margin: var(--sp-1) 0 var(--sp-3) 20px;
 }
 
 /* a result: its text, a file's numbered lines, grep's matches */
@@ -914,19 +953,19 @@ button.divider:hover:not(:disabled) {
   margin: 0;
   max-height: 300px;
   overflow: auto;
-  padding: 6px 10px;
+  padding: var(--sp-3) var(--sp-5);
   border: 1px solid var(--line);
   border-radius: var(--r);
   background: var(--code-bg);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-code);
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--vscode-textPreformat-foreground, var(--fg));
+  color: var(--code-fg);
 }
 .out.code {
-  padding: 6px 0;
+  padding: var(--sp-3) 0;
   white-space: pre;
   overflow-wrap: normal;
 }
@@ -936,7 +975,7 @@ button.divider:hover:not(:disabled) {
 }
 .cl {
   display: flex;
-  padding-right: 10px;
+  padding-right: var(--sp-5);
 }
 .cl .ln {
   flex-shrink: 0;
@@ -948,160 +987,28 @@ button.divider:hover:not(:disabled) {
 }
 .cl .gp {
   flex-shrink: 0;
-  padding: 0 1.5ch 0 10px;
+  padding: 0 1.5ch 0 var(--sp-5);
   color: var(--link);
   opacity: 0.85;
 }
 .cl.note .tx {
-  padding-left: 10px;
+  padding-left: var(--sp-5);
   color: var(--muted);
   font-style: italic;
 }
 .out-note {
-  padding: 4px 0;
+  padding: var(--sp-2) 0;
   color: var(--muted);
   font-size: var(--fs-sm);
   font-style: italic;
 }
 
-/* ---------------------------------------------------------------- calls: commands */
-
-.cmd {
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--card);
-  overflow: hidden;
-}
-.cmd-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 32px;
-  padding: 0 10px;
-  text-align: left;
-}
-button.cmd-head:hover:not(:disabled) {
-  background: var(--hover);
-}
-.cmd-icon {
-  flex-shrink: 0;
-  color: var(--muted);
-}
-.cmd.is-running .cmd-icon,
-.cmd.draft.is-writing .cmd-icon {
-  color: var(--ember);
-}
-.cmd-line {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 12px;
-}
-.cmd-prompt {
-  color: var(--muted);
-  user-select: none;
-}
-.cmd-more {
-  flex-shrink: 0;
-  color: var(--subtle);
-  font-size: var(--fs-xs);
-}
-.cmd-status {
-  display: inline-flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-xs);
-}
-.cmd-status .codicon {
-  font-size: 14px;
-}
-.cmd-head .chev {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--muted);
-  transition: transform 0.12s;
-}
-.cmd-head[aria-expanded="true"] .chev {
-  transform: rotate(180deg);
-}
-.cmd.is-failed {
-  border-color: color-mix(in srgb, var(--err) 35%, var(--line));
-}
-.cmd.draft.is-void {
-  opacity: 0.5;
-}
-.cmd-body {
-  border-top: 1px solid var(--line);
-}
-.cmd-body .out {
-  border: none;
-  border-radius: 0;
-  background: var(--vscode-terminal-background, var(--code-bg));
-  max-height: 260px;
-}
-.cmd-body .cmd-full {
-  border-bottom: 1px solid var(--line);
-  color: var(--fg);
-}
-.cmd-body .out-note {
-  padding: 6px 10px;
-}
-
 /* ---------------------------------------------------------------- calls: changes */
 
-.change {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-}
-.fdiff {
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--card);
-  overflow: hidden;
-}
-.fdiff-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 6px 0 10px;
-  background: var(--card-head);
-}
-.fdiff-icon {
-  flex-shrink: 0;
-  color: var(--muted);
-}
-.change.draft.is-writing .fdiff-icon {
-  color: var(--ember);
-}
-.fdiff-name {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  font-weight: 500;
-}
-.fdiff-name .fname {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.fdiff-name:hover .fname {
-  text-decoration: underline;
-}
-.fdiff-name .fdir {
-  font-weight: 400;
-}
+/* a change's +/− counts, and its lines */
 .delta {
   display: inline-flex;
-  gap: 6px;
+  gap: var(--sp-3);
   flex-shrink: 0;
   font-family: var(--mono);
   font-size: var(--fs-xs);
@@ -1112,30 +1019,22 @@ button.cmd-head:hover:not(:disabled) {
 .minus {
   color: var(--del-fg);
 }
-.writing {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: var(--fs-xs);
-}
 .fdiff-body {
   overflow-x: auto;
   border-top: 1px solid var(--line);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: var(--fs-code);
   line-height: 1.55;
 }
 .fdiff-lines {
   display: inline-block;
   min-width: 100%;
-  padding: 4px 0;
+  padding: var(--sp-2) 0;
 }
 .dl {
   display: flex;
   white-space: pre;
-  padding-right: 12px;
+  padding-right: var(--sp-6);
 }
 .dl .sign {
   flex-shrink: 0;
@@ -1168,7 +1067,7 @@ button.cmd-head:hover:not(:disabled) {
 .fdiff-more {
   display: block;
   width: 100%;
-  padding: 4px 10px;
+  padding: var(--sp-2) var(--sp-5);
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: var(--fs-xs);
@@ -1177,13 +1076,6 @@ button.cmd-head:hover:not(:disabled) {
 .fdiff-more:hover {
   color: var(--fg);
   background: var(--hover);
-}
-.change.is-failed .fdiff,
-.change.is-refused .fdiff {
-  opacity: 0.75;
-}
-.change.draft.is-void {
-  opacity: 0.5;
 }
 .change-why {
   color: var(--muted);
@@ -1257,8 +1149,6 @@ button.cmd-head:hover:not(:disabled) {
 }
 .md :not(pre) > code {
   padding: 1px 5px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
   font-size: 0.88em;
 }
 .md.inline :not(pre) > code {
@@ -1333,176 +1223,9 @@ button.cmd-head:hover:not(:disabled) {
   white-space: pre;
 }
 
-/* ---------------------------------------------------------------- the dock: questions, the message */
+/* ---------------------------------------------------------------- fields and menus */
 
-.dock {
-  flex-shrink: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  padding: 6px var(--pad) 12px;
-}
-.dock-hint {
-  padding: 8px 0 2px;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  text-align: center;
-}
-
-/* an approval */
-.ask {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 8px;
-  padding: 10px 12px 12px;
-  border: 1px solid color-mix(in srgb, var(--focus) 60%, var(--line));
-  border-radius: var(--r-xl);
-  background: var(--vscode-editorWidget-background, var(--card));
-  box-shadow: var(--shadow);
-}
-.ask-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.ask-icon {
-  flex-shrink: 0;
-  color: var(--ember);
-}
-.ask-title {
-  font-weight: 600;
-}
-.ask-action {
-  margin: 0;
-  max-height: 140px;
-  overflow: auto;
-  padding: 7px 10px;
-  border-radius: var(--r);
-  background: var(--code-bg);
-  font-family: var(--mono);
-  font-size: 12px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.ask-why {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: baseline;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-.ask-why code {
-  padding: 0 5px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
-}
-.ask-buttons {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-}
-.ask-instead {
-  display: flex;
-  gap: 6px;
-}
-.ask-instead input {
-  flex: 1;
-  min-width: 0;
-}
-
-/* the session's unreviewed changes */
-.review {
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--card);
-  overflow: hidden;
-}
-.review-head {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 32px;
-  padding: 0 6px 0 4px;
-}
-.review-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  height: 26px;
-  padding: 0 6px;
-  border-radius: var(--r);
-  font-size: var(--fs-sm);
-}
-.review-toggle:hover {
-  background: var(--hover);
-}
-.review-toggle .chev {
-  font-size: 12px;
-  color: var(--muted);
-}
-.review-count {
-  font-weight: 500;
-  white-space: nowrap;
-}
-.review-files {
-  margin: 0;
-  padding: 2px 4px 4px;
-  list-style: none;
-  border-top: 1px solid var(--line);
-}
-.review-files li {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  border-radius: var(--r);
-}
-.review-files li:hover {
-  background: var(--hover);
-}
-.review-file {
-  display: flex;
-  flex: 1;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  height: 26px;
-  padding: 4px 6px;
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-}
-.review-file .fname {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.review-file .fdir {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.review-icon {
-  flex-shrink: 0;
-  align-self: center;
-  font-size: 14px;
-  color: var(--muted);
-}
-.review-files .icon-button {
-  opacity: 0;
-}
-.review-files li:hover .icon-button,
-.review-files .icon-button:focus-visible {
-  opacity: 1;
-}
-.review-error {
-  padding: 0 10px 6px;
-  color: var(--err);
-  font-size: var(--fs-sm);
-}
-
-/* the message being written */
+/* a field to write in */
 input,
 textarea,
 select {
@@ -1527,91 +1250,8 @@ select:focus {
   color: var(--vscode-input-placeholderForeground, var(--muted));
 }
 
-.composer {
-  position: relative;
-  border: 1px solid var(--vscode-input-border, var(--line-strong));
-  border-radius: var(--r-xl);
-  background: var(--surface);
-  transition: border-color 0.12s;
-  cursor: text;
-}
-.composer:focus-within {
-  border-color: var(--focus);
-}
-.composer textarea {
-  display: block;
-  width: 100%;
-  resize: none;
-  border: none;
-  outline: none;
-  background: transparent;
-  padding: 10px 12px 2px;
-  min-height: 46px;
-  line-height: 1.5;
-}
-.composer-error {
-  padding: 0 12px 4px;
-  color: var(--err);
-  font-size: var(--fs-sm);
-}
-.composer-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  padding: 4px 6px 6px 6px;
-  cursor: default;
-}
-
-.pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  height: 24px;
-  padding: 0 7px;
-  border-radius: var(--r);
-  color: var(--muted);
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-}
-.pill:hover,
-.pill[aria-expanded="true"] {
-  color: var(--fg);
-  background: var(--hover);
-}
-.pill .codicon {
-  font-size: 13px;
-}
-.pill-chev {
-  font-size: 11px !important;
-  opacity: 0.7;
-}
-.pill.model {
-  flex: 0 1 auto;
-  min-width: 56px;
-}
-.pill-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pill.mode-auto,
-.menu-icon.mode-auto {
-  color: var(--warn);
-}
-.pill.mode-plan,
-.menu-icon.mode-plan {
-  color: var(--ember);
-}
-.pill.mode-auto:hover,
-.pill.mode-plan:hover {
-  color: var(--fg);
-}
-
-.picker {
-  position: relative;
-  flex-shrink: 0;
-}
+/* a menu of choices: the modes' (in the composer, dock.css), a select's (the settings, the
+   model's popover) */
 .menu {
   position: absolute;
   left: -6px;
@@ -1636,7 +1276,11 @@ select:focus {
 .menu-item:hover,
 .menu-item:focus-visible {
   outline: none;
-  background: var(--vscode-list-hoverBackground, var(--hover));
+  background: var(--list-hover);
+}
+body.vscode-high-contrast .menu-item:hover {
+  outline: 1px dashed var(--active-border);
+  outline-offset: -1px;
 }
 .menu-item.current {
   background: var(--press);
@@ -1671,168 +1315,9 @@ select:focus {
   font-size: var(--fs-xs);
 }
 
-.ring {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 6px;
-  border-radius: var(--r);
-  color: var(--subtle);
-  font-size: var(--fs-xs);
-  font-variant-numeric: tabular-nums;
-  cursor: default;
-}
-.ring:hover {
-  color: var(--muted);
-  background: var(--hover);
-}
-.ring circle {
-  fill: none;
-  stroke-width: 2;
-}
-.ring-track {
-  stroke: var(--line-strong);
-}
-.ring-fill {
-  stroke: var(--muted);
-  stroke-linecap: round;
-}
-.ring.warn {
-  color: var(--warn);
-}
-.ring.warn .ring-fill {
-  stroke: var(--warn);
-}
+/* ---------------------------------------------------------------- a server's state */
 
-.round {
-  display: inline-grid;
-  place-items: center;
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  margin-left: 2px;
-  border-radius: 50%;
-  transition:
-    background 0.12s,
-    color 0.12s;
-}
-.round.send {
-  color: var(--muted);
-  background: var(--chip-bg);
-}
-.round.send.ready {
-  color: var(--accent-fg);
-  background: var(--accent);
-}
-.round.send.ready:hover {
-  background: var(--accent-hover);
-}
-.round.send .codicon {
-  font-size: 14px;
-}
-.round.stop {
-  background: var(--fg);
-}
-.round.stop:hover {
-  opacity: 0.85;
-}
-.stop-square {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  background: var(--bg);
-}
-
-.mentions {
-  position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  right: 0;
-  margin: 0;
-  padding: 4px;
-  list-style: none;
-  background: var(--menu-bg);
-  border: 1px solid var(--menu-border);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow);
-  z-index: 10;
-}
-.mentions button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  height: 24px;
-  padding: 0 8px;
-  border-radius: var(--r-sm);
-  font-family: var(--mono);
-  font-size: var(--fs-sm);
-}
-.mentions button.chosen,
-.mentions button:hover {
-  background: var(--vscode-list-activeSelectionBackground, var(--press));
-  color: var(--vscode-list-activeSelectionForeground, var(--fg));
-}
-
-/* ---------------------------------------------------------------- before a session */
-
-.welcome {
-  flex: 1;
-  grid-template-columns: minmax(0, 1fr);
-  min-height: 0;
-  overflow-y: auto;
-  padding: 28px var(--pad) 16px;
-  display: grid;
-  align-content: start;
-  gap: 14px;
-}
-.hero {
-  display: grid;
-  justify-items: center;
-  gap: 4px;
-  padding: 8px 0 6px;
-  text-align: center;
-}
-.hero h1 {
-  margin: 6px 0 0;
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-.hero p {
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-
-.conn {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-lg);
-  background: var(--card);
-}
-.conn-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.conn-model {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-}
-.conn.is-failed .conn-model {
-  color: var(--err);
-}
-.conn-dot {
-  flex-shrink: 0;
-  color: var(--muted);
-}
+/* a dot: the model's popover, the settings */
 .dot {
   flex-shrink: 0;
   width: 8px;
@@ -1844,104 +1329,6 @@ select:focus {
 .dot.is-failed {
   background: var(--err);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 20%, transparent);
-}
-.conn-facts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 12px;
-  padding-left: 16px;
-  color: var(--muted);
-  font-size: var(--fs-xs);
-}
-.conn-facts .mono {
-  font-size: var(--fs-xs);
-}
-
-.quick {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  color: var(--muted);
-  font-size: var(--fs-sm);
-}
-.chip:hover {
-  color: var(--fg);
-  border-color: var(--line-strong);
-  background: var(--hover);
-}
-.chip .codicon {
-  font-size: 13px;
-}
-
-.recent h2 {
-  margin: 6px 0 4px;
-  padding: 0 8px;
-  color: var(--muted);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.recent ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-.recent li {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding-right: 4px;
-  border-radius: var(--r);
-}
-.recent li:hover {
-  background: var(--hover);
-}
-.recent-open {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  height: 30px;
-  padding: 0 8px;
-  text-align: left;
-}
-.recent-delete {
-  opacity: 0;
-}
-.recent li:hover .recent-delete,
-.recent-delete:focus-visible {
-  opacity: 1;
-}
-.recent-icon {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: 14px;
-}
-.recent-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.recent-meta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-shrink: 0;
-  color: var(--subtle);
-  font-size: var(--fs-xs);
 }
 
 /* ---------------------------------------------------------------- the settings */
@@ -1994,8 +1381,8 @@ select:focus {
   font-weight: 500;
   white-space: nowrap;
 }
-.tab .codicon {
-  font-size: 13px;
+.tab {
+  --icon: 13px;
 }
 .tab:hover {
   color: var(--fg);
@@ -2100,11 +1487,6 @@ select:focus {
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
-.srow-hint code {
-  padding: 0 4px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
-}
 .srow-control {
   display: flex;
   flex-shrink: 0;
@@ -2188,13 +1570,13 @@ input.wide {
 }
 .select-icon {
   flex-shrink: 0;
-  font-size: 14px;
+  --icon: 14px;
   color: var(--muted);
 }
 .select-chev {
   flex-shrink: 0;
   margin-left: auto;
-  font-size: 12px;
+  --icon: 12px;
   color: var(--muted);
 }
 .menu.floating {
@@ -2236,8 +1618,8 @@ input.wide {
     0 0 0 1px var(--line),
     0 1px 2px rgba(0, 0, 0, 0.15);
 }
-.seg .codicon {
-  font-size: 13px;
+.seg {
+  --icon: 13px;
 }
 
 /* a switch: on and off */
@@ -2246,7 +1628,7 @@ input.wide {
   width: 32px;
   height: 18px;
   flex-shrink: 0;
-  border-radius: 9px;
+  border-radius: var(--r-pill);
   background: var(--line-strong);
   transition: background 0.15s;
 }
@@ -2319,7 +1701,7 @@ input.wide {
   gap: 5px;
   height: 18px;
   padding: 0 7px;
-  border-radius: 9px;
+  border-radius: var(--r-pill);
   background: var(--chip-bg);
   color: var(--muted);
   font-size: 10.5px;
@@ -2427,8 +1809,8 @@ textarea.instructions:focus {
 .editor-state.dirty {
   color: var(--warn);
 }
-.editor-state .codicon {
-  font-size: 12px;
+.editor-state {
+  --icon: 12px;
 }
 .srow.file.none .srow-title {
   color: var(--muted);
@@ -2458,7 +1840,7 @@ details.prompt summary:hover {
 }
 .prompt-chev {
   flex-shrink: 0;
-  font-size: 12px;
+  --icon: 12px;
   color: var(--muted);
   transition: transform 0.12s;
 }
@@ -2584,45 +1966,6 @@ body.vscode-high-contrast-light {
 }
 /* ---------------------------------------------------------------- a narrow side bar */
 
-.composer,
-.ask {
-  container-type: inline-size;
-}
-@container (max-width: 330px) {
-  .ring-text,
-  .composer .pill-chev {
-    display: none;
-  }
-  .pill {
-    padding: 0 5px;
-  }
-}
-@container (max-width: 300px) {
-  .ring,
-  .answer-now > span:not(.codicon) {
-    display: none;
-  }
-}
-@container (max-width: 270px) {
-  .picker .pill > span:not(.codicon) {
-    display: none;
-  }
-}
-@container (max-width: 340px) {
-  .ask-buttons {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-  .ask-buttons .spacer {
-    display: none;
-  }
-  .ask-buttons .btn.primary {
-    order: -2;
-  }
-  .ask-buttons .btn.secondary {
-    order: -1;
-  }
-}
 /* a server's row in a very narrow side bar: its buttons under its name */
 .srow.server .srow-title {
   overflow-wrap: normal;
@@ -2661,9 +2004,6 @@ body.vscode-high-contrast-light {
   font-size: var(--fs-sm);
 }
 .exa-key code {
-  padding: 0 5px;
-  border-radius: var(--r-sm);
-  background: var(--chip-bg);
   font-size: var(--fs-xs);
 }
 .exa-check {
@@ -2678,4 +2018,41 @@ body.vscode-high-contrast-light {
 }
 .exa-check.err {
   color: var(--err);
+}
+
+/* ---------------------------------------------------------------- still */
+
+/* Where the system asks for less motion, or VS Code does (its reduceMotion setting puts
+   vscode-reduce-motion on the page's body), nothing turns, glows, blinks or slides: the
+   spinners and the spark stand still, and words that shimmer take a plain colour. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  /* html first, to weigh more than thread.css's rules of one class, which come later */
+  html .shimmer {
+    background: none;
+    color: var(--muted);
+  }
+  html .live-say {
+    background: none;
+    color: var(--fg);
+  }
+}
+body.vscode-reduce-motion *,
+body.vscode-reduce-motion *::before,
+body.vscode-reduce-motion *::after {
+  animation: none !important;
+  transition: none !important;
+}
+body.vscode-reduce-motion .shimmer {
+  background: none;
+  color: var(--muted);
+}
+body.vscode-reduce-motion .live-say {
+  background: none;
+  color: var(--fg);
 }

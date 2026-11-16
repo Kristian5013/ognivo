@@ -7,8 +7,9 @@
 //! - Each thread is a session of the store, run as `ognivo chat` runs one: its agent, its
 //!   edit journal, its questions, which go to the clients as requests of the core.
 //! - Every event of every thread goes to every client that called `initialize`. The store
-//!   keeps them all but the text deltas (`wire`), so a client that comes back or opens a
-//!   thread later reads them there.
+//!   keeps them all (`wire`) but what streams and what only tells the clients there how
+//!   things stand (`EventKind::kept`), so a client that comes back or opens a thread later
+//!   reads them there.
 //! - The core quits when no client has been there and no turn has run for `--idle`
 //!   seconds, or on SIGTERM (on Windows when its console closes). Its threads are kept in
 //!   the store and can be picked up again.
@@ -317,6 +318,8 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
         }
         rpc::THREAD_DELETE => thread::delete(hub, parse(params)?).await,
         rpc::THREAD_MODE => thread::set_mode(hub, parse(params)?),
+        rpc::THREAD_VISION => thread::vision(hub, parse(params)?).await,
+        rpc::TURN_STEER => thread::steer(hub, parse(params)?),
         rpc::CHANGES_ACCEPT => {
             let p: rpc::Accept = parse(params)?;
             thread::command(hub, p.thread, |reply| {
@@ -327,6 +330,18 @@ async fn request(hub: &Arc<Hub>, client: u64, method: &str, params: Value) -> Re
         rpc::CHANGES_REVERT => {
             let p: rpc::Revert = parse(params)?;
             let command = |reply| thread::Command::Revert(p.path, p.force, reply);
+            thread::command(hub, p.thread, command).await
+        }
+        rpc::CHANGES_ACCEPT_HUNK | rpc::CHANGES_REVERT_HUNK => {
+            let p: rpc::HunkRef = parse(params)?;
+            let keep = method == rpc::CHANGES_ACCEPT_HUNK;
+            let command = |reply| {
+                if keep {
+                    thread::Command::AcceptHunk(p.path, p.hunk, reply)
+                } else {
+                    thread::Command::RevertHunk(p.path, p.hunk, reply)
+                }
+            };
             thread::command(hub, p.thread, command).await
         }
         rpc::CHANGES_BASE => {

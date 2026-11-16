@@ -143,6 +143,16 @@ pub fn image_file(path: &Path) -> Result<Image, String> {
 pub const NO_VISION: &str =
     "the model reads no images: its llama-server runs without a projector (--mmproj)";
 
+/// Whether the model of `server` takes images, as its `/props` say now: `None` when they do
+/// not say, or do not come within [`PROPS_TIMEOUT`] (a server that is down, or still loads).
+pub async fn vision(server: &LlamaServer) -> Option<bool> {
+    tokio::time::timeout(PROPS_TIMEOUT, server.props())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .and_then(|p| p.vision)
+}
+
 /// Why a session cannot start, with its exit code: 2 bad usage, 3 the server failed.
 #[derive(Debug)]
 pub struct Failure {
@@ -170,6 +180,9 @@ impl Failure {
 #[derive(Debug)]
 pub struct Connected {
     pub driver: Box<dyn ModelDriver>,
+    /// The server the driver talks to (behind llama-server's router, its model's), for what
+    /// the session asks it again: whether the model takes images now ([`vision`]).
+    pub server: LlamaServer,
     /// The model it names in every request (llama-server in router mode).
     pub model: Option<String>,
     /// Ends the model's reasoning where it stands (the Native path only).
@@ -536,7 +549,8 @@ impl SessionArgs {
             .ok()
             .and_then(Result::ok);
         let n_ctx = props.as_ref().and_then(|p| p.n_ctx);
-        // the model takes images where its server runs a projector
+        // the model takes images where its server runs a projector: the core's threads ask
+        // again later, as a server may still load, or be started with its projector since
         let vision = props.as_ref().and_then(|p| p.vision).unwrap_or(false);
         let context = compact::session(measured, self.context, n_ctx);
         // the server's slots, which the session's agents and other sessions take turns at
@@ -568,13 +582,14 @@ impl SessionArgs {
         };
         let (driver, answer_now): (Box<dyn ModelDriver>, _) = match &date {
             Some(date) => {
-                let d = NativeDriver::new(server, profile, level.as_deref(), self.slot, date)
-                    .map_err(Failure::usage)?;
+                let d =
+                    NativeDriver::new(server.clone(), profile, level.as_deref(), self.slot, date)
+                        .map_err(Failure::usage)?;
                 let answer_now = d.answer_now();
                 (Box::new(d), Some(answer_now))
             }
             None => {
-                let d = ChatDriver::new(server, profile, level.as_deref(), self.slot)
+                let d = ChatDriver::new(server.clone(), profile, level.as_deref(), self.slot)
                     .map_err(Failure::usage)?;
                 (Box::new(d), None)
             }
@@ -607,6 +622,7 @@ impl SessionArgs {
         skill_problems.extend(agents.problems.iter().map(|p| format!("(subagent) {p}")));
         Ok(Connected {
             driver,
+            server,
             model,
             answer_now,
             family,

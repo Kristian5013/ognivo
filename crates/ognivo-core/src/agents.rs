@@ -73,6 +73,8 @@ impl Templates {
 
 /// Finds the templates of the project and the user.
 pub fn load(places: &Places) -> Templates {
+    // a project's file must really be inside it: its real path against the real root
+    let places = &places.canonical();
     let top = places
         .root
         .ancestors()
@@ -220,8 +222,10 @@ mod tests {
     #[test]
     fn the_projects_templates_win_and_name_their_tools() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let root = tmp.path().join("repo");
+        // as a session's root is (Windows names the temporary directory `RUNNER~1`)
+        let tmp = ognivo_os::canonicalize(tmp.path()).unwrap();
+        let home = tmp.join("home");
+        let root = tmp.join("repo");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         write(
             &root.join(".claude/agents/reviewer.md"),
@@ -260,5 +264,33 @@ mod tests {
         );
         let writer = t.get("doc-writer").unwrap();
         assert!(writer.edits() && !writer.tools.contains(&ToolId::Bash));
+    }
+
+    /// A root named otherwise than its real path, here through a link as on Windows by an
+    /// 8.3 name (`RUNNER~1`), still holds the project's templates.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_named_through_a_link_holds_the_projects_templates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = ognivo_os::canonicalize(tmp.path()).unwrap();
+        let real = tmp.join("real/repo");
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        write(
+            &real.join(".claude/agents/reviewer.md"),
+            "---\nname: code-reviewer\ndescription: Reviews a change for bugs.\n---\nYou review.\n",
+        );
+        std::os::unix::fs::symlink(tmp.join("real"), tmp.join("link")).unwrap();
+        let t = load(&Places {
+            root: tmp.join("link/repo"),
+            home: Some(tmp.join("home")),
+            claude_dir: None,
+        });
+        assert!(t.problems.is_empty(), "{:?}", t.problems);
+        let found: Vec<(&str, &str)> = t
+            .all
+            .iter()
+            .map(|t| (t.name.as_str(), t.shown.as_str()))
+            .collect();
+        assert_eq!(found, [("code-reviewer", ".claude/agents/reviewer.md")]);
     }
 }

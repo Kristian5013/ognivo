@@ -1,7 +1,10 @@
 //! The core's threads. Each is a session of the store with its agent, on a task of its own
 //! that does what `ognivo chat` does between and during turns: a turn's events go through
 //! the thread's projector to the hub, its questions to the clients, and between turns the
-//! clients review what it changed.
+//! clients review what it changed, file by file or hunk by hunk. During a turn they can
+//! look at the changes, not review them, and write to the turn (`turn/steer`): its agent
+//! reads that at the top of its next step, and what it did not read comes back with the
+//! turn's end.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,14 +12,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
-use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, TurnEnd, Verdict};
+use ognivo_core::agent::{Agent, AgentEvent, ApprovalRequest, Approver, Inbox, TurnEnd, Verdict};
 use ognivo_core::approval::{Mode, ModeSwitch};
-use ognivo_core::journal::Reverted;
+use ognivo_core::journal::{FileChange, Journal, JournalError, Reverted};
 use ognivo_core::protocol::Projector;
+use ognivo_models::llama::LlamaServer;
 use ognivo_models::{AnswerNow, DriverError, Image};
 use ognivo_protocol::{self as p, rpc};
 use ognivo_store::SessionRow;
-use ognivo_tools::files;
+use ognivo_tools::{diff, files};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 
@@ -40,8 +44,10 @@ pub struct ThreadHandle {
     context: rpc::Context,
     /// Its mode, which its agent and subagents read at each call.
     mode: ModeSwitch,
-    /// Whether its model takes images.
-    vision: bool,
+    /// What the user writes to its running turn, which its agent reads at its next step.
+    inbox: Inbox,
+    /// Whether its model takes images, as its task has it too.
+    sight: Sight,
     /// Its MCP servers as it started them.
     pub mcp: super::mcp::McpView,
 }
@@ -56,6 +62,64 @@ impl ThreadHandle {
     }
 }
 
+/// Whether a thread's model takes images, one flag for the thread's handle and its task:
+/// what its server's `/props` said as the thread opened, or said since. The server may have
+/// been down or still loading then, or answered too late, or been started with its projector
+/// (`--mmproj`) since: while the model takes none, the thread asks again before it refuses
+/// images and at the start of each turn; while it takes them, after a turn that ended on a
+/// server error (one started again without its projector refuses them); `thread/vision`
+/// asks whenever a client does.
+#[derive(Debug, Clone)]
+struct Sight {
+    /// The server its driver talks to: behind llama-server's router, its model's.
+    server: LlamaServer,
+    flag: Arc<AtomicBool>,
+}
+
+impl Sight {
+    fn new(server: LlamaServer, sees: bool) -> Self {
+        Self {
+            server,
+            flag: Arc::new(AtomicBool::new(sees)),
+        }
+    }
+
+    /// What `/props` said last.
+    fn get(&self) -> bool {
+        self.flag.load(Ordering::SeqCst)
+    }
+
+    /// The flag after what `/props` said: an answer replaces it, either way (a server
+    /// started again without its projector too); no answer leaves it as it was.
+    fn take(&self, said: Option<bool>) -> bool {
+        match said {
+            Some(sees) => {
+                self.flag.store(sees, Ordering::SeqCst);
+                sees
+            }
+            None => self.get(),
+        }
+    }
+
+    /// `/props` read again, and the flag after them.
+    async fn read(&self) -> bool {
+        self.take(session::vision(&self.server).await)
+    }
+
+    /// Images go to a model that takes them; for one that does not, the turn does not
+    /// start. A model that took none is asked again first: its server may run its
+    /// projector now.
+    async fn sees(&self, images: &[Image]) -> Result<(), RpcError> {
+        if images.is_empty() || self.get() || self.read().await {
+            return Ok(());
+        }
+        Err(RpcError::new(
+            rpc::error::UNSUPPORTED,
+            "the model of this thread reads no images: its llama-server runs without a projector (--mmproj); start it with one, then send the images again",
+        ))
+    }
+}
+
 /// What a client asks of an open thread.
 #[derive(Debug)]
 pub enum Command {
@@ -64,9 +128,15 @@ pub enum Command {
     Edit(u32, String, Vec<Image>, oneshot::Sender<Reply>),
     Interrupt(oneshot::Sender<Reply>),
     AnswerNow(oneshot::Sender<Reply>),
+    /// Answered during a turn too, from the journal as last saved.
     Changes(oneshot::Sender<Reply>),
     Accept(Option<String>, oneshot::Sender<Reply>),
     Revert(String, bool, oneshot::Sender<Reply>),
+    /// One hunk of a file's change, kept: what the file had before takes it.
+    AcceptHunk(String, p::Hunk, oneshot::Sender<Reply>),
+    /// One hunk of a file's change, undone: the file loses it.
+    RevertHunk(String, p::Hunk, oneshot::Sender<Reply>),
+    /// Answered during a turn too, from the journal as last saved.
     Base(String, oneshot::Sender<Reply>),
     Clear(oneshot::Sender<Reply>),
     Close(oneshot::Sender<Reply>),
@@ -83,6 +153,8 @@ impl Command {
             | Command::Changes(r)
             | Command::Accept(_, r)
             | Command::Revert(_, _, r)
+            | Command::AcceptHunk(_, _, r)
+            | Command::RevertHunk(_, _, r)
             | Command::Base(_, r)
             | Command::Clear(r)
             | Command::Close(r) => r,
@@ -111,6 +183,86 @@ fn not_started(f: Failure) -> RpcError {
 
 fn store_error(e: impl std::fmt::Display) -> RpcError {
     RpcError::new(-32603, format!("the session store: {e}"))
+}
+
+/// What the edit journal refused, as a client gets it: `STALE` for a hunk the file's change
+/// no longer has, after which it lists the changes again; `JOURNAL` for the rest.
+fn journal_error(e: JournalError) -> RpcError {
+    let code = match e {
+        JournalError::Stale(_) => rpc::error::STALE,
+        _ => rpc::error::JOURNAL,
+    };
+    RpcError::new(code, e.to_string())
+}
+
+/// A journal's unreviewed changes as `changes/list` gives them.
+fn changes_of(files: Vec<FileChange>, commands: &[String], inherited: bool) -> Reply {
+    let files = files
+        .into_iter()
+        .map(|c| rpc::ChangedFile {
+            path: c.shown,
+            created: c.created,
+            deleted: c.deleted,
+            drifted: c.drifted,
+            hunks: c
+                .hunks
+                .into_iter()
+                .map(|h| p::Hunk {
+                    old_start: h.old_start as u32,
+                    new_start: h.new_start as u32,
+                    removed: h.removed,
+                    added: h.added,
+                })
+                .collect(),
+        })
+        .collect();
+    reply(rpc::Changes {
+        files,
+        commands: commands.to_vec(),
+        inherited,
+    })
+}
+
+/// What `file` held before its first unreviewed change, as `changes/base` gives it; `base`
+/// is what the journal has of it ([`Journal::base`]).
+fn base_of(file: &str, base: Option<Option<&[u8]>>) -> Reply {
+    let Some(base) = base else {
+        return Err(RpcError::new(
+            rpc::error::JOURNAL,
+            format!("{file}: no unreviewed change by ognivo"),
+        ));
+    };
+    reply(rpc::Base {
+        text: base.map(|b| String::from_utf8_lossy(b).into_owned()),
+    })
+}
+
+/// `changes/list`, or with a file `changes/base`, while a turn runs and has the agent and
+/// its journal: from the journal as the store has it, which the agent saves after each of
+/// its writes (a subagent's once it finishes), against the files as they are now. On a
+/// task of its own, so the turn goes on meanwhile.
+fn saved_changes(
+    hub: &Arc<Hub>,
+    thread: p::ThreadId,
+    root: &Path,
+    file: Option<String>,
+    reply: oneshot::Sender<Reply>,
+) {
+    let (hub, root) = (hub.clone(), root.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let saved = lock(&hub.reader).journal(thread.0);
+        let answer = saved.map_err(store_error).and_then(|saved| {
+            let mut journal = Journal::restore(saved, &root);
+            match file {
+                None => {
+                    let files = journal.changes();
+                    changes_of(files, journal.side_effects(), journal.inherited())
+                }
+                Some(file) => base_of(&file, journal.base(&files::resolve(&root, &file))),
+            }
+        });
+        let _ = reply.send(answer);
+    });
 }
 
 /// Sends a command to an open thread and waits for its answer.
@@ -163,7 +315,7 @@ pub fn list(hub: &Hub, a: rpc::ListThreads) -> Reply {
                 answer_now: open.is_some_and(|h| h.answer_now),
                 context: open.map(|h| h.context),
                 mode: open.map(|h| wire_mode(h.mode.get())),
-                vision: open.map(|h| h.vision),
+                vision: open.map(|h| h.sight.get()),
             }
         })
         .collect();
@@ -340,6 +492,43 @@ pub fn set_mode(hub: &Hub, a: rpc::SetMode) -> Reply {
         vec![(a.thread, p::EventKind::ModeChanged { mode: a.mode })],
     );
     done()
+}
+
+/// `turn/steer`: what the user writes to the open thread's running turn, which its agent
+/// reads at the top of its next step, as `thread/mode` goes to the agent without the
+/// thread's task, which the turn keeps busy. `IDLE` when no turn runs: the client starts one
+/// with the text instead.
+pub fn steer(hub: &Hub, a: rpc::SteerTurn) -> Reply {
+    if a.text.trim().is_empty() {
+        return Err(RpcError::new(-32602, "the text is empty"));
+    }
+    let taken = lock(&hub.threads)
+        .get(&a.thread.0)
+        .map(|h| h.inbox.push(a.text));
+    match taken {
+        None => Err(no_thread(a.thread)),
+        Some(false) => Err(RpcError::new(
+            rpc::error::IDLE,
+            format!(
+                "no turn of thread {} runs: start one with the text",
+                a.thread.0
+            ),
+        )),
+        Some(true) => done(),
+    }
+}
+
+/// `thread/vision`: whether the open thread's model takes images, its server's `/props`
+/// read again (the thread's flag takes what they say), while a turn runs too: beside the
+/// thread's task, as `thread/mode`.
+pub async fn vision(hub: &Hub, a: rpc::ThreadRef) -> Reply {
+    let sight = lock(&hub.threads).get(&a.thread.0).map(|h| h.sight.clone());
+    let Some(sight) = sight else {
+        return Err(no_thread(a.thread));
+    };
+    reply(rpc::Vision {
+        vision: sight.read().await,
+    })
 }
 
 fn core_mode(mode: p::Mode) -> Mode {
@@ -551,7 +740,7 @@ async fn open(
         window: s.opts.n_ctx,
     };
     let answer_now = s.answer_now.take();
-    let vision = s.opts.vision;
+    let sight = Sight::new(s.server.clone(), s.opts.vision);
     s.opts.mode = ModeSwitch::new(core_mode(mode));
     let switch = s.opts.mode.clone();
     let rule_files = std::mem::take(&mut s.rule_files);
@@ -634,6 +823,7 @@ async fn open(
     let (commands, received) = mpsc::unbounded_channel();
     let running = Arc::new(AtomicBool::new(false));
     let can_answer_now = answer_now.is_some();
+    let inbox = agent.inbox();
     lock(&hub.threads).insert(
         id,
         ThreadHandle {
@@ -642,10 +832,12 @@ async fn open(
             answer_now: can_answer_now,
             context,
             mode: switch,
-            vision,
+            inbox: inbox.clone(),
+            sight: sight.clone(),
             mcp: mcp_view,
         },
     );
+    let vision = sight.get();
     let actor = Actor {
         hub: hub.clone(),
         agent,
@@ -654,9 +846,10 @@ async fn open(
         root,
         first,
         answer_now,
+        inbox,
         running,
         conversation,
-        vision,
+        sight,
     };
     tokio::spawn(actor.run(received));
     reply(rpc::Opened {
@@ -748,12 +941,14 @@ struct Actor {
     /// The conversation's instruction files, the first item of its next turn.
     first: Option<AgentEvent>,
     answer_now: Option<AnswerNow>,
+    /// What the user writes to the running turn, shared with the thread's handle.
+    inbox: Inbox,
     running: Arc<AtomicBool>,
     /// The thread's turns that have not been taken back, oldest first: the last of them are
     /// those of the agent's conversation, which a `/clear` or a compaction starts anew.
     conversation: Vec<u32>,
-    /// Whether its model takes images.
-    vision: bool,
+    /// Whether its model takes images, shared with the thread's handle.
+    sight: Sight,
 }
 
 /// How a turn came out.
@@ -771,10 +966,12 @@ impl Actor {
             };
             let answer = match command {
                 Command::Turn(text, images, reply) => {
-                    if let Err(e) = self.sees(&images) {
+                    if let Err(e) = self.sight.sees(&images).await {
                         let _ = reply.send(Err(e));
                         continue;
                     }
+                    // a client that has its answer may write to the turn at once
+                    self.inbox.open();
                     let _ = reply.send(done());
                     match self.turn(&text, images, &mut commands).await {
                         Some(close) => break Some(close),
@@ -782,10 +979,15 @@ impl Actor {
                     }
                 }
                 Command::Edit(turn, text, images, reply) => {
-                    if let Err(e) = self.sees(&images).and_then(|()| self.rewind(turn)) {
+                    let taken = match self.sight.sees(&images).await {
+                        Ok(()) => self.rewind(turn),
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = taken {
                         let _ = reply.send(Err(e));
                         continue;
                     }
+                    self.inbox.open();
                     let _ = reply.send(done());
                     match self.turn(&text, images, &mut commands).await {
                         Some(close) => break Some(close),
@@ -795,8 +997,22 @@ impl Actor {
                 // no turn to stop
                 Command::Interrupt(reply) | Command::AnswerNow(reply) => (reply, done()),
                 Command::Changes(reply) => (reply, self.changes()),
-                Command::Accept(file, reply) => (reply, self.accept(file)),
-                Command::Revert(file, force, reply) => (reply, self.revert(&file, force)),
+                Command::Accept(file, reply) => {
+                    let answer = self.accept(file);
+                    (reply, self.updated(answer))
+                }
+                Command::Revert(file, force, reply) => {
+                    let answer = self.revert(&file, force);
+                    (reply, self.updated(answer))
+                }
+                Command::AcceptHunk(file, hunk, reply) => {
+                    let answer = self.hunk(&file, &hunk, true);
+                    (reply, self.updated(answer))
+                }
+                Command::RevertHunk(file, hunk, reply) => {
+                    let answer = self.hunk(&file, &hunk, false);
+                    (reply, self.updated(answer))
+                }
                 Command::Base(file, reply) => (reply, self.base(&file)),
                 Command::Clear(reply) => {
                     self.agent.clear();
@@ -815,17 +1031,6 @@ impl Actor {
         }
     }
 
-    /// Images go to a model that takes them; for one that does not, the turn does not start.
-    fn sees(&self, images: &[Image]) -> Result<(), RpcError> {
-        if images.is_empty() || self.vision {
-            return Ok(());
-        }
-        Err(RpcError::new(
-            rpc::error::UNSUPPORTED,
-            "the model of this thread reads no images: its llama-server runs without a projector (--mmproj)",
-        ))
-    }
-
     /// Runs a turn to its end, or until a client stops it; returns the answer of a close
     /// that came meanwhile.
     async fn turn(
@@ -836,6 +1041,10 @@ impl Actor {
     ) -> Option<oneshot::Sender<Reply>> {
         self.running.store(true, Ordering::SeqCst);
         self.hub.running(1);
+        // the agent sees as the server says now, until the turn ends: a model that took no
+        // images may have its projector since (the Read of an image file shows it then)
+        let vision = self.sight.get() || self.sight.read().await;
+        self.agent.set_vision(vision);
         if let Some(a) = &self.answer_now {
             a.clear();
         }
@@ -858,6 +1067,9 @@ impl Actor {
             tokio::pin!(turn);
             loop {
                 tokio::select! {
+                    // the turn first: it has begun in the stream before a command can stop
+                    // it, so its end has a turn to carry what the user wrote to it
+                    biased;
                     end = &mut turn => break Ended::Done(end),
                     command = commands.recv() => match command {
                         Some(Command::Interrupt(reply)) => {
@@ -881,6 +1093,14 @@ impl Actor {
                             closing = Some(reply);
                             break Ended::Stopped(CORE_STOPPED);
                         }
+                        // the changes can be looked at, from the journal as last saved; what
+                        // would change them is busy until the turn ends
+                        Some(Command::Changes(reply)) => {
+                            saved_changes(&self.hub, self.thread, &self.root, None, reply);
+                        }
+                        Some(Command::Base(file, reply)) => {
+                            saved_changes(&self.hub, self.thread, &self.root, Some(file), reply);
+                        }
                         Some(other) => other.busy(),
                         None => break Ended::Stopped(CORE_STOPPED),
                     },
@@ -888,19 +1108,38 @@ impl Actor {
             }
         };
         match ended {
+            // the turn's end gave back what its agent did not read
             Ended::Done(Ok(_)) => {}
-            Ended::Done(Err(e)) => self
-                .agent
-                .abandon_turn(&format!("The last turn ended on a server error: {e}")),
+            Ended::Done(Err(e)) => {
+                self.agent
+                    .abandon_turn(&format!("The last turn ended on a server error: {e}"));
+                // a server started again without its projector refuses the images the
+                // conversation holds, turn after turn: asked now, it has the next turn give
+                // the model what they were
+                if self.sight.get() {
+                    self.sight.read().await;
+                }
+            }
             Ended::Stopped(why) => {
                 self.agent.abandon_turn(why);
-                let out = lock(&self.projector).interrupted();
+                // the agent was dropped before its end: what it did not read goes back here,
+                // and a store that failed since the turn last told one, or at the saves that
+                // put it away, is told in it before it ends
+                let undelivered = self.inbox.close();
+                let notice = self.agent.store_failure_notice();
+                let mut projector = lock(&self.projector);
+                let mut out = notice.map(|e| projector.event(e)).unwrap_or_default();
+                out.extend(projector.interrupted(undelivered));
+                drop(projector);
                 self.hub.emit(self.thread, out);
             }
         }
         if let Some(e) = first {
             self.first = Some(e);
         }
+        // the clients heard of a store that failed while the turn ran, or as a stopped turn
+        // was put away, from that turn; what is left here failed as a turn that had ended on
+        // an error was put away
         if let Some(e) = self.agent.store_failure() {
             eprintln!(
                 "ognivo core: thread {}: the session store failed: {e}; the session is no longer saved",
@@ -938,32 +1177,22 @@ impl Actor {
     }
 
     fn changes(&mut self) -> Reply {
-        let files = self
-            .agent
-            .changes()
-            .into_iter()
-            .map(|c| rpc::ChangedFile {
-                path: c.shown,
-                created: c.created,
-                deleted: c.deleted,
-                drifted: c.drifted,
-                hunks: c
-                    .hunks
-                    .into_iter()
-                    .map(|h| p::Hunk {
-                        old_start: h.old_start as u32,
-                        new_start: h.new_start as u32,
-                        removed: h.removed,
-                        added: h.added,
-                    })
-                    .collect(),
-            })
-            .collect();
-        reply(rpc::Changes {
+        let files = self.agent.changes();
+        changes_of(
             files,
-            commands: self.agent.side_effects().to_vec(),
-            inherited: self.agent.inherited_changes(),
-        })
+            self.agent.side_effects(),
+            self.agent.inherited_changes(),
+        )
+    }
+
+    /// After a client kept or undid changes: every client hears of it, so those that show
+    /// the changes list them again.
+    fn updated(&self, answer: Reply) -> Reply {
+        if answer.is_ok() {
+            let changed = vec![(self.thread, p::EventKind::ChangesUpdated)];
+            self.hub.emit(self.thread, changed);
+        }
+        answer
     }
 
     /// As `/accept` in `chat`: one file, or everything.
@@ -971,10 +1200,7 @@ impl Actor {
         let path = file.as_deref().map(|f| files::resolve(&self.root, f));
         let commands = self.agent.side_effects().len();
         let inherited = self.agent.inherited_changes();
-        let mut accepted = self
-            .agent
-            .accept(path.as_deref())
-            .map_err(|e| RpcError::new(rpc::error::JOURNAL, e.to_string()))?;
+        let mut accepted = self.agent.accept(path.as_deref()).map_err(journal_error)?;
         if file.is_none() {
             match commands {
                 0 => {}
@@ -995,27 +1221,35 @@ impl Actor {
     /// `force`.
     fn revert(&mut self, file: &str, force: bool) -> Reply {
         let path = files::resolve(&self.root, file);
-        let how = self
-            .agent
-            .revert(&path, force)
-            .map_err(|e| RpcError::new(rpc::error::JOURNAL, e.to_string()))?;
+        let how = self.agent.revert(&path, force).map_err(journal_error)?;
         reply(rpc::Reverted {
             removed: how == Reverted::Removed,
         })
     }
 
+    /// Keeps (`keep`) or undoes one hunk of a file's change, as `changes/list` gave it; the
+    /// answer is the changes after it, so the client need not list them again.
+    fn hunk(&mut self, file: &str, hunk: &p::Hunk, keep: bool) -> Reply {
+        let path = files::resolve(&self.root, file);
+        let hunk = diff::Hunk {
+            old_start: hunk.old_start as usize,
+            new_start: hunk.new_start as usize,
+            removed: hunk.removed.clone(),
+            added: hunk.added.clone(),
+        };
+        let done = if keep {
+            self.agent.accept_hunk(&path, &hunk)
+        } else {
+            self.agent.revert_hunk(&path, &hunk)
+        };
+        done.map_err(journal_error)?;
+        self.changes()
+    }
+
     /// What a changed file held before its first unreviewed change, for a client's diff.
     fn base(&self, file: &str) -> Reply {
         let path = files::resolve(&self.root, file);
-        let Some(base) = self.agent.change_base(&path) else {
-            return Err(RpcError::new(
-                rpc::error::JOURNAL,
-                format!("{file}: no unreviewed change by ognivo"),
-            ));
-        };
-        reply(rpc::Base {
-            text: base.map(|b| String::from_utf8_lossy(b).into_owned()),
-        })
+        base_of(file, self.agent.change_base(&path))
     }
 }
 
@@ -1081,5 +1315,25 @@ impl Approver for Remote {
 
     fn can_ask(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_props_say_of_the_projector_counts_either_way_and_silence_keeps_the_flag() {
+        let server = LlamaServer::new("http://127.0.0.1:8080", None).unwrap();
+        let task = Sight::new(server, false);
+        // one flag for the thread's handle and its task
+        let handle = task.clone();
+        assert!(!task.take(None));
+        assert!(task.take(Some(true)));
+        assert!(handle.get());
+        assert!(handle.take(None));
+        // a server started again without its projector
+        assert!(!handle.take(Some(false)));
+        assert!(!task.get());
     }
 }

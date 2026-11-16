@@ -32,7 +32,7 @@
   ],
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "ognivo",
           "title": "ognivo",
@@ -46,22 +46,10 @@
           "type": "webview",
           "id": "ognivo.chat",
           "name": "Agent",
-          "initialSize": 4
-        },
-        {
-          "id": "ognivo.changes",
-          "name": "Changes",
-          "icon": "media/ognivo.svg",
-          "initialSize": 1
+          "icon": "media/ognivo.svg"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "ognivo.changes",
-        "contents": "Nothing unreviewed: the agent's edits of the open session show here, to look at, accept or revert."
-      }
-    ],
     "commands": [
       {
         "command": "ognivo.newSession",
@@ -136,40 +124,82 @@
         "category": "ognivo"
       },
       {
-        "command": "ognivo.changes.open",
-        "title": "Open the Change",
+        "command": "ognivo.review",
+        "title": "Review the Changes",
+        "category": "ognivo",
+        "icon": "$(diff-multiple)"
+      },
+      {
+        "command": "ognivo.keepHunk",
+        "title": "Keep the Change",
+        "category": "ognivo",
+        "icon": "$(check)",
+        "enablement": "!ognivo.turnRunning"
+      },
+      {
+        "command": "ognivo.undoHunk",
+        "title": "Undo the Change",
+        "category": "ognivo",
+        "icon": "$(discard)",
+        "enablement": "!ognivo.turnRunning"
+      },
+      {
+        "command": "ognivo.keepFile",
+        "title": "Keep the File's Changes",
+        "category": "ognivo",
+        "icon": "$(check)",
+        "enablement": "!ognivo.turnRunning"
+      },
+      {
+        "command": "ognivo.undoFile",
+        "title": "Undo the File's Changes",
+        "category": "ognivo",
+        "icon": "$(discard)",
+        "enablement": "!ognivo.turnRunning"
+      },
+      {
+        "command": "ognivo.nextChange",
+        "title": "Go to the Next Change",
+        "category": "ognivo",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "ognivo.previousChange",
+        "title": "Go to the Previous Change",
+        "category": "ognivo",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "ognivo.diffFile",
+        "title": "Show the Diff",
         "category": "ognivo",
         "icon": "$(diff)"
       },
       {
-        "command": "ognivo.changes.openFile",
-        "title": "Open the File",
-        "category": "ognivo",
-        "icon": "$(go-to-file)"
+        "command": "ognivo.editSelection",
+        "title": "Edit the Selection…",
+        "category": "ognivo"
       },
       {
-        "command": "ognivo.changes.accept",
-        "title": "Accept",
-        "category": "ognivo",
-        "icon": "$(check)"
+        "command": "ognivo.fixProblem",
+        "title": "Fix with ognivo",
+        "category": "ognivo"
       },
       {
-        "command": "ognivo.changes.revert",
-        "title": "Revert",
+        "command": "ognivo.showCommands",
+        "title": "Show the Agent's Commands",
         "category": "ognivo",
-        "icon": "$(discard)"
+        "icon": "$(terminal)"
       },
       {
-        "command": "ognivo.changes.acceptAll",
-        "title": "Accept All",
-        "category": "ognivo",
-        "icon": "$(check-all)"
+        "command": "ognivo.prompt.edit",
+        "title": "Edit",
+        "category": "ognivo"
       },
       {
-        "command": "ognivo.changes.refresh",
-        "title": "Refresh",
-        "category": "ognivo",
-        "icon": "$(refresh)"
+        "command": "ognivo.prompt.ask",
+        "title": "Ask in the Panel",
+        "category": "ognivo"
       }
     ],
     "menus": {
@@ -215,34 +245,22 @@
           "group": "session@1"
         },
         {
-          "command": "ognivo.changes.acceptAll",
-          "when": "view == ognivo.changes && ognivo.unreviewed",
-          "group": "navigation@1"
+          "command": "ognivo.review",
+          "when": "view == ognivo.chat && ognivo.unreviewed",
+          "group": "more@3"
         },
         {
-          "command": "ognivo.changes.refresh",
-          "when": "view == ognivo.changes",
-          "group": "navigation@2"
-        }
-      ],
-      "view/item/context": [
-        {
-          "command": "ognivo.changes.openFile",
-          "when": "view == ognivo.changes && viewItem =~ /^file/ && viewItem != file.deleted",
-          "group": "inline@1"
-        },
-        {
-          "command": "ognivo.changes.revert",
-          "when": "view == ognivo.changes && viewItem =~ /^file/",
-          "group": "inline@2"
-        },
-        {
-          "command": "ognivo.changes.accept",
-          "when": "view == ognivo.changes && viewItem =~ /^file/",
-          "group": "inline@3"
+          "command": "ognivo.showCommands",
+          "when": "view == ognivo.chat",
+          "group": "more@4"
         }
       ],
       "editor/context": [
+        {
+          "command": "ognivo.editSelection",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "9_ognivo@0"
+        },
         {
           "command": "ognivo.addSelection",
           "when": "editorHasSelection",
@@ -270,20 +288,91 @@
       ],
       "commandPalette": [
         {
-          "command": "ognivo.changes.open",
+          "command": "ognivo.review",
+          "when": "ognivo.unreviewed"
+        },
+        {
+          "command": "ognivo.keepHunk",
+          "when": "ognivo.hunkAtCursor"
+        },
+        {
+          "command": "ognivo.undoHunk",
+          "when": "ognivo.hunkAtCursor"
+        },
+        {
+          "command": "ognivo.keepFile",
+          "when": "resource in ognivo.unreviewedUris"
+        },
+        {
+          "command": "ognivo.undoFile",
+          "when": "resource in ognivo.unreviewedUris"
+        },
+        {
+          "command": "ognivo.diffFile",
+          "when": "resource in ognivo.unreviewedUris"
+        },
+        {
+          "command": "ognivo.nextChange",
+          "when": "ognivo.unreviewed"
+        },
+        {
+          "command": "ognivo.previousChange",
+          "when": "ognivo.unreviewed"
+        },
+        {
+          "command": "ognivo.editSelection",
+          "when": "editorHasSelection && resourceScheme == file"
+        },
+        {
+          "command": "ognivo.fixProblem",
           "when": "false"
         },
         {
-          "command": "ognivo.changes.openFile",
+          "command": "ognivo.prompt.edit",
           "when": "false"
         },
         {
-          "command": "ognivo.changes.accept",
+          "command": "ognivo.prompt.ask",
           "when": "false"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "ognivo.previousChange",
+          "when": "resource in ognivo.unreviewedUris",
+          "group": "navigation@81"
         },
         {
-          "command": "ognivo.changes.revert",
-          "when": "false"
+          "command": "ognivo.nextChange",
+          "when": "resource in ognivo.unreviewedUris",
+          "group": "navigation@82"
+        },
+        {
+          "command": "ognivo.keepFile",
+          "when": "resource in ognivo.unreviewedUris",
+          "group": "navigation@83"
+        },
+        {
+          "command": "ognivo.undoFile",
+          "when": "resource in ognivo.unreviewedUris",
+          "group": "navigation@84"
+        },
+        {
+          "command": "ognivo.diffFile",
+          "when": "resource in ognivo.unreviewedUris && !isInDiffEditor",
+          "group": "navigation@85"
+        }
+      ],
+      "comments/commentThread/context": [
+        {
+          "command": "ognivo.prompt.edit",
+          "when": "commentController == ognivo.prompt",
+          "group": "inline@1"
+        },
+        {
+          "command": "ognivo.prompt.ask",
+          "when": "commentController == ognivo.prompt",
+          "group": "inline@2"
         }
       ]
     },
@@ -299,6 +388,34 @@
         "key": "ctrl+alt+o",
         "mac": "cmd+alt+o",
         "when": "editorTextFocus && editorHasSelection"
+      },
+      {
+        "command": "ognivo.editSelection",
+        "key": "ctrl+i",
+        "mac": "cmd+i",
+        "when": "editorTextFocus && editorHasSelection && resourceScheme == file"
+      },
+      {
+        "command": "ognivo.keepHunk",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && ognivo.hunkAtCursor"
+      },
+      {
+        "command": "ognivo.undoHunk",
+        "key": "ctrl+alt+backspace",
+        "mac": "cmd+alt+backspace",
+        "when": "editorTextFocus && ognivo.hunkAtCursor"
+      },
+      {
+        "command": "ognivo.nextChange",
+        "key": "alt+f5",
+        "when": "resource in ognivo.unreviewedUris"
+      },
+      {
+        "command": "ognivo.previousChange",
+        "key": "shift+alt+f5",
+        "when": "resource in ognivo.unreviewedUris"
       }
     ],
     "configuration": {
@@ -345,7 +462,7 @@
           ],
           "enumDescriptions": [
             "Asks before every edit, and before every command that does more than read.",
-            "Edits apply at once, to review in Changes; commands ask as usual.",
+            "Edits apply at once, to keep or undo in the editor; commands ask as usual.",
             "Reads and plans, and changes nothing: you carry the plan out when it is ready.",
             "Edits and runs commands without asking; protected files, files outside the project and your rules still ask."
           ],
@@ -365,20 +482,64 @@
           "markdownDescription": "The agent may hand parts of a task to subagents of its own (llama-server `-np 2` or more).",
           "order": 8
         },
+        "ognivo.notifications": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "While VS Code is not in front: a notice when a turn of a session on show ends, and when the agent asks.",
+          "order": 9
+        },
+        "ognivo.terminalSuggestions": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offer the commands that fail in your terminals as context for a message. To do so, ognivo reads what they write, through VS Code's shell integration; it goes to the model only in a message you send.",
+          "order": 10
+        },
         "ognivo.path": {
           "type": "string",
           "default": "",
           "scope": "machine",
           "markdownDescription": "The `ognivo` program the core runs as. Empty: the one this extension ships, else `ognivo` on `PATH`.",
-          "order": 9
+          "order": 11
         }
       }
-    }
+    },
+    "colors": [
+      {
+        "id": "ognivo.unreviewedForeground",
+        "description": "The colour of a file the agent changed and nobody reviewed yet, in the explorer and on its tab.",
+        "defaults": {
+          "light": "#bc4c00",
+          "dark": "#f0883e",
+          "highContrast": "#f0883e",
+          "highContrastLight": "#953800"
+        }
+      },
+      {
+        "id": "ognivo.addedLineBackground",
+        "description": "The background of the lines the agent added or changed, until they are reviewed.",
+        "defaults": {
+          "light": "diffEditor.insertedLineBackground",
+          "dark": "diffEditor.insertedLineBackground",
+          "highContrast": "#2ea04340",
+          "highContrastLight": "#2ea04326"
+        }
+      },
+      {
+        "id": "ognivo.removedLineMarker",
+        "description": "The marker of the place where the agent removed lines, until it is reviewed.",
+        "defaults": {
+          "light": "editorGutter.deletedBackground",
+          "dark": "editorGutter.deletedBackground",
+          "highContrast": "editorGutter.deletedBackground",
+          "highContrastLight": "editorGutter.deletedBackground"
+        }
+      }
+    ]
   },
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "node scripts/build.mjs --watch",
-    "check": "tsc -p tsconfig.json && tsc -p src/webview/tsconfig.json && tsc -p gallery/tsconfig.json",
+    "check": "tsc -p tsconfig.json && tsc -p src/webview/tsconfig.json && tsc -p gallery/tsconfig.json && tsc -p tests/tsconfig.json",
     "test": "vitest run",
     "package": "node scripts/package.mjs",
     "profiles": "node scripts/profiles.mjs",

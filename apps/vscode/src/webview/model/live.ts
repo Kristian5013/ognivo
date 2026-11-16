@@ -23,7 +23,7 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
       return [{ type: "item_completed", id: item.id, item, result: item.kind === "tool" ? item.result : undefined }];
     }
     case "generation":
-      return [{ type: "generation", generation: toGeneration(e.generation, offset) }];
+      return [{ type: "generation", generation: toGeneration(e.generation, offset), turn: e.generation.turn }];
     case "turn_completed":
       return [
         {
@@ -32,6 +32,8 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
           end: e.end,
           why: e.why ?? undefined,
           verification: e.verification ?? undefined,
+          // an older core's event has none; an empty list is not written
+          undelivered: e.undelivered ?? [],
         },
       ];
     case "thread_rewound":
@@ -50,6 +52,12 @@ export function toLive(e: P.Event, offset = 0): LiveEvent[] {
     // the thread's, not its store's (threads.ts)
     case "mode_changed":
       return [];
+    // how far the generation under way got: the live line's, no row's
+    case "progress":
+      return [{ type: "progress", progress: { ...e.progress, generation: e.progress.generation + offset } }];
+    // changes were kept or undone: what waits for a review changed
+    case "changes_updated":
+      return [{ type: "changes" }];
   }
 }
 
@@ -114,6 +122,8 @@ function toItem(item: P.Item, offset: number): Item {
         steps: item.steps ?? undefined,
         changed: item.changed,
       };
+    case "steer":
+      return { kind: "steer", id, text: item.text };
   }
 }
 

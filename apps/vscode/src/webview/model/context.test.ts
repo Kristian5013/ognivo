@@ -5,14 +5,25 @@ import { describe, expect, it } from "vitest";
 
 import { type AtifTrace, fromAtif } from "./atif.ts";
 import {
+  autoChip,
+  byThinking,
+  chipKey,
   compaction,
   contextChoices,
   contextSize,
+  editorChips,
   estimateTokens,
+  failureChip,
+  levelHint,
   mentionAt,
+  mentionChoices,
+  nativeFor,
+  profileLevels,
   sessionFiles,
+  startLevel,
   windowChoice,
 } from "./context.ts";
+import type { EditorState } from "../../shared/messages.ts";
 import profiles from "../../shared/profiles.json";
 
 describe("sessionFiles", () => {
@@ -35,6 +46,74 @@ describe("mentionAt", () => {
     expect(mentionAt("@", 1)).toEqual({ start: 0, query: "" });
     expect(mentionAt("mail me at a@b", 14)).toBeUndefined();
     expect(mentionAt("@src/lib.rs and", 15)).toBeUndefined();
+  });
+
+  it("takes a path's letters of any script", () => {
+    expect(mentionAt("see @docs/заметки", 17)).toEqual({ start: 4, query: "docs/заметки" });
+  });
+});
+
+describe("mentionChoices", () => {
+  it("offers the session's files first, then the workspace's, each once", () => {
+    const session = ["src/parse.rs", "src/main.rs", "Cargo.toml"];
+    const found = ["src/parse.rs", "tests/parse.rs", "benches/parse.rs"];
+    expect(mentionChoices("parse", session, found)).toEqual(["src/parse.rs", "tests/parse.rs", "benches/parse.rs"]);
+    expect(mentionChoices("", session, [], 2)).toEqual(["src/parse.rs", "src/main.rs"]);
+    expect(mentionChoices("CARGO", session, [])).toEqual(["Cargo.toml"]);
+  });
+});
+
+describe("the composer's own chips", () => {
+  const editor = (selection: EditorState["selection"] = null): EditorState => ({
+    path: "src/parse.rs",
+    abs: "/home/u/tally/src/parse.rs",
+    language: "rust",
+    selection,
+  });
+  const lines = { start: 4, end: 8, text: "fn parse_amount() {}" };
+
+  it("are the editor's file, and its selection when something is selected", () => {
+    expect(editorChips(null)).toEqual({});
+    expect(editorChips(editor()).selection).toBeUndefined();
+    expect(editorChips(editor({ start: 3, end: 3, text: "  \n" })).selection).toBeUndefined();
+    expect(editorChips(editor(lines)).selection).toEqual({
+      kind: "selection",
+      path: "src/parse.rs",
+      abs: "/home/u/tally/src/parse.rs",
+      start: 4,
+      end: 8,
+      language: "rust",
+      text: "fn parse_amount() {}",
+    });
+  });
+
+  it("show the selection, else the file, and nothing the user took away or a chip names", () => {
+    const sel = editorChips(editor(lines)).selection!;
+    const file = editorChips(editor()).file!;
+    expect(autoChip(editor(lines), new Set(), [])).toEqual(sel);
+    expect(autoChip(editor(lines), new Set([chipKey(sel)]), [])).toEqual(file);
+    expect(autoChip(editor(lines), new Set([chipKey(sel), chipKey(file)]), [])).toBeUndefined();
+    expect(autoChip(null, new Set(), [])).toBeUndefined();
+    // Ctrl+I's selection of the same file is the message's already
+    expect(autoChip(editor(), new Set(), [{ ...sel, start: 10, end: 12 }])).toBeUndefined();
+    expect(autoChip(editor(), new Set(), [failureChip({ id: "1", command: "cargo run", exitCode: 101, cwd: null, output: "", at: 0 })])).toEqual(file);
+  });
+
+  it("tell the same chip from another", () => {
+    const sel = editorChips(editor(lines)).selection!;
+    expect(chipKey(sel)).toBe(chipKey({ ...sel, text: "other" }));
+    expect(chipKey(sel)).not.toBe(chipKey({ ...sel, end: 9 }));
+    expect(chipKey({ kind: "file", path: "a", abs: "C:\\P\\a.rs" })).toBe(chipKey({ kind: "file", path: "a", abs: "c:/p/a.rs" }));
+  });
+
+  it("take a failed command with what it wrote", () => {
+    expect(failureChip({ id: "7", command: "cargo run -- x.csv", exitCode: 101, cwd: "/home/u/tally", output: "panicked", at: 5 })).toEqual({
+      kind: "terminal",
+      command: "cargo run -- x.csv",
+      exitCode: 101,
+      cwd: "/home/u/tally",
+      output: "panicked",
+    });
   });
 });
 
@@ -73,6 +152,55 @@ describe("contextChoices", () => {
     // gpt-oss stops at its ceiling, 128K, whatever the server holds; Qwen3.8 goes to 256K
     expect(contextChoices(profiles["gpt-oss-20b"].context, 262_144).slice(-2).map(contextSize)).toEqual(["96K", "128K"]);
     expect(contextChoices(profiles["qwen3.8-27b"].context, 262_144).at(-1)).toBe(262_144);
+  });
+});
+
+describe("reasoning levels", () => {
+  it("go from the least thinking to the most, whatever order a profile lists them in", () => {
+    expect(byThinking(profiles["qwen3.8-27b"].reasoning.levels)).toEqual(["off", "low", "medium", "xhigh"]);
+    expect(byThinking(profiles["gemma-4-31b"].reasoning.levels)).toEqual(["off", "on"]);
+    expect(byThinking(["high", "turbo", "low"])).toEqual(["low", "high", "turbo"]);
+  });
+
+  it("each have a word on what they do", () => {
+    expect(levelHint("gpt-oss-20b", "high")).toBe("The level its best agent scores were measured at.");
+    expect(levelHint("gemma-4-31b", "off")).toBe("No thinking. The fastest.");
+    expect(levelHint("gemma-4-31b", "on")).toBe("Thinks before each step, as its model card measured it.");
+  });
+
+  it("are a profile's own, and a new session asks only for one its model's profile has", () => {
+    expect(profileLevels("gpt-oss-20b")).toEqual(["low", "medium", "high"]);
+    expect(profileLevels("no-such-profile")).toBeUndefined();
+    expect(profileLevels("")).toBeUndefined();
+    expect(profileLevels(null)).toBeUndefined();
+    // the level chosen for Qwen, then gpt-oss picked: its default, as the popover shows it
+    expect(startLevel("xhigh", profileLevels("gpt-oss-20b"))).toBeNull();
+    expect(startLevel("xhigh", profileLevels("qwen3.8-27b"))).toBe("xhigh");
+    expect(startLevel("", profileLevels("qwen3.8-27b"))).toBeNull();
+    // levels nobody knows yet (no answer of the server): the core says whether it has it
+    expect(startLevel("xhigh", undefined)).toBe("xhigh");
+    expect(startLevel("xhigh", [])).toBe("xhigh");
+  });
+});
+
+describe("the Native path", () => {
+  it("takes a session where it reads its model's format: the profile's, else the one the server runs", () => {
+    expect(nativeFor(true, "gpt-oss-20b")).toBe(true);
+    expect(nativeFor(true, "qwen3.8-27b")).toBe(true);
+    expect(nativeFor(true, "gemma-4-31b")).toBe(false);
+    expect(nativeFor(false, "gpt-oss-20b")).toBe(false);
+    // no profile chosen: the model the server runs, as its detection says; a Gemma 4 model
+    // of the router goes on the Generic path, as the settings show it
+    expect(nativeFor(true, "", false)).toBe(false);
+    expect(nativeFor(true, "", true)).toBe(true);
+    expect(nativeFor(false, "", true)).toBe(false);
+    // a profile chosen goes by its own format, whatever the server runs
+    expect(nativeFor(true, "gemma-4-31b", true)).toBe(false);
+    expect(nativeFor(true, "qwen3.8-27b", false)).toBe(true);
+    // nothing known of the model: as the user wants it, and the core says
+    expect(nativeFor(true, null)).toBe(true);
+    expect(nativeFor(true, "no-such-profile")).toBe(true);
+    expect(nativeFor(true, "no-such-profile", false)).toBe(false);
   });
 });
 

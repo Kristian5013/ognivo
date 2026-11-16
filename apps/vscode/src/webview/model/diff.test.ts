@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { diffsOf, fromHunks, fromPatch, lineDiff, splitPath } from "./diff.ts";
+import { diffsOf, fromHunks, fromPatch, hunkLines, lineDiff, splitPath } from "./diff.ts";
 import type { ToolItem } from "./model.ts";
 
 const tool = (call: ToolItem["call"], changes?: ToolItem["changes"]): ToolItem => ({
@@ -88,5 +88,17 @@ describe("splitPath", () => {
     expect(splitPath("src/model/diff.ts")).toEqual({ name: "diff.ts", dir: "src/model" });
     expect(splitPath("C:\\proj\\a.rs")).toEqual({ name: "a.rs", dir: "C:/proj" });
     expect(splitPath("README.md")).toEqual({ name: "README.md", dir: "" });
+  });
+});
+
+describe("a changed file's lines", () => {
+  it("are what its hunks put in and took out", () => {
+    expect(hunkLines([])).toEqual({ added: 0, removed: 0 });
+    expect(
+      hunkLines([
+        { added: ["a", "b"], removed: [] },
+        { added: ["c"], removed: ["d", "e", "f"] },
+      ]),
+    ).toEqual({ added: 3, removed: 3 });
   });
 });

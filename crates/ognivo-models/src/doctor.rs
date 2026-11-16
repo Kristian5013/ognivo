@@ -555,6 +555,8 @@ async fn probe_stream_ids(
                 output.push_str(&text);
             }
             TokenEvent::Done { usage, .. } => predicted = usage.predicted_n.map(|n| n as usize),
+            // the prompt's progress carries no ids of the reply
+            TokenEvent::Progress(_) => {}
         }
     }
     let Some(predicted) = predicted else {

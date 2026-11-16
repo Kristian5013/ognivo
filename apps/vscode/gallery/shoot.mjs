@@ -2,13 +2,26 @@
 // and core, fake.ts), serves it, and takes each scenario (scenarios.ts) in the system's
 // Edge or Chrome, at a side bar's width.
 //
-//   node gallery/shoot.mjs [scenario...] [--theme=dark|light|both] [--width=420]
-//                          [--height=860] [--out=dir] [--serve]
+//   node gallery/shoot.mjs [scenario...] [--theme=dark|light|hc|hc-light|both|all]
+//                          [--width=420] [--height=860] [--scale=1] [--wait=1600]
+//                          [--place=sidebar|editor] [--out=dir] [--name=suffix]
+//                          [--click=selector]... [--hover=selector] [--scroll=top]
+//                          [--reduce-motion] [--serve]
 //
-// `--serve` only serves it, for a browser: http://127.0.0.1:<port>/?s=session&theme=light
+// `--click` opens what a click opens (a menu, an exploration, a command's output); given
+// more than once, the clicks follow one another. `--hover` shows what the pointer shows (a
+// row's buttons). `--place=editor` shows the panel as the editor tab shows it. `--name`
+// goes after the scenario's name in the file's, for the pictures of a click beside the
+// plain ones. `--theme=both` takes the dark and the light theme, `all` the high-contrast
+// ones too (themes/, from capture.mjs). `--serve` only serves it, for a browser:
+// http://127.0.0.1:<port>/?s=session&theme=light&place=editor
+//
+// Each run builds into a directory of its own, so that runs at the same time (two widths,
+// two agents) do not take each other's build away.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,20 +29,21 @@ import { chromium } from "@playwright/test";
 import * as esbuild from "esbuild";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
-const dist = join(here, "dist");
-const flags = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .filter((a) => a.startsWith("--"))
-    .map((a) => {
-      // a value may hold `=` itself: `--click=button >> nth=1`
-      const at = a.indexOf("=");
-      return at < 0 ? [a.slice(2), "true"] : [a.slice(2, at), a.slice(at + 1)];
-    }),
-);
-const named = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const args = process.argv.slice(2);
+/** `--name=value` and `--name`, the last one of a name; `--click`, all of them in order. */
+const flags = {};
+const clicks = [];
+for (const a of args.filter((a) => a.startsWith("--"))) {
+  // a value may hold `=` itself: `--click=button >> nth=1`
+  const at = a.indexOf("=");
+  const [key, value] = at < 0 ? [a.slice(2), "true"] : [a.slice(2, at), a.slice(at + 1)];
+  if (key === "click") clicks.push(value);
+  else flags[key] = value;
+}
+const named = args.filter((a) => !a.startsWith("--"));
 
-rmSync(dist, { recursive: true, force: true });
+const dist = mkdtempSync(join(tmpdir(), "ognivo-gallery-"));
+const clean = () => rmSync(dist, { recursive: true, force: true });
 await esbuild.build({
   entryPoints: [join(here, "main.tsx")],
   outdir: dist,
@@ -77,11 +91,19 @@ const url = `http://127.0.0.1:${server.address().port}`;
 
 if (flags.serve) {
   console.log(`the gallery: ${url}/?s=session`);
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, () => {
+      clean();
+      process.exit(0);
+    });
+  }
 } else {
   const source = readFileSync(join(here, "scenarios.ts"), "utf8");
   const all = [...source.matchAll(/^ {2}"?([a-z-]+)"?: [{r]/gm)].map((m) => m[1]);
   const scenarios = named.length ? named : all;
-  const themes = flags.theme === "both" ? ["dark", "light"] : [flags.theme ?? "dark"];
+  const captured = ["dark", "light", "hc", "hc-light"].filter((t) => existsSync(join(here, "themes", `${t}.json`)));
+  const themes = flags.theme === "all" ? captured : flags.theme === "both" ? ["dark", "light"] : [flags.theme ?? "dark"];
+  const place = flags.place === "editor" ? "&place=editor" : "";
   const out = flags.out ?? join(here, "shots");
   mkdirSync(out, { recursive: true });
   const browser = await chromium.launch({ channel: process.env.OGNIVO_BROWSER ?? (process.platform === "win32" ? "msedge" : "chrome") });
@@ -89,23 +111,30 @@ if (flags.serve) {
     const page = await browser.newPage({
       viewport: { width: Number(flags.width ?? 420), height: Number(flags.height ?? 860) },
       deviceScaleFactor: Number(flags.scale ?? 1),
+      reducedMotion: flags["reduce-motion"] ? "reduce" : "no-preference",
     });
     page.on("pageerror", (e) => console.error(`page error: ${e.message}`));
     for (const s of scenarios) {
       for (const theme of themes) {
-        await page.goto(`${url}/?s=${s}&theme=${theme}`);
+        await page.goto(`${url}/?s=${s}&theme=${theme}${place}`);
         await page.waitForTimeout(Number(flags.wait ?? 1600));
-        if (flags.click) {
-          // a state a click opens: a menu, a list
-          await page.locator(flags.click).first().click();
+        for (const click of clicks) {
+          // a state a click opens: a menu, a list, a command's output
+          await page.locator(click).first().click();
           await page.waitForTimeout(300);
+        }
+        if (flags.hover) {
+          // a state the pointer shows: a row's buttons
+          await page.locator(flags.hover).first().hover();
+          await page.waitForTimeout(200);
         }
         if (flags.scroll === "top") {
           // the conversation from its start
           await page.evaluate(() => document.querySelector("[data-virtuoso-scroller]")?.scrollTo(0, 0));
           await page.waitForTimeout(400);
         }
-        const file = join(out, `${s}${themes.length > 1 || theme !== "dark" ? `-${theme}` : ""}.png`);
+        const suffix = `${flags.name ? `-${flags.name}` : ""}${themes.length > 1 || theme !== "dark" ? `-${theme}` : ""}`;
+        const file = join(out, `${s}${suffix}.png`);
         await page.screenshot({ path: file });
         console.log(file);
       }
@@ -113,5 +142,6 @@ if (flags.serve) {
   } finally {
     await browser.close();
     server.close();
+    clean();
   }
 }

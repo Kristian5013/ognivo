@@ -126,7 +126,7 @@ describe("the core's stream", () => {
     expect(s.row(5)).toMatchObject({ kind: "rewound", from: 2, to: 2 });
   });
 
-  it("shows a call as the model writes it, and gives its row to the call's item", () => {
+  it("shows a call as the model writes it in the live state, and gives the call a row as it starts", () => {
     const s = new ThreadStore(
       { id: "11", title: "", project: "", profile: "", model: "", server: "", system: "", conversations: {}, tools: [] },
       { schedule: (flush) => flush() },
@@ -140,22 +140,44 @@ describe("the core's stream", () => {
     const ended = at((e) => e.event === "generation" && e.generation.index === 2);
     const edit = at((e) => e.event === "item_started" && e.item.kind === "tool_call" && e.item.tool === "edit");
     play(0, ended);
-    const row = s.length - 1;
-    expect(s.row(row)).toMatchObject({
-      kind: "draft",
-      state: "writing",
-      draft: { generation: 2, index: 0, tool: "Edit", fields: [["path", "main.rs"], ["old", '"hi"'], ["new", '"hello"']] },
-    });
-    const key = s.key(row);
+    const length = s.length;
+    expect(s.live.drafts).toEqual([
+      {
+        state: "writing",
+        draft: { generation: 2, index: 0, tool: "Edit", fields: [["path", "main.rs"], ["old", '"hi"'], ["new", '"hello"']] },
+      },
+    ]);
+    // no row of its own while it is written
+    expect(rows(s).at(-1)).toMatchObject({ kind: "item", item: { kind: "tool", call: { name: "Read" } } });
     play(ended, ended + 1);
-    expect(s.row(row)).toMatchObject({ kind: "draft", state: "written" });
+    expect(s.live.drafts).toMatchObject([{ state: "written" }]);
     play(ended + 1, edit + 1);
-    // the edit's item in the draft's place, under its key
-    expect(s.row(row)).toMatchObject({ kind: "item", item: { kind: "tool", call: { name: "Edit" } } });
-    expect(s.key(row)).toBe(key);
+    // the edit's item has the next row, and its draft is gone
+    expect(s.row(length)).toMatchObject({ kind: "item", item: { kind: "tool", call: { name: "Edit" } } });
+    expect(s.live.drafts).toEqual([]);
     play(edit + 1, own.length);
-    expect(rows(s).filter((r) => r.kind === "draft")).toEqual([]);
+    expect(s.live).toMatchObject({ running: false, drafts: [], calls: [] });
     expect(drafted).toBeLessThan(ended);
+  });
+
+  it("takes the model's progress, the word that changes were kept, and what never reached the model", () => {
+    const progress = { generation: 1, phase: "prompt", prompt_total: 900, prompt_cached: 100, prompt_done: 500, generated: 0, elapsed_ms: 40, tokens_per_second: null } as const;
+    // a thread whose first generations came from its trajectory numbers the core's on
+    expect(toLive({ seq: 1, thread: 3, event: "progress", progress }, 2)).toEqual([{ type: "progress", progress: { ...progress, generation: 3 } }]);
+    expect(toLive({ seq: 2, thread: 3, event: "changes_updated" })).toEqual([{ type: "changes" }]);
+    const ended = { seq: 3, thread: 3, event: "turn_completed", turn: 4, end: "interrupted", why: null, answer: null, verification: null } as const;
+    expect(toLive({ ...ended, undelivered: ["and the tests"] })).toMatchObject([{ type: "turn_completed", index: 4, undelivered: ["and the tests"] }]);
+    // an older core's event has none
+    expect(toLive(ended)).toMatchObject([{ type: "turn_completed", undelivered: [] }]);
+    const generation = stream.find((e) => e.event === "generation");
+    expect(generation?.event === "generation" && toLive(generation)).toMatchObject([{ type: "generation", turn: generation?.event === "generation" ? generation.generation.turn : -1 }]);
+  });
+
+  it("knows each turn's generations by the turn the core says", () => {
+    const s = store(11);
+    const cost = s.turnCost(1)!;
+    expect(cost.generations).toBe(7);
+    expect(cost).toMatchObject({ prompt: 800 + 900 + 1000 + 1100 + 1200 + 1300 + 1400, completion: 280, last: { index: 7 } });
   });
 
   it("gives a subagent a thread of its own", () => {

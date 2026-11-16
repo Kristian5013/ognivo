@@ -35,6 +35,50 @@ export interface InstructionFile {
   bytes: number;
 }
 
+/** The file the user works in, and the selection in it. Lines from 1, inclusive. */
+export interface EditorState {
+  /** Relative to the workspace, `/` separated. */
+  path: string;
+  /** Its path on disk. */
+  abs: string;
+  /** VS Code's language id: `rust`, `typescript`, `plaintext`. */
+  language: string;
+  /** `null` when nothing is selected. */
+  selection: EditorSelection | null;
+}
+
+export interface EditorSelection {
+  start: number;
+  end: number;
+  /** What is selected, at most 20 000 characters. */
+  text: string;
+}
+
+/** A command that failed in one of the user's own terminals (shell integration). */
+export interface TerminalFailure {
+  /** Tells one failure from another, as the extension saw them end. */
+  id: string;
+  command: string;
+  exitCode: number;
+  /** Where it ran, where the shell says. */
+  cwd: string | null;
+  /** The last of what it wrote: at most 80 lines and 8 000 characters, ANSI stripped. */
+  output: string;
+  /** When it ended, in Unix milliseconds. */
+  at: number;
+}
+
+/** What a message carries besides its text; turned into text when sent (context.ts). */
+export type ContextChip =
+  /** A file the user works in. */
+  | { kind: "file"; path: string; abs: string }
+  /** Lines `start` to `end` of a file, with their text. */
+  | { kind: "selection"; path: string; abs: string; start: number; end: number; language: string; text: string }
+  /** A command that failed in the user's terminal, with what it wrote. */
+  | { kind: "terminal"; command: string; exitCode: number; cwd: string | null; output: string }
+  /** A diagnostic of a file, at `line`. */
+  | { kind: "problem"; path: string; abs: string; line: number; message: string; source: string | null; severity: "error" | "warning" | "info" | "hint" };
+
 /** What a page asks of the extension, and what comes back. */
 export interface Requests {
   "settings/set": { params: { key: (typeof SESSION_SETTINGS)[number]; value: unknown }; result: null };
@@ -51,6 +95,14 @@ export interface Requests {
   "sessions/delete": { params: { thread: number; title: string }; result: boolean };
   /** Whether Exa takes the key: one search of a result, as its MCP server would make. */
   "exa/check": { params: { key: string }; result: { ok: boolean; says: string } };
+  /** The workspace's files that match `query`, fuzzily, the best first: at most `limit`
+   * (20 when not given), relative to the workspace with `/`. */
+  "files/find": { params: { query: string; limit?: number }; result: string[] };
+  /** Opens the review of a thread's unreviewed changes: every file's in one tab (`path`
+   * `null`), or a file's diff. */
+  "review/open": { params: { thread: number; path: string | null }; result: null };
+  /** Shows the "ognivo" terminal, which shows the agent's commands as they ran. */
+  "terminal/show": { params: Record<string, never>; result: null };
 }
 
 /** What a page sends the extension. */
@@ -69,7 +121,25 @@ export type FromPage =
 
 /** What the extension sends a page. */
 export type ToPage =
-  | { t: "hello"; folders: string[]; state: Record<string, string>; place: Place; session: NewSession }
+  /** The first message: with the file the user works in and the commands that failed in
+   * the user's terminals. */
+  | {
+      t: "hello";
+      folders: string[];
+      state: Record<string, string>;
+      place: Place;
+      session: NewSession;
+      editor: EditorState | null;
+      failures: TerminalFailure[];
+    }
+  /** The user went to another file, or selected something else: debounced, and while a
+   * page has the focus the last file's editor stays. */
+  | { t: "editor"; editor: EditorState | null }
+  /** The commands that failed in the user's terminals, the newest first, at most 5. */
+  | { t: "failures"; failures: TerminalFailure[] }
+  /** A message for the composer from elsewhere in VS Code (Ctrl+I, a Quick Fix, a failed
+   * command's suggestion): shown there, and sent when `send`, queued while a turn runs. */
+  | { t: "prompt"; text: string; chips: ContextChip[]; send: boolean }
   | { t: "folders"; folders: string[] }
   | { t: "session"; session: NewSession }
   | { t: "core"; data: unknown }

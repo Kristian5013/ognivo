@@ -1,19 +1,24 @@
 // The core's questions in VS Code's own dialogs (docs/architecture.md §8, §10). Trust in a
 // project's rules, MCP servers and hooks, and an MCP server's sign-in, ask in a modal
 // dialog of the window whose workspace holds the project. An approval asks in the page that
-// shows its session; while none of this window's pages is in sight, a notice says so too,
-// and the status bar counts what waits.
+// shows its session; a notice asks too while no page of this window shows it in sight, and
+// while VS Code is not in front of a window whose page shows it (`ognivo.notifications`).
+// The notice allows only an action it shows whole, as it is, on one line; else it offers the
+// page's card (Open) and Deny. The status bar's item (src/status.ts) says what waits.
 
 import * as vscode from "vscode";
 
 import type * as P from "./shared/protocol.ts";
 import type { Ask, Core } from "./shared/rpc.ts";
 import { within } from "./shared/text.ts";
-import { folders } from "./view.ts";
+import { folders, local } from "./view.ts";
+import { approvalNotice } from "./wording.ts";
 
-/** Whether `project` is this window's: one of its folders, or inside one. */
+/** Whether `project` is this window's: one of its folders, or inside one. The core names it
+ * by its real path, which may be another spelling of the folder (a link, an 8.3 name). */
 function ours(project: string): boolean {
-  return folders().some((f) => within(project, f));
+  const here = local(project);
+  return folders().some((f) => within(here, f));
 }
 
 function list(lines: string[], most = 12): string {
@@ -84,26 +89,32 @@ async function trust(core: Core, ask: Ask): Promise<void> {
 
 /** Answers the core's trust questions natively, and tells of approvals out of sight. */
 export class Asks {
-  private readonly status: vscode.StatusBarItem;
   private readonly shown = new Set<number>();
   private core?: Core;
+  private unsubscribe?: () => void;
 
   constructor(
     /** Whether a page of this window shows `thread`, in sight. */
     private readonly inSight: (thread: number) => boolean,
-    /** Brings the agent's page into sight. */
-    private readonly focus: () => Thenable<unknown>,
-  ) {
-    this.status = vscode.window.createStatusBarItem("ognivo.asks", vscode.StatusBarAlignment.Right, 100);
-    this.status.name = "ognivo: questions";
-    this.status.command = "ognivo.focus";
+    /** Whether a page of this window shows `thread`, in sight or not. */
+    private readonly shownHere: (thread: number) => boolean,
+    /** Brings the page that shows `thread` into sight, or opens it in one. */
+    private readonly open: (thread: number) => Thenable<unknown>,
+    /** The questions that wait changed. */
+    private readonly onChange: () => void,
+  ) {}
+
+  /** The questions that wait now. */
+  waiting(): Ask[] {
+    return this.core ? [...this.core.asks.values()] : [];
   }
 
   /** Follows the questions of a new connection's client. */
   follow(core: Core): void {
+    this.unsubscribe?.();
     this.core = core;
     this.shown.clear();
-    core.subscribe(() => this.changed());
+    this.unsubscribe = core.subscribe(() => this.changed());
     // the questions that waited when it connected
     this.changed();
   }
@@ -111,8 +122,7 @@ export class Asks {
   private changed(): void {
     const core = this.core;
     if (!core) return;
-    const asks = [...core.asks.values()];
-    for (const ask of asks) {
+    for (const ask of core.asks.values()) {
       if (this.shown.has(ask.id)) continue;
       if (ask.method === "approval/ask") {
         this.shown.add(ask.id);
@@ -124,32 +134,30 @@ export class Asks {
     }
     // the ones answered or withdrawn
     for (const id of this.shown) if (!core.asks.has(id)) this.shown.delete(id);
-    const waiting = asks.filter((a) => a.method === "approval/ask").length;
-    if (waiting) {
-      this.status.text = `$(bell-dot) ognivo: ${waiting} ${waiting === 1 ? "question" : "questions"}`;
-      this.status.tooltip = "The agent waits for your answer";
-      this.status.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
-      this.status.show();
-    } else {
-      this.status.hide();
-    }
+    this.onChange();
   }
 
-  /** An approval out of sight: a notice with its answers, and the way to the page. */
+  /** An approval out of sight, or while the user is in another program: a notice with its
+   * answers, and the way to its session's page. A notice that cannot show the whole action
+   * as it is (more lines, too long, characters it does not show) does not allow it: the
+   * panel's card does, and the notice only denies. */
   private notice(core: Core, ask: Ask): void {
     const p = ask.params as P.ApprovalAsked;
-    if (this.inSight(p.thread)) return;
-    const who = p.agent ? `A subagent (${p.agent})` : "The agent";
+    const away = vscode.workspace.getConfiguration("ognivo").get("notifications", true) && !vscode.window.state.focused && this.shownHere(p.thread);
+    if (this.inSight(p.thread) && !away) return;
+    const { text, whole } = approvalNotice(p);
+    const answers = whole ? ["Allow", "Allow for This Session", "Deny", "Open"] : ["Open", "Deny"];
     void vscode.window
-      .showInformationMessage(`ognivo: ${who} asks: ${p.tool} ${p.action}`, { detail: p.reason }, "Allow", "Deny", "Open")
+      .showInformationMessage(text, ...answers)
       .then(async (choice) => {
         if (choice === "Allow") core.answer(ask.id, { decision: "allow", instead: null });
+        else if (choice === "Allow for This Session") core.answer(ask.id, { decision: "allow_session", instead: null });
         else if (choice === "Deny") core.answer(ask.id, { decision: "deny", instead: null });
-        else if (choice === "Open") await this.focus();
+        else if (choice === "Open") await this.open(p.thread);
       });
   }
 
   dispose(): void {
-    this.status.dispose();
+    this.unsubscribe?.();
   }
 }

@@ -58,7 +58,8 @@ checked against.
   and `.claude/settings*.json`. A project's allow rules count once you trust them: a
   cloned repository must not let itself run commands.
 - **The edit journal:** every change is kept with what it replaced. `/changes`, `/accept`
-  and `/revert` in `chat`, the Changes view in VS Code, with each file in the editor's diff.
+  and `/revert` in `chat`; in VS Code, Keep and Undo above each change in the editor, for
+  that change, its file or all of them, and every changed file in one review tab.
 - **Context.** A session works with the server's window (llama-server's `-c`), up to what
   its model works with: 256K for Gemma 4, Qwen3.6 and Qwen3.8, 128K for gpt-oss. Where a
   model writes nothing at all in a long context, as llama.cpp is reported to make Qwen3.8
@@ -69,8 +70,10 @@ checked against.
   turn: the model's summary, ognivo's facts and the last steps replace the rest.
 - **Images** for a model whose llama-server runs its projector (`--mmproj`): Gemma 4 and
   Qwen3.6/3.8 see them, gpt-oss does not. `/image FILE` in `chat`, `--image FILE` in
-  `run`; a read of an image file gives the model the image. PNG, JPEG, GIF and BMP, up to
-  10 MB each and 8 or 32 MB a message. A request carries up to 48 MB of the newest
+  `run`; a read of an image file gives the model the image. In VS Code the server is asked
+  again before an image is refused, so one started again with `--mmproj` takes images in
+  a session that is already open. PNG, JPEG, GIF and BMP, up to 10 MB each and 8 or 32 MB
+  a message. A request carries up to 48 MB of the newest
   images (llama-server takes 100 MB), and the model reads what the older ones were. On the Native path a step with images goes to the server
   as text with its media marker, content guarded as on the Generic path.
 - **Guards** against special tokens in content, repeated output, repeated calls and calls
@@ -80,7 +83,8 @@ checked against.
   back. A read task changes no file, a write task only the files it lists; templates in
   `.claude/agents` give them roles. They pay off for independent parts that each take
   long, such as slow test suites, not for quick lookups.
-- **Sessions** are kept in SQLite (`~/.ognivo/data`) as they go. `chat --resume ID` or
+- **Sessions** are kept in SQLite (`~/.ognivo/data`) as they go; if the store fails, the
+  session goes on in memory, and the running turn says so. `chat --resume ID` or
   `--continue` picks one up with its conversation and edit journal; `ognivo sessions`
   lists them or finds them by words; `--atif` exports one as an ATIF trajectory (the
   `trajectory.json` Harbor reads).
@@ -165,28 +169,103 @@ Unix socket only that user can open (`$XDG_RUNTIME_DIR/ognivo/core.sock`), on Wi
 named pipe whose name, new each time a core starts, is in `core.pipe` of the data
 directory; the extension starts it when none runs, and every VS Code window shares it.
 
-- **The agent** in the side bar, or in an editor tab (`ognivo: Open the Agent in an
-  Editor Tab`). The first message starts a session in the workspace's folder with the
-  `ognivo.*` settings (the server, the model behind a router, the profile, the reasoning
-  level, the context, the mode); `ognivo: Choose the Server and the Model…` asks the
-  server what it runs. Turns stream; the model's reasoning, each call and the code of a
-  call being written show as they come; a file a call read or changed opens in the
-  editor. `Ctrl+Alt+O` focuses the agent, and with a selection adds it to the message;
-  `ognivo: Add the File to the Message` is in the editor's and the explorer's menus.
-- **Approvals** wait in the conversation; while the panel is out of sight a notice asks
-  too, and the status bar counts them. Trust in a project's rules, MCP servers and hooks
-  asks in VS Code's dialogs.
-- **Changes**: what the agent changed and you did not review, in a view of its own; each
-  file opens in the editor's diff against what it held before the session, and is
-  accepted or reverted there, one file or all.
-- **Sessions**: `ognivo: Open a Session…` lists them, this workspace's first. A turn goes
-  on when VS Code closes; the core quits a minute after its last client and turn.
+- **The agent** in VS Code's secondary side bar, on the right, while the Explorer stays on
+  the left; or in an editor tab (`ognivo: Open the Agent in an Editor Tab`). It shows
+  itself once, the first time the extension starts; then `Ctrl+Alt+O` (`ognivo: Focus the
+  Agent`) or the `ognivo` item in the status bar brings it back. The first message starts
+  a session in the workspace's folder with the `ognivo.*` settings (the server, the model
+  behind a router, the profile, the reasoning level, the context, the mode);
+  `ognivo: Choose the Server and the Model…` asks the server what it runs.
+- **The conversation** goes a line a step. Reads and searches in a row fold into one
+  "Explored 3 files, 1 search", the model's reasoning into "Thought for 6 s"; an edit is a
+  card (`parse.rs +15 −2`) that opens the file, or its diff; a command is a line with how
+  it ended, open when it failed. While a turn runs, a line at the end says what the model
+  does, with the time it has taken: "Reading the conversation · 63% of 12.4K", "Thinking ·
+  418 tokens · 34 tok/s", "Running cargo test".
+- **While a turn runs**, Enter queues your next message, which goes as the next turn;
+  `Ctrl+Enter`, or *Send now* on a queued one, gives it to the running turn, and the model
+  reads it before its next step, the first step after a compaction too. *Answer now* ends
+  the reasoning on the Native path. If the connection to the core drops, *Connect again*
+  puts what never reached the model (queued messages, ones it had not read yet, sends that
+  failed) back into each session's message, before what you were writing; their images do
+  not come back.
+- **Approvals**: one card above the message, with what the agent would run or edit and why
+  it asks. `Enter` lets it go ahead, *Allow for this session* lets the same action go
+  ahead for the rest of the session, and `Esc` says no and asks what to do instead; these
+  keys are the card's, while the focus is in it, and the card takes no focus from your
+  message, or while you work elsewhere in VS Code; an Enter in its first half second, or a
+  held one, does nothing. While its session is out of sight a notice asks too, and so it
+  does while VS Code is not in front (`ognivo.notifications`). The notice shows the whole
+  action on one line (a line break as ⏎) and allows only an action it shows whole and as
+  it is: an action that is long, of more than one line, or with characters a notice does
+  not show as they are, the notice can only deny, or open in the panel, whose card allows
+  it. Trust in a project's rules, MCP servers and hooks asks in VS Code's dialogs.
+- **Edits in the editor**: the lines the agent changed are tinted where you work, and a
+  marker shows on hover what it removed. Above each change, `✦ ognivo | Keep | Undo |
+  Diff`: Keep keeps it, Undo puts the lines back. A changed file carries a ✦ in the
+  Explorer and on its tab, with the previous and next change, Keep, Undo and its diff in the
+  editor's title. `ognivo: Review the Changes` opens every changed file in one tab, against
+  what it held before the session. Keeping asks nothing; undoing a whole file, or all of
+  them, asks first, and asks you to save first a file that has unsaved edits. A file with
+  unsaved edits shows none of this until it is saved: the core keeps and undoes changes on
+  disk. When a file under review changes on disk otherwise (a checkout, a formatter), the
+  review is read again.
+- **The end of a turn**: what the facts say of the answer ("Verified" or "Not verified"),
+  the files to review with *Review all*, *Undo all* and *Keep all*, and what the turn took:
+  the model, the tokens, the share from the cache, tokens a second.
+- **Context from where you are**: the file you work in and your selection go with the
+  message as chips you can remove, and `@` finds any file of the workspace. Chips and `@`
+  name a file relative to the folder of the session the message goes to, or by its path
+  when it is outside it, so a message to another project's session names the files you
+  mean. What you are writing stays with its session, chips and images too, while another
+  session or the settings show; its words and chips outlast a reload. `Ctrl+I` on a
+  selection asks what to do with it right in the editor (*Edit*, or *Ask in the Panel*);
+  *Fix with ognivo* is a Quick Fix on a problem; a command that failed in one of your
+  terminals is offered as context. For that, ognivo reads what your commands write, through
+  VS Code's shell integration; it reaches the model only in a message you send, and
+  `ognivo.terminalSuggestions` turns it off.
+- **While you are elsewhere**: the status bar says what the agent does (`Writing · 34
+  tok/s`), how many files wait for your review, or that it asks; while VS Code is not in
+  front, a notice says that a turn ended (`ognivo.notifications`). The agent's commands
+  show in the "ognivo" terminal (`ognivo: Show the Agent's Commands`), which only shows
+  them: the core runs them. Control characters in a command or its output show there as
+  symbols (␛) instead of acting, so what the agent read cannot write your clipboard, make
+  links or set the title; nor does text of the model, the project or the core become a
+  link in a notice or markdown in the status bar's tooltip.
+- **The model**: its pill in the message opens the server, the models behind a router, the
+  reasoning level and the context that new sessions take, and the ways to the settings.
+  Picking a model or a profile without the chosen reasoning level brings the level back to
+  the model's default, and a new session goes on the Native path only where that path
+  reads the model's format (Gemma 4 starts on the Generic path).
+- **Sessions**: `ognivo: Open a Session…`, or the session's title at the top of the panel,
+  lists them, this workspace's first. A turn goes on when VS Code closes; the core quits a
+  minute after its last client and turn. The core names a project and its files by their
+  real paths, and the extension spells them as your folders are: a folder opened through a
+  symbolic link, a junction, a subst or mapped drive or an 8.3 name finds its own sessions,
+  and the review works there too.
 - **Settings** in the panel (its gear): *Model* — the server, the model behind a router,
   the profile, reasoning, context, mode; *MCP* — Exa's web search ready to switch on with
   your key, your servers, the project's and Claude Code's, each on or off, added or
   removed, with the session's servers as they run and their sign-ins; *Instructions* —
   your own instructions for every project (`~/.ognivo/AGENTS.md`), the project's files,
   and the exact system prompt of the session on show.
+
+| Keys | What they do |
+|---|---|
+| `Ctrl+Alt+O` | focus the agent; in an editor with a selection, add the selection to the message |
+| `Ctrl+I` | in a file with a selection: ask what to do with it (it takes the key from VS Code's inline chat there) |
+| `Enter`, `Ctrl+Enter` | in the message while a turn runs: queue it, give it to the turn |
+| `Shift+Tab`, `Esc` | in the message: the next mode, stop the turn |
+| `Ctrl+Alt+Enter`, `Ctrl+Alt+Backspace` | keep, undo the agent's change at the cursor |
+| `Alt+F5`, `Shift+Alt+F5` | the agent's next, previous change, through all its files (in place of VS Code's own next change there) |
+
+`ognivo: Add the File to the Message` is in the editor's and the Explorer's menus, and
+`ognivo: Edit the Selection…` in the editor's. The file and the selection are named for the
+session the panel shows: relative to its project, or by the path on disk when the session
+works in another one. `ognivo: Keep the Change`, `Undo the
+Change`, `Keep the File's Changes`, `Undo the File's Changes`, `Go to the Next Change` and
+`Go to the Previous Change` are in the Command Palette where they apply; keeping and
+undoing are off while a turn runs.
 
 ```sh
 cargo build -p ognivo-cli         # the extension runs the newest of target/{release,debug}/ognivo, else PATH's
@@ -211,6 +290,9 @@ Git Bash, `/c/Users/me/proj`, is `C:\Users\me\proj` to the tools.
 To build it on Windows, in Git Bash: the same commands as above, and
 `scripts/package-windows.sh` makes the .vsix and the zip.
 
+The extension as it is now, with the review in the editor, its terminals and shell
+integration (Git Bash, PowerShell), has not been run on Windows yet.
+
 ## Layout
 
 | Path | What |
@@ -225,7 +307,7 @@ To build it on Windows, in Git Bash: the same commands as above, and
 | `crates/ognivo-protocol` | what the core and its clients say: the event model and the core's JSON-RPC methods, with their TypeScript |
 | `crates/ognivo-store` | sessions, the event log, the edit journal's contents |
 | `crates/ognivo-evals` | evaluation: T0 (recorded completions replayed, failure and injection corpora, the prompt-cache check) and T2-mini (scenarios on fixture projects against a live server) |
-| `apps/vscode` | the VS Code extension: its code in VS Code (the core's connections, the Changes view, the pickers and dialogs) and the agent's page in its webview (React 19) |
+| `apps/vscode` | the VS Code extension: its code in VS Code (the core's connections, the review in the editor, the status bar, the terminals, the pickers and dialogs) and the agent's page in its webview (React 19) |
 | `profiles/` | per-model profiles (TOML), checked templates and their goldens |
 | `scripts/` | `check.sh`, `night.sh`, the packages (`package.sh`, `package-windows.sh`), the pinned llama.cpp build, benchmarks, server probes |
 | `docs/` | the architecture (Russian for now), M0 measurements, research |
@@ -238,9 +320,11 @@ recordings are (they stay on the machine that made them). CI runs it on every pu
 Linux and on Windows, and the extension end to end on both.
 
 `npm run watch -w apps/vscode` builds the extension again on each change; reload the
-development window to take it. `npm run e2e -w apps/vscode` runs a session on a real core
-against a fake llama-server in a real VS Code, which it downloads once into
-`apps/vscode/.vscode-test` (`OGNIVO_VSCODE` names the version); the screen must be on.
+development window to take it. `npm run e2e -w apps/vscode` runs eleven scenarios on a
+real core against a fake llama-server in a real VS Code, which it downloads once into
+`apps/vscode/.vscode-test` (`OGNIVO_VSCODE` names the version); the screen must be on. A
+failed test leaves its window picture, trace and logs in `apps/vscode/test-results/`, and
+`E2E_TRACE=1` prints the harness's steps.
 `scripts/night.sh` runs T2-mini for each model against a live server.
 
 ## License

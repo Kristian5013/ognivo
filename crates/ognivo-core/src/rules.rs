@@ -146,6 +146,19 @@ pub struct Places {
     pub claude_dir: Option<PathBuf>,
 }
 
+impl Places {
+    /// The same places with the root canonical, as a file's real path is: a root named
+    /// otherwise (a Windows 8.3 name such as `RUNNER~1`, a path through a link) would seem
+    /// to hold none of the project's files. A root that cannot be resolved stays as given.
+    pub fn canonical(&self) -> Places {
+        Places {
+            root: ognivo_os::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone()),
+            home: self.home.clone(),
+            claude_dir: self.claude_dir.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Lists {

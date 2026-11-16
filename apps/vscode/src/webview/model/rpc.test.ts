@@ -87,10 +87,13 @@ describe("the core's connection", () => {
 describe("the core's threads", () => {
   it("fill from the stream when they start while the client is there", () => {
     const w = wire();
-    const threads = new Threads(new Core(w.port), sync);
+    const core = new Core(w.port);
+    const threads = new Threads(core, sync);
     for (const e of stream) w.deliver(event(e));
     const s = threads.store(11)!;
     expect(s.info).toMatchObject({ id: "11", project: "/home/user/proj", profile: "gpt-oss-20b" });
+    // where its view asks what waits for a review and an answer
+    expect(s.source).toEqual({ core, thread: 11 });
     expect(s.row(0)).toMatchObject({ kind: "user" });
     expect(s.row(s.length - 1)).toMatchObject({ kind: "end", end: "answer" });
     expect(threads.running(11)).toBe(false);

@@ -150,6 +150,17 @@ export function diffsOf(item: ToolItem): FileDiff[] {
   }
 }
 
+/** The lines hunks put in and took out, all told: a changed file's `+15 −2`. */
+export function hunkLines(hunks: readonly { added: readonly string[]; removed: readonly string[] }[]): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const h of hunks) {
+    added += h.added.length;
+    removed += h.removed.length;
+  }
+  return { added, removed };
+}
+
 /** A path's file name, and the directory it is in. */
 export function splitPath(path: string): { name: string; dir: string } {
   const p = path.replace(/\\/g, "/");

@@ -136,6 +136,36 @@ pub struct Usage {
     pub predicted_ms: Option<f64>,
 }
 
+/// How far the server got with a prompt, as upstream llama-server says while it reads one
+/// when asked (`return_progress`, since b6399): at the start, then after each batch.
+/// ik_llama.cpp does not say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptProgress {
+    /// The prompt's tokens in all.
+    pub total: u32,
+    /// Of them, those the server took from its KV cache.
+    pub cache: u32,
+    /// Of them, those in the slot so far, the cached ones included: it starts at `cache`,
+    /// so the share read is `(processed - cache) / (total - cache)`.
+    pub processed: u32,
+    /// Milliseconds the server spent on it so far.
+    pub time_ms: Option<u64>,
+}
+
+impl PromptProgress {
+    /// The `prompt_progress` of a stream payload, when it has all its counts.
+    pub(crate) fn of(v: &Value) -> Option<Self> {
+        let p = v.get("prompt_progress")?;
+        let n = |k: &str| p[k].as_u64().and_then(|n| u32::try_from(n).ok());
+        Some(Self {
+            total: n("total")?,
+            cache: n("cache")?,
+            processed: n("processed")?,
+            time_ms: p["time_ms"].as_u64(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum TokenEvent {
@@ -143,6 +173,8 @@ pub enum TokenEvent {
     /// while UTF-8 is incomplete; on class-A servers the ids are complete (the stop
     /// token's id included), on class-B servers some may be missing.
     Tokens { ids: Vec<TokenId>, text: String },
+    /// How far the server read the prompt, before the generation's first id.
+    Progress(PromptProgress),
     /// End of generation. Always the last event of a successful stream.
     Done { stop: Stop, usage: Usage },
 }
@@ -264,6 +296,10 @@ pub(crate) fn completion_body(req: &CompletionRequest) -> Value {
         "ignore_eos": false,
         // always sent: an empty list also clears biases inherited from the server (--ignore-eos)
         "logit_bias": req.banned.iter().map(|id| json!([id, false])).collect::<Vec<_>>(),
+        // how far the prompt is read, and the server's counts with each token, for the user
+        // who waits on the step; a server that has neither ignores them
+        "return_progress": true,
+        "timings_per_token": true,
     });
     if let Some(seed) = s.seed {
         body["seed"] = json!(seed);
@@ -307,17 +343,23 @@ fn token_events(v: &Value) -> Result<Vec<TokenEvent>, EngineError> {
         return Err(EngineError::Status { status, body });
     }
     let mut out = Vec::new();
-    let ids: Vec<TokenId> = v["tokens"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|t| t.as_u64().and_then(|n| u32::try_from(n).ok()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let text = v["content"].as_str().unwrap_or_default().to_owned();
-    if !ids.is_empty() || !text.is_empty() {
-        out.push(TokenEvent::Tokens { ids, text });
+    if v.get("prompt_progress").is_some() {
+        // no ids of the generation come with it: upstream sends the id 0 of a token it never
+        // sampled, which read as one would put a token in front of the model's output
+        out.extend(PromptProgress::of(v).map(TokenEvent::Progress));
+    } else {
+        let ids: Vec<TokenId> = v["tokens"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_u64().and_then(|n| u32::try_from(n).ok()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let text = v["content"].as_str().unwrap_or_default().to_owned();
+        if !ids.is_empty() || !text.is_empty() {
+            out.push(TokenEvent::Tokens { ids, text });
+        }
     }
     if v["stop"].as_bool() == Some(true) {
         let flag = |k: &str| v[k].as_bool() == Some(true);
@@ -396,6 +438,38 @@ mod tests {
         assert_eq!(token_events(&v).unwrap(), vec![done(Stop::ContextFull, 3)]);
     }
 
+    /// Upstream llama-server with `return_progress` (b6399 on), as its `/completion` stream
+    /// says how far it read the prompt: a payload with the id 0 of a token it never sampled.
+    #[test]
+    fn a_payload_of_the_prompts_progress_has_no_ids() {
+        let v = json!({"index": 0, "content": "", "tokens": [0], "stop": false, "id_slot": 0,
+            "tokens_predicted": 0, "tokens_evaluated": 12400,
+            "prompt_progress": {"total": 12400, "cache": 4000, "processed": 9300, "time_ms": 812}});
+        assert_eq!(
+            token_events(&v).unwrap(),
+            vec![TokenEvent::Progress(PromptProgress {
+                total: 12400,
+                cache: 4000,
+                processed: 9300,
+                time_ms: Some(812),
+            })]
+        );
+        // one that does not say it all is not read as ids either
+        let v =
+            json!({"content": "", "tokens": [0], "stop": false, "prompt_progress": {"total": 5}});
+        assert_eq!(token_events(&v).unwrap(), vec![]);
+        // the counts that come with each token change nothing of what it is
+        let v = json!({"content": "hi", "tokens": [1, 2], "stop": false,
+            "timings": {"prompt_n": 8400, "cache_n": 4000, "predicted_n": 2, "predicted_per_second": 31.5}});
+        assert_eq!(
+            token_events(&v).unwrap(),
+            vec![TokenEvent::Tokens {
+                ids: vec![1, 2],
+                text: "hi".into()
+            }]
+        );
+    }
+
     #[test]
     fn error_payload_is_an_error() {
         let v = json!({"error": {"code": 500, "message": "boom"}});
@@ -445,6 +519,11 @@ mod tests {
         assert_eq!(b["preserved_tokens"], json!(["ANSWER:"]));
         assert_eq!(b["logit_bias"], json!([[105, false]]));
         assert_eq!(b["mirostat"], json!(0));
+        // the user sees how far the step got
+        assert_eq!(
+            (&b["return_progress"], &b["timings_per_token"]),
+            (&json!(true), &json!(true))
+        );
         let unbiased = CompletionRequest {
             banned: vec![],
             constraint: None,

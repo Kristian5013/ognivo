@@ -15,7 +15,7 @@ use futures::stream::{self, BoxStream, StreamExt};
 use serde_json::{Value, json};
 
 use crate::Family;
-use crate::engine::{EngineError, SamplerSpec, TokenId, Usage};
+use crate::engine::{EngineError, PromptProgress, SamplerSpec, TokenId, Usage};
 use crate::generic::{
     Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, Outcome, ToolCall,
     ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
@@ -65,9 +65,22 @@ pub enum DriverEvent {
         seed: u32,
         reason: String,
     },
+    /// How far the step got as the server says, for display only.
+    Progress(Progress),
     /// The last event of every successful step, a step the repetition guard stopped
     /// included.
     Finished(Box<Finished>),
+}
+
+/// How far a step got ([`DriverEvent::Progress`]), in what the server says.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// How far the server read the prompt, where it says (upstream llama-server).
+    pub prompt: Option<PromptProgress>,
+    /// The tokens the step generated so far: on the Generic path the server's count with
+    /// each token (`timings_per_token`), on the Native path the ids it streamed. `None`:
+    /// no count came with this event.
+    pub generated: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -335,7 +348,7 @@ impl Watch {
                     (channel, l)
                 })
             }
-            ChatEvent::Finish(_) | ChatEvent::Usage(_) => None,
+            ChatEvent::Finish(_) | ChatEvent::Usage(_) | ChatEvent::Progress(_) => None,
         }
     }
 }
@@ -395,6 +408,7 @@ fn steps(
                         Ok(events) => {
                             let mut batch: Batch =
                                 events.iter().filter_map(shown).map(Ok).collect();
+                            batch.extend(progress(&events).map(Ok));
                             match fold(&mut acc, &mut watch, events) {
                                 // returning without `chunks` drops the connection, and
                                 // llama-server cancels the generation
@@ -570,8 +584,22 @@ fn shown(ev: &ChatEvent) -> Option<DriverEvent> {
             name: name.clone(),
             arguments: plain(arguments),
         }),
-        ChatEvent::Finish(_) | ChatEvent::Usage(_) => None,
+        ChatEvent::Finish(_) | ChatEvent::Usage(_) | ChatEvent::Progress(_) => None,
     }
+}
+
+/// What one chunk says of how far the step got: how far the prompt is read, and the
+/// server's count of the tokens so far (with each token, and at the end).
+fn progress(events: &[ChatEvent]) -> Option<DriverEvent> {
+    let mut p = Progress::default();
+    for ev in events {
+        match ev {
+            ChatEvent::Progress(prompt) => p.prompt = Some(*prompt),
+            ChatEvent::Usage(u) => p.generated = u.predicted_n,
+            _ => {}
+        }
+    }
+    (p != Progress::default()).then_some(DriverEvent::Progress(p))
 }
 
 #[cfg(test)]
@@ -743,6 +771,84 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(keys, ["type", "properties", "required"]);
+    }
+
+    /// Upstream llama-server reads a long prompt, then writes, as it streams with
+    /// `return_progress` and `timings_per_token`: the step says how far it got in the
+    /// server's numbers, and the deltas without content of the prompt's chunks show nothing.
+    #[tokio::test]
+    async fn a_step_says_how_far_the_server_got() {
+        let timings =
+            |predicted: u32| json!({"cache_n": 4000, "prompt_n": 8400, "predicted_n": predicted});
+        let progress = |processed: u32| {
+            json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": null}}],
+                "timings": timings(0),
+                "prompt_progress": {"total": 12400, "cache": 4000, "processed": processed, "time_ms": 40}})
+        };
+        let mut chunks = vec![progress(4000), progress(8096), progress(12400)];
+        let deltas = [
+            json!({"role": "assistant", "content": null}),
+            json!({"reasoning_content": "go"}),
+            json!({"content": "Hi"}),
+        ];
+        for (n, delta) in (1..).zip(deltas) {
+            let mut c = chunk(delta, None);
+            c["timings"] = timings(n);
+            chunks.push(c);
+        }
+        chunks.push(chunk(json!({}), Some("stop")));
+        chunks.push(json!({"choices": [], "usage": {"prompt_tokens": 12400, "completion_tokens": 3}, "timings": timings(3)}));
+        let (url, bodies) = fake_server(vec![sse("200 OK", &chunks, true)]).await;
+        let events = run(&driver(&url, Family::Gemma4), request(1)).await;
+        let shown: Vec<String> = events
+            .iter()
+            .map(|e| match e {
+                Ok(DriverEvent::Progress(Progress {
+                    prompt: Some(p),
+                    generated,
+                })) => format!(
+                    "prompt {}/{} of {} cached, {generated:?}",
+                    p.processed, p.total, p.cache
+                ),
+                Ok(DriverEvent::Progress(Progress {
+                    prompt: None,
+                    generated,
+                })) => format!("generated {generated:?}"),
+                Ok(DriverEvent::Reasoning(r)) => format!("reasoning {r}"),
+                Ok(DriverEvent::Text(t)) => format!("text {t}"),
+                Ok(DriverEvent::Finished(_)) => "finished".into(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "prompt 4000/12400 of 4000 cached, Some(0)",
+                "prompt 8096/12400 of 4000 cached, Some(0)",
+                "prompt 12400/12400 of 4000 cached, Some(0)",
+                "generated Some(1)",
+                "reasoning go",
+                "generated Some(2)",
+                "text Hi",
+                "generated Some(3)",
+                "generated Some(3)",
+                "finished",
+            ]
+        );
+        let f = finished(&events);
+        assert_eq!(
+            (f.content.as_str(), f.outcome.clone()),
+            ("Hi", Outcome::Answer)
+        );
+        assert_eq!(
+            (f.usage.prompt_n, f.usage.cache_n, f.usage.predicted_n),
+            (Some(8400), Some(4000), Some(3))
+        );
+        let b = &bodies.lock().unwrap()[0];
+        assert_eq!(
+            (&b["return_progress"], &b["timings_per_token"]),
+            (&json!(true), &json!(true))
+        );
     }
 
     #[tokio::test]

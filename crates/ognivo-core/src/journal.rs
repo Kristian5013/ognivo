@@ -9,6 +9,7 @@ use std::collections::btree_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use ognivo_store::{JournalChanges, JournalFile, JournalRest, SavedJournal};
@@ -80,6 +81,12 @@ pub enum JournalError {
         "{0} also changed after ognivo's edits, by a command or outside ognivo; a revert would lose that"
     )]
     Drifted(String),
+    /// The file's change has no hunk equal to the one given: the file changed since.
+    #[error("{0} changed since its changes were listed: list them again")]
+    Stale(String),
+    /// Only the whole change of the file can be kept or undone, for the reason given.
+    #[error("{0}: {1}; keep or undo the whole file")]
+    WholeFile(String, &'static str),
     #[error("{path}: {source}")]
     Io {
         path: String,
@@ -372,6 +379,88 @@ impl Journal {
         Ok(how)
     }
 
+    /// Keeps one hunk of a file's unreviewed change, as [`Journal::changes`] gives it: what
+    /// the file had before takes the hunk's lines, so its change no longer has them. The
+    /// file stays as it is.
+    pub fn accept_hunk(&mut self, path: &Path, hunk: &Hunk) -> Result<(), JournalError> {
+        let found = self.find(path, hunk)?;
+        let base = found.kept();
+        self.unsaved_files.insert(path.to_owned());
+        if base == found.now.as_bytes() {
+            self.files.remove(path);
+        } else if let Some(e) = self.files.get_mut(path) {
+            e.base = Some(base);
+        }
+        Ok(())
+    }
+
+    /// Undoes one hunk of a file's unreviewed change, as [`Journal::changes`] gives it: the
+    /// file gets back the lines it had there before the agent's edits and keeps the rest as
+    /// it is now.
+    pub fn revert_hunk(&mut self, path: &Path, hunk: &Hunk) -> Result<(), JournalError> {
+        let found = self.find(path, hunk)?;
+        let now = found.undone();
+        let Some(e) = self.files.get_mut(path) else {
+            return Err(JournalError::NotChanged(path.display().to_string()));
+        };
+        files::restore(path, &e.shown, &now)?;
+        // the agent's next write starts from this one, so it is no drift; a drift before
+        // it stays known
+        e.drifted |= found.now.as_bytes() != e.current.as_slice();
+        e.current = now;
+        if e.base.as_deref() == Some(e.current.as_slice()) {
+            self.files.remove(path);
+        }
+        self.unsaved_files.insert(path.to_owned());
+        Ok(())
+    }
+
+    /// The hunk of `path`'s change as it is now that is equal to `hunk`, in all its numbers
+    /// and lines: anything that moved or changed it since the client listed it makes it
+    /// stale. A file the agent created, a file that is gone and one that is not UTF-8 text
+    /// have no hunks to keep or undo apart.
+    fn find(&mut self, path: &Path, hunk: &Hunk) -> Result<Found, JournalError> {
+        self.prune();
+        let e = self
+            .files
+            .get(path)
+            .ok_or_else(|| JournalError::NotChanged(path.display().to_string()))?;
+        let shown = e.shown.display().to_string();
+        let whole = |why| JournalError::WholeFile(shown.clone(), why);
+        let Some(base) = &e.base else {
+            return Err(whole("ognivo created it"));
+        };
+        let now = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Err(whole("it is gone")),
+            Err(source) => {
+                return Err(JournalError::Io {
+                    path: shown.clone(),
+                    source,
+                });
+            }
+        };
+        let (Ok(base), Ok(now)) = (String::from_utf8(base.clone()), String::from_utf8(now)) else {
+            return Err(whole("it is not UTF-8 text"));
+        };
+        let stale = || JournalError::Stale(shown.clone());
+        if !diff::hunks(&base, &now).contains(hunk) {
+            return Err(stale());
+        }
+        // the diff's numbers are from 1; its lines are those of `diff::lines`
+        let old = hunk.old_start - 1..hunk.old_start - 1 + hunk.removed.len();
+        let new = hunk.new_start - 1..hunk.new_start - 1 + hunk.added.len();
+        if old.end > diff::lines(&base).len() || new.end > diff::lines(&now).len() {
+            return Err(stale());
+        }
+        Ok(Found {
+            base,
+            now,
+            old,
+            new,
+        })
+    }
+
     /// Forgets the files that are back to what they were, by a `git checkout` or the
     /// agent's own undo.
     fn prune(&mut self) {
@@ -386,6 +475,39 @@ impl Journal {
     }
 }
 
+/// One hunk of a file's change, as the change is now ([`Journal::find`]): the file's text
+/// before the change and now, and the hunk's lines in each.
+struct Found {
+    base: String,
+    now: String,
+    old: Range<usize>,
+    new: Range<usize>,
+}
+
+impl Found {
+    /// What the file had before, with the hunk's lines as they are now.
+    fn kept(&self) -> Vec<u8> {
+        splice(&self.base, self.old.clone(), &self.now, self.new.clone())
+    }
+
+    /// The file now, with the hunk's lines as they were before.
+    fn undone(&self) -> Vec<u8> {
+        splice(&self.now, self.new.clone(), &self.base, self.old.clone())
+    }
+}
+
+/// `into` with `from`'s lines `take` in place of its own lines `at`: lines with their ends,
+/// as the diff counts them, so every line end and a last line without one stay as they are.
+fn splice(into: &str, at: Range<usize>, from: &str, take: Range<usize>) -> Vec<u8> {
+    let (into, from) = (diff::lines(into), diff::lines(from));
+    into[..at.start]
+        .iter()
+        .chain(&from[take])
+        .chain(&into[at.end..])
+        .flat_map(|line| line.bytes())
+        .collect()
+}
+
 /// The file is as it was before the agent's changes.
 fn settled(path: &Path, e: &Entry) -> bool {
     match fs::read(path) {
@@ -397,6 +519,8 @@ fn settled(path: &Path, e: &Entry) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
+
     use super::*;
 
     /// A project with `a.txt`; `write` changes a file the way the agent's tools do.
@@ -429,6 +553,40 @@ mod tests {
 
         fn read(&self, name: &str) -> Option<String> {
             fs::read_to_string(self.root.join(name)).ok()
+        }
+
+        /// The file as it is before the agent's first edit of it, or any change from
+        /// outside the agent: a command's, the user's.
+        fn put(&self, name: &str, bytes: impl AsRef<[u8]>) {
+            fs::write(self.root.join(name), bytes).unwrap();
+        }
+
+        /// The file's unreviewed hunks as `changes` gives them, none when it has no change.
+        fn hunks(&mut self, name: &str) -> Vec<Hunk> {
+            self.change(name).map(|c| c.hunks).unwrap_or_default()
+        }
+
+        fn change(&mut self, name: &str) -> Option<FileChange> {
+            self.journal.changes().into_iter().find(|c| c.shown == name)
+        }
+
+        fn keep(&mut self, name: &str, hunk: &Hunk) -> Result<(), JournalError> {
+            let path = self.root.join(name);
+            self.journal.accept_hunk(&path, hunk)
+        }
+
+        fn undo(&mut self, name: &str, hunk: &Hunk) -> Result<(), JournalError> {
+            let path = self.root.join(name);
+            self.journal.revert_hunk(&path, hunk)
+        }
+    }
+
+    fn hunk(old_start: usize, new_start: usize, removed: &[&str], added: &[&str]) -> Hunk {
+        Hunk {
+            old_start,
+            new_start,
+            removed: removed.iter().map(|s| (*s).to_owned()).collect(),
+            added: added.iter().map(|s| (*s).to_owned()).collect(),
         }
     }
 
@@ -615,5 +773,224 @@ mod tests {
         assert!(after.rest.unwrap().created_dirs.is_empty());
         back.inherit();
         assert!(back.unsaved().rest.unwrap().inherited);
+    }
+
+    #[test]
+    fn a_kept_hunk_leaves_the_file_and_the_other_hunks_as_they_are() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\ntwo\nthree\nfour\nfive\n");
+        p.write("a.txt", "ONE\ntwo\nthree\nfour\nFIVE\n");
+        let first = hunk(1, 1, &["one"], &["ONE"]);
+        let last = hunk(5, 5, &["five"], &["FIVE"]);
+        assert_eq!(p.hunks("a.txt"), [first.clone(), last.clone()]);
+        p.journal.unsaved();
+        p.keep("a.txt", &first).unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "ONE\ntwo\nthree\nfour\nFIVE\n");
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&last));
+        let a = p.root.join("a.txt");
+        assert_eq!(
+            p.journal.base(&a),
+            Some(Some(&b"ONE\ntwo\nthree\nfour\nfive\n"[..]))
+        );
+        assert!(!p.change("a.txt").unwrap().drifted);
+        // the store gets the base that took the hunk
+        let saved = p.journal.unsaved();
+        assert_eq!(
+            saved.put[0].base.as_deref(),
+            Some(&b"ONE\ntwo\nthree\nfour\nfive\n"[..])
+        );
+        // keeping the last hunk too leaves nothing to review, and the file as it is
+        p.keep("a.txt", &last).unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "ONE\ntwo\nthree\nfour\nFIVE\n");
+        assert!(p.journal.is_clean());
+        assert_eq!(p.journal.unsaved().removed, [a]);
+    }
+
+    #[test]
+    fn an_undone_hunk_leaves_the_other_hunks_and_the_agent_goes_on_from_it() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\ntwo\nthree\nfour\nfive\n");
+        p.write("a.txt", "ONE\ntwo\nthree\nfour\nFIVE\n");
+        let first = hunk(1, 1, &["one"], &["ONE"]);
+        let last = hunk(5, 5, &["five"], &["FIVE"]);
+        p.undo("a.txt", &first).unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo\nthree\nfour\nFIVE\n");
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&last));
+        // ognivo's own write: neither it nor the agent's next edit is a drift
+        assert!(!p.change("a.txt").unwrap().drifted);
+        p.write("a.txt", "one\ntwo\nthree\nfour\nFIVE\nsix\n");
+        assert!(!p.change("a.txt").unwrap().drifted);
+        assert_eq!(p.hunks("a.txt"), [hunk(5, 5, &["five"], &["FIVE", "six"])]);
+        // undoing the last of it leaves the file as it was
+        p.undo("a.txt", &hunk(5, 5, &["five"], &["FIVE", "six"]))
+            .unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo\nthree\nfour\nfive\n");
+        assert!(p.journal.is_clean());
+    }
+
+    #[test]
+    fn hunks_keep_their_line_ends_byte_for_byte() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\r\ntwo\r\nthree\r\n");
+        p.write("a.txt", "one\r\nTWO\r\nthree\r\nfour\r\n");
+        let two = hunk(2, 2, &["two"], &["TWO"]);
+        let four = hunk(4, 4, &[], &["four"]);
+        assert_eq!(p.hunks("a.txt"), [two.clone(), four.clone()]);
+        p.undo("a.txt", &two).unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "one\r\ntwo\r\nthree\r\nfour\r\n");
+        p.keep("a.txt", &four).unwrap();
+        assert!(p.journal.is_clean());
+        // a line whose end alone changed: its text is the same on both sides
+        p.put("b.txt", "a\r\nb\r\nc\rd\n");
+        p.write("b.txt", "a\r\nb\nc\rd\n");
+        let end = hunk(2, 2, &["b"], &["b"]);
+        assert_eq!(p.hunks("b.txt"), slice::from_ref(&end));
+        p.undo("b.txt", &end).unwrap();
+        assert!(p.change("b.txt").is_none());
+        assert_eq!(fs::read(p.root.join("b.txt")).unwrap(), b"a\r\nb\r\nc\rd\n");
+    }
+
+    #[test]
+    fn a_last_line_without_its_end_stays_without_it() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\ntwo");
+        p.write("a.txt", "one\ntwo\nthree");
+        let grown = hunk(2, 2, &["two"], &["two", "three"]);
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&grown));
+        p.undo("a.txt", &grown).unwrap();
+        assert!(p.change("a.txt").is_none());
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo");
+        // the agent took the last line's end away: kept, it stays away
+        p.put("b.txt", "one\ntwo\n");
+        p.write("b.txt", "one\ntwo");
+        let cut = hunk(2, 2, &["two"], &["two"]);
+        assert_eq!(p.hunks("b.txt"), slice::from_ref(&cut));
+        p.keep("b.txt", &cut).unwrap();
+        assert!(p.journal.is_clean());
+        assert_eq!(p.read("b.txt").unwrap(), "one\ntwo");
+    }
+
+    #[test]
+    fn a_line_added_at_the_end_and_a_line_taken_out_are_hunks_of_their_own() {
+        let mut p = Project::new();
+        for name in ["a.txt", "b.txt"] {
+            p.put(name, "a\nb\nc\nd\n");
+            p.write(name, "a\nc\nd\ne\n");
+        }
+        // a pure deletion, and an insertion past the last line
+        let out = hunk(2, 2, &["b"], &[]);
+        let end = hunk(5, 4, &[], &["e"]);
+        assert_eq!(p.hunks("a.txt"), [out.clone(), end.clone()]);
+        // kept at the end, then the deletion undone
+        p.keep("a.txt", &end).unwrap();
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&out));
+        p.undo("a.txt", &out).unwrap();
+        assert!(p.change("a.txt").is_none());
+        assert_eq!(p.read("a.txt").unwrap(), "a\nb\nc\nd\ne\n");
+        // undone at the end, then the deletion kept
+        p.undo("b.txt", &end).unwrap();
+        assert_eq!(p.read("b.txt").unwrap(), "a\nc\nd\n");
+        assert_eq!(p.hunks("b.txt"), slice::from_ref(&out));
+        p.keep("b.txt", &out).unwrap();
+        assert!(p.journal.is_clean());
+        assert_eq!(p.read("b.txt").unwrap(), "a\nc\nd\n");
+    }
+
+    #[test]
+    fn a_hunk_the_file_no_longer_has_is_stale() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\ntwo\nthree\n");
+        p.write("a.txt", "ONE\ntwo\nthree\n");
+        let listed = hunk(1, 1, &["one"], &["ONE"]);
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&listed));
+        // the user changed the hunk's line since
+        p.put("a.txt", "ONE!\ntwo\nthree\n");
+        for result in [p.keep("a.txt", &listed), p.undo("a.txt", &listed)] {
+            assert!(matches!(result, Err(JournalError::Stale(_))), "{result:?}");
+        }
+        assert_eq!(p.read("a.txt").unwrap(), "ONE!\ntwo\nthree\n");
+        assert_eq!(p.hunks("a.txt"), [hunk(1, 1, &["one"], &["ONE!"])]);
+        // a change elsewhere that does not move the hunk leaves it as it is
+        p.put("a.txt", "ONE!\ntwo\nTHREE\n");
+        p.keep("a.txt", &hunk(1, 1, &["one"], &["ONE!"])).unwrap();
+        assert_eq!(p.hunks("a.txt"), [hunk(3, 3, &["three"], &["THREE"])]);
+        // made up, or of a file without a change
+        let wrong = hunk(2, 2, &["three"], &["THREE"]);
+        assert!(matches!(
+            p.keep("a.txt", &wrong),
+            Err(JournalError::Stale(_))
+        ));
+        assert!(matches!(
+            p.keep("c.txt", &wrong),
+            Err(JournalError::NotChanged(_))
+        ));
+    }
+
+    #[test]
+    fn a_drifted_file_keeps_and_undoes_hunks_and_stays_drifted() {
+        let mut p = Project::new();
+        p.put("a.txt", "one\ntwo\nthree\nfour\n");
+        p.write("a.txt", "ONE\ntwo\nthree\nfour\n");
+        // a formatter changes another line after the agent's edit
+        p.put("a.txt", "ONE\ntwo\nthree\nFOUR\n");
+        let c = p.change("a.txt").unwrap();
+        assert!(c.drifted);
+        let ours = hunk(1, 1, &["one"], &["ONE"]);
+        let theirs = hunk(4, 4, &["four"], &["FOUR"]);
+        assert_eq!(c.hunks, [ours.clone(), theirs.clone()]);
+        // undone, the agent's hunk goes and the other change stays
+        p.undo("a.txt", &ours).unwrap();
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo\nthree\nFOUR\n");
+        assert_eq!(p.hunks("a.txt"), slice::from_ref(&theirs));
+        // a whole revert would still lose the other change
+        assert!(p.change("a.txt").unwrap().drifted);
+        let a = p.root.join("a.txt");
+        assert!(matches!(
+            p.journal.revert(&a, false),
+            Err(JournalError::Drifted(_))
+        ));
+        // kept, the other change is reviewed too
+        p.keep("a.txt", &theirs).unwrap();
+        assert!(p.journal.is_clean());
+        assert_eq!(p.read("a.txt").unwrap(), "one\ntwo\nthree\nFOUR\n");
+    }
+
+    #[test]
+    fn a_created_deleted_or_binary_file_is_kept_or_undone_whole() {
+        let mut p = Project::new();
+        p.write("b.txt", "b\n");
+        let created = hunk(1, 1, &[], &["b"]);
+        assert_eq!(p.hunks("b.txt"), slice::from_ref(&created));
+        let refused = p.keep("b.txt", &created).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "b.txt: ognivo created it; keep or undo the whole file"
+        );
+        assert!(matches!(
+            p.undo("b.txt", &created),
+            Err(JournalError::WholeFile(..))
+        ));
+        assert_eq!(p.read("b.txt").as_deref(), Some("b\n"));
+        // deleted after the agent's edit, by a command
+        p.write("a.txt", "one\nTWO\n");
+        fs::remove_file(p.root.join("a.txt")).unwrap();
+        let c = p.change("a.txt").unwrap();
+        assert!(c.deleted);
+        let gone = c.hunks[0].clone();
+        for result in [p.keep("a.txt", &gone), p.undo("a.txt", &gone)] {
+            assert!(
+                matches!(result, Err(JournalError::WholeFile(_, "it is gone"))),
+                "{result:?}"
+            );
+        }
+        // not UTF-8: its lines are not the hunks' lines
+        p.put("c.txt", b"caf\xe9\n");
+        p.write("c.txt", "cafe\n");
+        let latin = p.hunks("c.txt")[0].clone();
+        assert!(matches!(
+            p.keep("c.txt", &latin),
+            Err(JournalError::WholeFile(_, "it is not UTF-8 text"))
+        ));
+        assert_eq!(p.journal.changes().len(), 3);
     }
 }

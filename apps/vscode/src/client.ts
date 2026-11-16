@@ -1,5 +1,6 @@
 // The extension's own client of the core (docs/architecture.md §3), beside its pages'
-// connections: the Changes view, the sessions' picker, the trust dialogs and the notices
+// connections: the review of the agent's changes in the editor, the status bar, the
+// terminal of the agent's commands, the sessions' picker, the trust dialogs and the notices
 // of questions work through it. The core asks every client and takes the first answer, so
 // a question the extension answers natively is withdrawn from the pages, and the other way
 // round.
@@ -9,6 +10,7 @@
 // (`exe`), asks that core to quit while no turn runs (`core/quit`), and starts its own; a
 // core whose turn runs stays until the next connection finds it idle.
 
+import { realpathSync } from "node:fs";
 import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 
@@ -20,6 +22,16 @@ import { samePath } from "./shared/text.ts";
 const CLIENT = "ognivo-vscode 0.0.1";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** `path` with its links resolved, as the core names its own program (on Linux the kernel
+ * gives the real path): a linked `~/.cache` is still this build. As it is where it cannot be. */
+function real(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return path;
+  }
+}
 
 /** The client, connected on first use and again after the core went away (its --idle, an
  * update). `listen` hears each new connection's client before its first call. */
@@ -86,7 +98,7 @@ export class Connection {
       ({ core, socket, exe } = await this.open());
     };
     // another build than the one this extension starts: replaced while no turn runs
-    if (isAbsolute(bin) && exe && samePath(exe) !== samePath(bin)) {
+    if (isAbsolute(bin) && exe && samePath(exe) !== samePath(bin) && samePath(real(exe)) !== samePath(real(bin))) {
       try {
         await core.call("core/quit", {});
         await gone();

@@ -95,6 +95,11 @@ pub enum EventKind {
         answer: Option<String>,
         /// What the facts of the turn say of the answer, e.g. `NOT verified: …`.
         verification: Option<String>,
+        /// What the user wrote while it ran (`turn/steer`) and the model never got, because
+        /// the turn ended first, in the order it came: a client sends it as the next turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[ts(as = "Option<_>", optional)]
+        undelivered: Vec<String>,
     },
     /// The user switched the thread's mode: it holds from its agent's next call on, its
     /// subagents' too.
@@ -107,6 +112,31 @@ pub enum EventKind {
     CallDraft {
         draft: CallDraft,
     },
+    /// How far the generation under way got, for display while the user waits: the prompt
+    /// read, the tokens written, their speed. Not kept, as deltas are not: the
+    /// generation's own event has the numbers once it ends.
+    Progress {
+        progress: Progress,
+    },
+    /// A client kept or undid unreviewed changes of the thread, of whole files or of hunks
+    /// (`changes/accept`, `changes/revert`, `changes/accept_hunk`, `changes/revert_hunk`):
+    /// clients that show them list them again. Not kept.
+    ChangesUpdated,
+}
+
+impl EventKind {
+    /// Whether the event is kept: in the store's stream, in what `thread/read` gives. What
+    /// streams is kept in the items it makes up, and what only tells the clients there now
+    /// how things stand is not kept at all.
+    pub fn kept(&self) -> bool {
+        !matches!(
+            self,
+            Self::ItemDelta { .. }
+                | Self::CallDraft { .. }
+                | Self::Progress { .. }
+                | Self::ChangesUpdated
+        )
+    }
 }
 
 /// How far a thread's agent goes without the user (docs/architecture.md §8).
@@ -142,6 +172,44 @@ pub struct CallDraft {
     /// `new`, `patch`, `command`, ...); `None` with the first event of a call.
     pub field: Option<String>,
     pub text: String,
+}
+
+/// How far a generation got ([`EventKind::Progress`]): the server's numbers where it gives
+/// them, ognivo's count of what streamed where it does not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+pub struct Progress {
+    /// The generation it is about, by its number in the thread, as `call_draft`'s.
+    pub generation: u32,
+    pub phase: ProgressPhase,
+    /// The prompt's tokens in all; `None` when the server does not say.
+    pub prompt_total: Option<u32>,
+    /// Of `prompt_total`, those the server took from its KV cache; `None` when it does not
+    /// say.
+    pub prompt_cached: Option<u32>,
+    /// Of `prompt_total`, those the server has read so far; `None` when it does not say.
+    pub prompt_done: Option<u32>,
+    /// The tokens the generation wrote so far, reasoning and calls included.
+    pub generated: u32,
+    /// Milliseconds since the request went out.
+    #[ts(type = "number")]
+    pub elapsed_ms: u64,
+    /// Tokens a second the generation writes, so far; `None` before its second token.
+    pub tokens_per_second: Option<f64>,
+}
+
+/// What a generation does now ([`Progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressPhase {
+    /// The request went out and the server has not begun on it: it is busy, or it loads
+    /// the model.
+    Waiting,
+    /// The server reads the prompt.
+    Prompt,
+    /// The model reasons.
+    Reasoning,
+    /// The model writes its answer or its calls.
+    Writing,
 }
 
 /// An image the model sees (docs/architecture.md §5.8): of the user's message, or the image
@@ -262,6 +330,9 @@ pub enum ItemBody {
         /// The files it changed.
         changed: Vec<String>,
     },
+    /// What the user wrote while the turn ran (`turn/steer`), where the model got it: with
+    /// its first request after it came. The user's, so of no generation.
+    Steer { text: String },
 }
 
 /// A call as ognivo runs it, by Claude Code's name for the tool, with ognivo's names for
@@ -474,5 +545,100 @@ mod tests {
             })
         );
         assert_eq!(serde_json::from_value::<Event>(json).unwrap(), ev);
+    }
+
+    #[test]
+    fn progress_and_a_journal_change_are_for_the_clients_there_only() {
+        let progress = Event {
+            seq: 8,
+            thread: ThreadId(3),
+            kind: EventKind::Progress {
+                progress: Progress {
+                    generation: 2,
+                    phase: ProgressPhase::Prompt,
+                    prompt_total: Some(12_400),
+                    prompt_cached: Some(9_000),
+                    prompt_done: Some(7_812),
+                    generated: 0,
+                    elapsed_ms: 1_250,
+                    tokens_per_second: None,
+                },
+            },
+        };
+        let json = serde_json::to_value(&progress).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "seq": 8, "thread": 3, "event": "progress",
+                "progress": {
+                    "generation": 2, "phase": "prompt", "prompt_total": 12_400,
+                    "prompt_cached": 9_000, "prompt_done": 7_812, "generated": 0,
+                    "elapsed_ms": 1_250, "tokens_per_second": null
+                }
+            })
+        );
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), progress);
+        let updated = Event {
+            seq: 9,
+            thread: ThreadId(3),
+            kind: EventKind::ChangesUpdated,
+        };
+        let json = serde_json::to_value(&updated).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"seq": 9, "thread": 3, "event": "changes_updated"})
+        );
+        assert_eq!(serde_json::from_value::<Event>(json).unwrap(), updated);
+        assert!(!progress.kind.kept() && !updated.kind.kept());
+        let delta = EventKind::ItemDelta {
+            item: ItemId(2),
+            delta: Delta::Text { text: "hi".into() },
+        };
+        assert!(!delta.kept());
+        assert!(EventKind::ModeChanged { mode: Mode::Plan }.kept());
+    }
+
+    #[test]
+    fn a_turn_ends_with_what_the_model_never_got_and_reads_without_it() {
+        // as the core kept turns before it could be steered
+        let kept = serde_json::json!({
+            "seq": 4, "thread": 1, "event": "turn_completed", "turn": 1, "end": "answer",
+            "why": null, "answer": "Done.", "verification": null
+        });
+        let e = serde_json::from_value::<Event>(kept.clone()).unwrap();
+        let EventKind::TurnCompleted { undelivered, .. } = &e.kind else {
+            panic!("{e:?}")
+        };
+        assert!(undelivered.is_empty());
+        assert_eq!(serde_json::to_value(&e).unwrap(), kept, "none is no field");
+        let steered = EventKind::TurnCompleted {
+            turn: TurnId(2),
+            end: TurnEnd::Answer,
+            why: None,
+            answer: Some("Done.".into()),
+            verification: None,
+            undelivered: vec!["and the README".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&steered).unwrap()["undelivered"],
+            serde_json::json!(["and the README"])
+        );
+        // where the model got what the user wrote while it worked
+        let item = Item {
+            id: ItemId(5),
+            turn: TurnId(2),
+            generation: None,
+            body: ItemBody::Steer {
+                text: "and the README".into(),
+            },
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": 5, "turn": 2, "generation": null, "kind": "steer", "text": "and the README"
+            })
+        );
+        assert_eq!(serde_json::from_value::<Item>(json).unwrap(), item);
     }
 }

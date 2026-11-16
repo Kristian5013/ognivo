@@ -12,7 +12,7 @@ import * as vscode from "vscode";
 
 import type { InstructionFile } from "./shared/messages.ts";
 import { within } from "./shared/text.ts";
-import { folders } from "./view.ts";
+import { folders, local } from "./view.ts";
 
 /** The project's files, in the order the core reads them. */
 const PROJECT = ["AGENTS.md", "CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"];
@@ -44,19 +44,24 @@ function described(scope: InstructionFile["scope"], path: string, shown: string,
   };
 }
 
+/** The files of instructions for `project`, which the page names as the core does (by its
+ * real path): the project's as the workspace's folders spell them. */
 export function list(project: string): InstructionFile[] {
   const files = [
     described("user", userFile(), "~/.ognivo/AGENTS.md", true),
     described("claude", claudeFile(), "~/.claude/CLAUDE.md", false),
   ];
-  if (project) for (const name of PROJECT) files.push(described("project", join(project, name), name, false));
+  const root = project ? local(project) : "";
+  if (root) for (const name of PROJECT) files.push(described("project", join(root, name), name, false));
   return files;
 }
 
-/** A path the page may write: the user's own file, or a project file of the workspace. */
+/** A path the page may write: the user's own file, or a project file of the workspace, in
+ * the folder's spelling or the core's. */
 function writable(path: string): boolean {
   if (path === userFile()) return true;
-  return folders().some((f) => PROJECT.some((name) => join(f, name) === path) && within(path, f));
+  const file = local(path);
+  return folders().some((f) => PROJECT.some((name) => join(f, name) === file) && within(file, f));
 }
 
 export function save(path: string, text: string): void {
@@ -69,5 +74,5 @@ export function save(path: string, text: string): void {
 export async function open(path: string): Promise<void> {
   if (!writable(path) && path !== claudeFile()) throw new Error(`${path} is not a file of instructions`);
   if (!existsSync(path)) save(path, "");
-  await vscode.window.showTextDocument(vscode.Uri.file(path), { preview: false });
+  await vscode.window.showTextDocument(vscode.Uri.file(local(path)), { preview: false });
 }

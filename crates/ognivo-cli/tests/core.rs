@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{HANG, answer_stream, call_stream, fake_router, fake_seeing_server, fake_server};
+use common::{
+    HANG, answer_stream, call_stream, fake_router, fake_seeing_server, fake_server,
+    fake_switched_server, no_projector, progress_call_stream,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines, ReadHalf, WriteHalf};
 
@@ -146,6 +149,14 @@ impl Client {
 
 fn event(m: &Value, name: &str) -> bool {
     m["method"] == "event" && m["params"]["event"] == name
+}
+
+/// The events the store does not keep, as `EventKind::kept` says: what streams, and what
+/// only tells the clients there how things stand.
+const NOT_KEPT: [&str; 4] = ["item_delta", "call_draft", "progress", "changes_updated"];
+
+fn is_kept(e: &Value) -> bool {
+    !NOT_KEPT.iter().any(|k| e["event"] == *k)
 }
 
 fn server(url: &str) -> Value {
@@ -302,11 +313,11 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     let kinds: Vec<(String, String)> = a
         .events
         .iter()
+        .filter(|e| is_kept(e) && e["event"] != "generation")
         .map(|e| {
             let kind = e["item"]["kind"].as_str().unwrap_or_default();
             (e["event"].as_str().unwrap().to_owned(), kind.to_owned())
         })
-        .filter(|(e, _)| e != "item_delta" && e != "generation" && e != "call_draft")
         .collect();
     let want = [
         ("thread_started", ""),
@@ -396,7 +407,15 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
         json!({"accepted": ["1 command with side effects", "what the project had before this session"], "unreviewed": false})
     );
 
-    // another client reads what it missed: every event but the deltas, as they were sent
+    // each review was told to the clients there, and is not kept
+    let updates = a
+        .events
+        .iter()
+        .filter(|e| e["event"] == "changes_updated")
+        .count();
+    assert_eq!(updates, 2, "a revert and an accept, not the refused revert");
+
+    // another client reads what it missed: every event that is kept, as they were sent
     let mut b = Client::connect(&socket).await;
     let init = b
         .ok("initialize", json!({"client": "test", "protocol": 1}))
@@ -406,11 +425,7 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     let read = b
         .ok("thread/read", json!({"thread": thread, "after": null}))
         .await;
-    let kept: Vec<&Value> = a
-        .events
-        .iter()
-        .filter(|e| e["event"] != "item_delta" && e["event"] != "call_draft")
-        .collect();
+    let kept: Vec<&Value> = a.events.iter().filter(|e| is_kept(e)).collect();
     let read: Vec<&Value> = read["events"].as_array().unwrap().iter().collect();
     assert_eq!(read, kept);
     let after = b
@@ -552,6 +567,366 @@ async fn a_client_runs_a_thread_through_the_core_and_another_reads_it() {
     };
     assert!(status.success(), "{status:?}");
     assert!(!socket.exists());
+}
+
+/// The changes of a thread as `changes/list` gives them: the file's path and its hunks.
+fn hunks_of(changes: &Value) -> Vec<(String, Value)> {
+    changes["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| (f["path"].as_str().unwrap().to_owned(), f["hunks"].clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn hunks_are_kept_and_undone_and_a_running_turn_shows_its_changes() {
+    let edit = |id: &str, old: &str, new: &str| {
+        let args = json!({"path": "notes.txt", "old_string": old, "new_string": new});
+        call_stream(id, "edit", &args.to_string())
+    };
+    let (url, bodies) = fake_server(vec![
+        edit("e1", "one", "ONE"),
+        edit("e2", "five", "FIVE"),
+        answer_stream("Edited."),
+        // the second turn edits, then waits for the server until it is stopped
+        edit("e3", "two", "TWO"),
+        HANG.to_owned(),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let notes = root.join("notes.txt");
+    std::fs::write(&notes, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    let socket = socket(dir.path());
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    // a second client, which hears of what the first does
+    let mut b = Client::connect(&socket).await;
+    b.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    a.ok("turn/start", json!({"thread": thread, "text": "shout"}))
+        .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    assert_eq!(got.last().unwrap()["params"]["answer"], "Edited.");
+    let first = json!({"old_start": 1, "new_start": 1, "removed": ["one"], "added": ["ONE"]});
+    let last = json!({"old_start": 5, "new_start": 5, "removed": ["five"], "added": ["FIVE"]});
+    let listed = a.ok("changes/list", json!({"thread": thread})).await;
+    assert_eq!(
+        hunks_of(&listed),
+        [("notes.txt".to_owned(), json!([first, last]))]
+    );
+    let updates = |c: &Client| {
+        c.events
+            .iter()
+            .filter(|e| e["event"] == "changes_updated")
+            .count()
+    };
+
+    // kept: the file stays, the answer is the changes after it, and every client hears
+    let hunk = |hunk: &Value| json!({"thread": thread, "path": "notes.txt", "hunk": hunk});
+    let after = a.ok("changes/accept_hunk", hunk(&first)).await;
+    assert_eq!(hunks_of(&after), [("notes.txt".to_owned(), json!([last]))]);
+    assert_eq!(after["inherited"], listed["inherited"]);
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "ONE\ntwo\nthree\nfour\nFIVE\n"
+    );
+    assert_eq!(updates(&a), 1);
+    let heard = b.until(|m| event(m, "changes_updated")).await;
+    assert_eq!(heard.last().unwrap()["params"]["thread"], thread);
+    // the same hunk again: the change has it no more, and nothing changed
+    let stale = a
+        .call("changes/accept_hunk", hunk(&first))
+        .await
+        .unwrap_err();
+    assert_eq!(stale["code"], -32007, "{stale}");
+    let none = a
+        .call(
+            "changes/revert_hunk",
+            json!({"thread": thread, "path": "other.txt", "hunk": first}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(none["code"], -32004, "{none}");
+    assert_eq!(updates(&a), 1, "a refused one changes nothing");
+
+    // undone: the file loses it, and nothing of the change is left
+    let after = a.ok("changes/revert_hunk", hunk(&last)).await;
+    assert_eq!(after["files"], json!([]));
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "ONE\ntwo\nthree\nfour\nfive\n"
+    );
+    assert_eq!(updates(&a), 2);
+    b.until(|m| event(m, "changes_updated")).await;
+
+    // during a turn, the changes can be looked at but not changed
+    a.ok("turn/start", json!({"thread": thread, "text": "and two"}))
+        .await;
+    let began = Instant::now();
+    while bodies.lock().unwrap().len() < 5 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let two = json!({"old_start": 2, "new_start": 2, "removed": ["two"], "added": ["TWO"]});
+    let live = a.ok("changes/list", json!({"thread": thread})).await;
+    assert_eq!(hunks_of(&live), [("notes.txt".to_owned(), json!([two]))]);
+    let base = a
+        .ok(
+            "changes/base",
+            json!({"thread": thread, "path": "notes.txt"}),
+        )
+        .await;
+    assert_eq!(base["text"], "ONE\ntwo\nthree\nfour\nfive\n");
+    for (method, params) in [
+        ("changes/accept_hunk", hunk(&two)),
+        ("changes/revert_hunk", hunk(&two)),
+        ("changes/accept", json!({"thread": thread, "path": null})),
+        (
+            "changes/revert",
+            json!({"thread": thread, "path": "notes.txt", "force": false}),
+        ),
+    ] {
+        let busy = a.call(method, params).await.unwrap_err();
+        assert_eq!(busy["code"], -32002, "{method}: {busy}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&notes).unwrap(),
+        "ONE\nTWO\nthree\nfour\nfive\n"
+    );
+    // the turn's first request told the model what was undone
+    let sent = bodies.lock().unwrap()[3]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["content"]
+        .clone();
+    assert_eq!(
+        sent,
+        "and two\n\n[ognivo] Since your last turn the user undid part of your changes to notes.txt. Read them again before you edit them."
+    );
+    a.ok("turn/interrupt", json!({"thread": thread})).await;
+    a.until(|m| event(m, "turn_completed")).await;
+    // between turns, from the agent's own journal: the same
+    let now = a.ok("changes/list", json!({"thread": thread})).await;
+    assert_eq!(now, live);
+    // what only told the clients there is not kept
+    let read = b
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert!(
+        read["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["event"] != "changes_updated"),
+        "{read}"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Each generation's progress in the stream as each of its phases began: the phase, how far
+/// the prompt was read, the tokens so far.
+fn phases_of(events: &[Value], generation: u32) -> Vec<(String, Value, Value)> {
+    let mut began: Vec<(String, Value, Value)> = Vec::new();
+    for p in events
+        .iter()
+        .filter(|e| e["event"] == "progress" && e["progress"]["generation"] == generation)
+        .map(|e| &e["progress"])
+    {
+        let phase = p["phase"].as_str().unwrap().to_owned();
+        if began.last().is_none_or(|(last, ..)| *last != phase) {
+            began.push((phase, p["prompt_done"].clone(), p["generated"].clone()));
+        }
+    }
+    began
+}
+
+/// What the user sees while a turn works, and what they write to it meanwhile: how far each
+/// generation got, live and never kept; what they write during a step reaches the model
+/// with the next one, as an item of its own; what a stopped turn never gave the model comes
+/// back with its end; and with no turn running nothing is taken.
+#[tokio::test]
+async fn a_turn_shows_how_far_it_got_and_takes_what_the_user_writes_meanwhile() {
+    let (url, bodies) = fake_server(vec![
+        progress_call_stream("c1", "shell", r#"{"command":"touch made.txt"}"#),
+        answer_stream("Done."),
+        // the second turn waits for the server until it is stopped
+        HANG.to_owned(),
+    ])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    let steer = |text: &str| json!({"thread": thread, "text": text});
+
+    // no turn runs: the client starts one with the text instead; an empty text is none;
+    // a thread that is not open has no turn
+    let idle = a
+        .call("turn/steer", steer("Then list it."))
+        .await
+        .unwrap_err();
+    assert_eq!(idle["code"], -32008, "{idle}");
+    let empty = a.call("turn/steer", steer(" \n")).await.unwrap_err();
+    assert_eq!(empty["code"], -32602, "{empty}");
+    let closed = a
+        .call("turn/steer", json!({"thread": 999_999, "text": "x"}))
+        .await
+        .unwrap_err();
+    assert_eq!(closed["code"], -32001, "{closed}");
+
+    // written while the command waits for its answer: the model gets it with its next step
+    a.ok(
+        "turn/start",
+        json!({"thread": thread, "text": "make a file"}),
+    )
+    .await;
+    let ask = a
+        .until(|m| m["method"] == "approval/ask")
+        .await
+        .pop()
+        .unwrap();
+    assert_eq!(a.ok("turn/steer", steer("Then list it.")).await, json!({}));
+    a.send(json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"decision": "allow", "instead": null}}))
+        .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    let end = &got.last().unwrap()["params"];
+    assert_eq!(end["answer"], "Done.");
+    assert_eq!(
+        end.get("undelivered"),
+        None,
+        "all of it was delivered: {end}"
+    );
+    let sent = bodies.lock().unwrap()[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(sent["role"], "tool", "{sent}");
+    assert!(
+        sent["content"]
+            .as_str()
+            .unwrap()
+            .ends_with("\n\n[ognivo] The user wrote while you worked: «Then list it.»"),
+        "{sent}"
+    );
+    // an item of no generation, after the call and before the next step's answer
+    let started: Vec<(&str, String)> = a
+        .events
+        .iter()
+        .filter(|e| e["event"] == "item_started")
+        .map(|e| {
+            let item = &e["item"];
+            (
+                item["kind"].as_str().unwrap(),
+                item["generation"].to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        started,
+        [
+            ("reasoning", "1".to_owned()),
+            ("tool_call", "1".to_owned()),
+            ("approval", "null".to_owned()),
+            ("steer", "null".to_owned()),
+            ("agent_message", "2".to_owned()),
+        ]
+    );
+    let item = a
+        .events
+        .iter()
+        .find(|e| e["event"] == "item_completed" && e["item"]["kind"] == "steer")
+        .unwrap();
+    assert_eq!(item["item"]["text"], "Then list it.");
+
+    // how far each generation got, live, in the server's numbers where it gives them
+    let null = Value::Null;
+    let phase =
+        |p: &str, done: &Value, generated: u32| (p.to_owned(), done.clone(), json!(generated));
+    assert_eq!(
+        phases_of(&a.events, 1),
+        [
+            phase("waiting", &null, 0),
+            phase("prompt", &json!(4000), 0),
+            phase("reasoning", &json!(12400), 1),
+            phase("writing", &json!(12400), 2),
+        ]
+    );
+    let prompt = a
+        .events
+        .iter()
+        .find(|e| e["event"] == "progress" && e["progress"]["phase"] == "prompt")
+        .unwrap();
+    assert_eq!(
+        (
+            &prompt["thread"],
+            &prompt["progress"]["prompt_total"],
+            &prompt["progress"]["prompt_cached"]
+        ),
+        (&thread, &json!(12400), &json!(4000))
+    );
+    // a server that does not count: the fragments streamed
+    assert_eq!(
+        phases_of(&a.events, 2),
+        [phase("waiting", &null, 0), phase("writing", &null, 1)]
+    );
+    assert_eq!(bodies.lock().unwrap()[0]["return_progress"], json!(true));
+    // the store keeps the steer's item, not the progress
+    let read = a
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    let kept: Vec<&Value> = a.events.iter().filter(|e| is_kept(e)).collect();
+    let read: Vec<&Value> = read["events"].as_array().unwrap().iter().collect();
+    assert_eq!(read, kept);
+    assert!(read.iter().all(|e| e["event"] != "progress"));
+    assert!(read.iter().any(|e| e["item"]["kind"] == "steer"));
+
+    // written while the next turn waits for the server, which never answers: stopped, the
+    // turn gives it back, for the next one
+    a.ok("turn/start", json!({"thread": thread, "text": "and more"}))
+        .await;
+    let began = Instant::now();
+    while bodies.lock().unwrap().len() < 3 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.ok("turn/steer", steer("And the README.")).await;
+    a.ok("turn/interrupt", json!({"thread": thread})).await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    let end = got.last().unwrap()["params"].clone();
+    assert_eq!(
+        (&end["end"], &end["undelivered"]),
+        (&json!("interrupted"), &json!(["And the README."]))
+    );
+    let read = a
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert_eq!(read["events"].as_array().unwrap().last(), Some(&end));
+    let idle = a.call("turn/steer", steer("late")).await.unwrap_err();
+    assert_eq!(idle["code"], -32008, "{idle}");
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 // it stops the core with SIGTERM, which Windows has not
@@ -740,6 +1115,125 @@ async fn a_turn_is_written_anew_and_a_thread_is_deleted() {
         .await
         .unwrap_err();
     assert_eq!(e["code"], -32001);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// A store that fails is told to the clients once, as ognivo's notice in the running turn,
+/// and the thread goes on in memory. Here another program took the thread's session out of
+/// the store, so every save of it breaks a foreign key.
+#[tokio::test]
+async fn a_store_that_fails_is_told_to_the_clients_in_the_turn() {
+    let (url, _) = fake_server(vec![answer_stream("Done."), answer_stream("Still done.")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    ognivo_store::Store::open(&dir.path().join("data/ognivo.db"))
+        .unwrap()
+        .delete_session(thread.as_i64().unwrap())
+        .unwrap();
+    let told = |events: &[Value]| -> Vec<String> {
+        events
+            .iter()
+            .filter(|e| e["event"] == "item_completed" && e["item"]["kind"] == "notice")
+            .filter_map(|e| e["item"]["text"].as_str())
+            .filter(|t| t.starts_with("[ognivo] The session store failed: "))
+            .map(str::to_owned)
+            .collect()
+    };
+    let params = |got: Vec<Value>| -> Vec<Value> {
+        got.into_iter()
+            .filter(|m| m["method"] == "event")
+            .map(|m| m["params"].clone())
+            .collect()
+    };
+    a.ok("turn/start", json!({"thread": thread, "text": "fix it"}))
+        .await;
+    let got = params(a.until(|m| event(m, "turn_completed")).await);
+    assert_eq!(
+        told(&got),
+        [
+            "[ognivo] The session store failed: FOREIGN KEY constraint failed. The session goes on in memory and is no longer saved."
+        ]
+    );
+    assert_eq!(got.last().unwrap()["answer"], "Done.");
+    // once: the next turn has nothing more to tell
+    a.ok("turn/start", json!({"thread": thread, "text": "and now?"}))
+        .await;
+    let got = params(a.until(|m| event(m, "turn_completed")).await);
+    assert!(told(&got).is_empty(), "{got:?}");
+    assert_eq!(got.last().unwrap()["answer"], "Still done.");
+    // the core's log of the stream keeps it, for a client that comes later
+    let read = a
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert_eq!(told(read["events"].as_array().unwrap()).len(), 1);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// A store that fails while the server holds the turn's request is first found out by the
+/// saves of the stop: the stopped turn tells it before its end, as a running turn would.
+#[tokio::test]
+async fn a_store_that_fails_as_a_turn_is_stopped_is_told_in_that_turn() {
+    let (url, bodies) = fake_server(vec![HANG.to_owned()]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    a.ok("turn/start", json!({"thread": thread, "text": "wait"}))
+        .await;
+    let began = Instant::now();
+    while bodies.lock().unwrap().is_empty() {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // nothing is saved while the server holds the request: the stop is the first to find
+    // the session gone
+    ognivo_store::Store::open(&dir.path().join("data/ognivo.db"))
+        .unwrap()
+        .delete_session(thread.as_i64().unwrap())
+        .unwrap();
+    a.ok("turn/interrupt", json!({"thread": thread})).await;
+    let got: Vec<Value> = a
+        .until(|m| event(m, "turn_completed"))
+        .await
+        .into_iter()
+        .filter(|m| m["method"] == "event")
+        .map(|m| m["params"].clone())
+        .collect();
+    let end = got.last().unwrap();
+    assert_eq!(end["end"], "interrupted", "{end}");
+    let told: Vec<&Value> = got
+        .iter()
+        .filter(|e| e["event"] == "item_completed" && e["item"]["kind"] == "notice")
+        .filter(|e| {
+            e["item"]["text"]
+                .as_str()
+                .is_some_and(|t| t.starts_with("[ognivo] The session store failed: "))
+        })
+        .collect();
+    assert_eq!(told.len(), 1, "{got:?}");
+    assert_eq!(
+        told[0]["item"]["text"],
+        "[ognivo] The session store failed: FOREIGN KEY constraint failed. The session goes on in memory and is no longer saved."
+    );
+    // an item of the stopped turn
+    assert_eq!(told[0]["item"]["turn"], end["turn"]);
     child.kill().unwrap();
     child.wait().unwrap();
 }
@@ -943,6 +1437,228 @@ async fn images_reach_a_model_that_sees_and_a_thread_whose_model_does_not_refuse
         .map(|t| &t["vision"])
         .collect();
     assert_eq!(seeing, [&json!(false), &json!(true)]);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Whether `thread/list` says the model of `thread` takes images.
+async fn listed_vision(a: &mut Client, thread: &Value) -> Value {
+    let all = a
+        .ok("thread/list", json!({"project": null, "limit": 10}))
+        .await;
+    let listed = all["threads"].as_array().unwrap();
+    let mine = listed.iter().find(|t| &t["thread"] == thread).unwrap();
+    mine["vision"].clone()
+}
+
+/// How a turn of `thread` with `text` ends.
+async fn turn_end(a: &mut Client, thread: &Value, text: &str) -> Value {
+    a.ok("turn/start", json!({"thread": thread, "text": text}))
+        .await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    got.last().unwrap()["params"]["end"].clone()
+}
+
+/// A thread opened while its llama-server still loaded the model, or ran without its
+/// projector, takes images once the server runs one: `turn/start` asks the server again
+/// before it refuses them, and `thread/vision` whenever a client asks, during a turn too.
+/// What the server says counts either way; a server that cannot say leaves it as it was
+/// (2026-11-16: the composer refused images of a server started with --mmproj).
+#[tokio::test]
+async fn a_thread_takes_images_once_its_server_runs_a_projector_and_asks_again_on_thread_vision() {
+    let (url, bodies, projector) = fake_switched_server(
+        vec![answer_stream("A cat."), HANG.to_owned()],
+        // the server still loads its model
+        None,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let mut params = start(&root, &url);
+    params["profile"] = json!("gemma-4-26b-a4b");
+    let opened = a.ok("thread/start", params).await;
+    assert_eq!(opened["vision"], false, "{opened}");
+    let thread = opened["thread"].clone();
+    let switch = |sees: Option<bool>| *projector.lock().unwrap() = sees;
+    let vision = json!({"thread": thread});
+
+    // the server runs its projector now: the image goes, without a client asking first
+    switch(Some(true));
+    let (_, data) = png(4, 2);
+    let url_of = format!("data:image/png;base64,{data}");
+    let with_image = json!({"thread": thread, "text": "What is it?", "images": [{"data": url_of}]});
+    a.ok("turn/start", with_image.clone()).await;
+    let got = a.until(|m| event(m, "turn_completed")).await;
+    let ended = got.last().unwrap();
+    assert_eq!(ended["params"]["end"], "answer", "{got:#?}");
+    let user = bodies.lock().unwrap()[0]["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|m| m["role"] == "user")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        user["content"],
+        json!([
+            {"type": "image_url", "image_url": {"url": url_of}},
+            {"type": "text", "text": "What is it?"},
+        ])
+    );
+    assert_eq!(listed_vision(&mut a, &thread).await, true);
+
+    // started again without it: asked, the thread says so, and refuses images
+    switch(Some(false));
+    assert_eq!(
+        a.ok("thread/vision", vision.clone()).await,
+        json!({"vision": false})
+    );
+    assert_eq!(listed_vision(&mut a, &thread).await, false);
+    let e = a.call("turn/start", with_image.clone()).await.unwrap_err();
+    assert_eq!(e["code"], -32005, "{e}");
+    assert!(e["message"].as_str().unwrap().contains("--mmproj"), "{e}");
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+
+    // with it again, asked while a turn runs: beside the thread's task
+    a.ok("turn/start", json!({"thread": thread, "text": "wait"}))
+        .await;
+    let began = Instant::now();
+    while bodies.lock().unwrap().len() < 2 {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    switch(Some(true));
+    assert_eq!(
+        a.ok("thread/vision", vision.clone()).await,
+        json!({"vision": true})
+    );
+    // a server that cannot say (it loads its model again) leaves the flag as it was
+    switch(None);
+    assert_eq!(
+        a.ok("thread/vision", vision.clone()).await,
+        json!({"vision": true})
+    );
+    a.ok("turn/interrupt", vision.clone()).await;
+    a.until(|m| event(m, "turn_completed")).await;
+    assert_eq!(listed_vision(&mut a, &thread).await, true);
+
+    // a thread the core does not have open
+    a.ok("thread/close", vision.clone()).await;
+    let e = a.call("thread/vision", vision).await.unwrap_err();
+    assert_eq!(e["code"], -32001, "{e}");
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Each turn sees as the server says: a thread opened while its llama-server loaded the
+/// model shows the model the image file a Read gives once the server runs its projector,
+/// with no client asking; a server started again without it refuses the conversation's
+/// image once, and the thread, asking it after that error, gives the model what the image
+/// was from the next turn on instead of failing every turn.
+#[tokio::test]
+async fn each_turn_sees_as_the_server_says_and_one_that_lost_its_projector_fails_only_once() {
+    let (url, bodies, projector) = fake_switched_server(
+        vec![
+            call_stream("r1", "read", r#"{"file":"shot.png"}"#),
+            answer_stream("A cat."),
+            no_projector(),
+            answer_stream("Going on."),
+        ],
+        // the server still loads its model
+        None,
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let (shot, data) = png(8, 6);
+    std::fs::write(root.join("shot.png"), &shot).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let mut params = start(&root, &url);
+    params["profile"] = json!("gemma-4-26b-a4b");
+    let opened = a.ok("thread/start", params).await;
+    assert_eq!(opened["vision"], false, "{opened}");
+    let thread = opened["thread"].clone();
+    let switch = |sees: Option<bool>| *projector.lock().unwrap() = sees;
+
+    // with its projector now, the Read's image goes after its result
+    switch(Some(true));
+    assert_eq!(
+        turn_end(&mut a, &thread, "What does shot.png show?").await,
+        "answer"
+    );
+    let tool = bodies.lock().unwrap()[1]["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(tool["role"], "tool");
+    assert_eq!(
+        tool["content"][1]["image_url"]["url"],
+        format!("data:image/png;base64,{data}")
+    );
+    assert_eq!(listed_vision(&mut a, &thread).await, true);
+
+    // started again without it: the image the conversation holds is refused
+    switch(Some(false));
+    assert_eq!(turn_end(&mut a, &thread, "And now?").await, "error");
+    assert!(bodies.lock().unwrap()[2].to_string().contains("image_url"));
+    // and the next turn has what it was instead
+    assert_eq!(turn_end(&mut a, &thread, "Go on.").await, "answer");
+    let last = bodies.lock().unwrap()[3].to_string();
+    assert!(!last.contains("image_url"), "{last}");
+    assert!(
+        last.contains("Not shown, as this model reads no images"),
+        "{last}"
+    );
+    assert_eq!(listed_vision(&mut a, &thread).await, false);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+/// Behind llama-server's router, a thread asks its model's server: `/props` with `?model=`.
+#[tokio::test]
+async fn behind_a_router_thread_vision_asks_the_server_of_the_threads_model() {
+    let models = json!([
+        {"id": "gpt-oss-20b-F16", "aliases": [], "status": {"value": "loaded", "args": []}}
+    ]);
+    let (url, _, gets) = fake_router(models, vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let opened = a.ok("thread/start", start(&root, &url)).await;
+    let before = gets.lock().unwrap().len();
+    let vision = a
+        .ok("thread/vision", json!({"thread": opened["thread"]}))
+        .await;
+    // its /props do not say: the flag stays
+    assert_eq!(vision, json!({"vision": false}));
+    let gets = gets.lock().unwrap();
+    assert!(
+        gets[before..]
+            .iter()
+            .any(|g| g.starts_with("GET /props?model=gpt-oss-20b-F16 ")),
+        "{gets:?}"
+    );
     child.kill().unwrap();
     child.wait().unwrap();
 }

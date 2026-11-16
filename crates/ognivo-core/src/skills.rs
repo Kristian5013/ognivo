@@ -156,6 +156,8 @@ pub struct Skills {
 
 /// Finds the skills and commands of the user and the project.
 pub fn load(places: &Places) -> Skills {
+    // a project's file must really be inside it: its real path against the real root
+    let places = &places.canonical();
     let mut found = Finder {
         places,
         top: places
@@ -761,8 +763,11 @@ mod tests {
     #[test]
     fn skills_and_commands_come_from_the_user_the_project_and_its_subdirectories() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("home");
-        let root = tmp.path().join("repo");
+        // as a session's root is, and the paths the agent asks about (Windows names the
+        // temporary directory `RUNNER~1`)
+        let tmp = ognivo_os::canonicalize(tmp.path()).unwrap();
+        let home = tmp.join("home");
+        let root = tmp.join("repo");
         fs::create_dir_all(root.join(".git")).unwrap();
         write(
             &home.join(".claude/skills/review/SKILL.md"),
@@ -873,6 +878,43 @@ mod tests {
             skills.problems,
             [".claude/skills/x/SKILL.md: not used, it points outside the project"]
         );
+    }
+
+    /// A root named otherwise than its real path, here through a link as on Windows by an
+    /// 8.3 name (`RUNNER~1`), still holds the project's skills: their real paths are
+    /// inside its real path.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_named_through_a_link_holds_the_projects_skills() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tmp = ognivo_os::canonicalize(tmp.path()).unwrap();
+        let real = tmp.join("real/repo");
+        fs::create_dir_all(real.join(".git")).unwrap();
+        write(
+            &real.join(".claude/skills/pdf/SKILL.md"),
+            "---\ndescription: Fills PDF forms.\n---\n",
+        );
+        write(
+            &real.join("web/.claude/skills/deploy/SKILL.md"),
+            "---\ndescription: Deploys the web app.\n---\n",
+        );
+        std::os::unix::fs::symlink(tmp.join("real"), tmp.join("link")).unwrap();
+        let mut skills = load(&places(&tmp.join("link/repo"), &tmp.join("home")));
+        assert!(skills.problems.is_empty(), "{:?}", skills.problems);
+        let shown: Vec<(&str, Scope)> = skills
+            .all()
+            .iter()
+            .map(|s| (s.shown.as_str(), s.scope))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (".claude/skills/pdf/SKILL.md", Scope::Project),
+                ("web/.claude/skills/deploy/SKILL.md", Scope::Project),
+            ]
+        );
+        // the files the agent works on, named by their real paths, bring their skills
+        assert!(skills.near(&real.join("web/app.ts"), "skill").is_some());
     }
 
     #[test]

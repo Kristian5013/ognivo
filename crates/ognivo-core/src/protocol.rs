@@ -17,7 +17,7 @@ use ognivo_models::Image;
 use ognivo_protocol::{self as p, ItemBody};
 use ognivo_tools::projection::Call;
 
-use crate::agent::AgentEvent;
+use crate::agent::{AgentEvent, Phase};
 
 /// Events for the clients, each with its thread; the stream numbers them.
 pub type Out = Vec<(p::ThreadId, p::EventKind)>;
@@ -180,6 +180,41 @@ impl Projector {
                     },
                 },
             ),
+            // of the generation that is the next to end, as a call draft; it closes nothing,
+            // as the text it is about goes on
+            AgentEvent::Progress {
+                phase,
+                prompt_total,
+                prompt_cached,
+                prompt_done,
+                generated,
+                elapsed_ms,
+                tokens_per_second,
+            } => self.emit(
+                &mut out,
+                p::EventKind::Progress {
+                    progress: p::Progress {
+                        generation: self.generations + 1,
+                        phase: match phase {
+                            Phase::Waiting => p::ProgressPhase::Waiting,
+                            Phase::Prompt => p::ProgressPhase::Prompt,
+                            Phase::Reasoning => p::ProgressPhase::Reasoning,
+                            Phase::Writing => p::ProgressPhase::Writing,
+                        },
+                        prompt_total,
+                        prompt_cached,
+                        prompt_done,
+                        generated,
+                        elapsed_ms,
+                        tokens_per_second,
+                    },
+                },
+            ),
+            // the user's, so of no generation
+            AgentEvent::Steered { text } => {
+                self.close(&mut out);
+                self.whole(&mut out, None, ItemBody::Steer { text });
+            }
             AgentEvent::Restarted { .. } => {
                 self.close(&mut out);
                 self.whole(
@@ -450,8 +485,9 @@ impl Projector {
                 changed,
             } => {
                 if let Some((mut item, mut child)) = self.subagents.remove(&index) {
-                    // a turn that never ended in its own events ends here
-                    out.extend(child.interrupted());
+                    // a turn that never ended in its own events ends here; nobody writes
+                    // to a subagent
+                    out.extend(child.interrupted(Vec::new()));
                     if let ItemBody::Subagent {
                         end: e,
                         steps: s,
@@ -469,6 +505,7 @@ impl Projector {
                 why,
                 answer,
                 verification,
+                undelivered,
             } => {
                 self.close(&mut out);
                 self.emit(
@@ -479,6 +516,7 @@ impl Projector {
                         why,
                         answer,
                         verification,
+                        undelivered,
                     },
                 );
                 self.turn_open = false;
@@ -488,14 +526,15 @@ impl Projector {
     }
 
     /// The running turn was stopped from outside, by the user or a signal: everything open
-    /// completes as it is, a call that was running as not run, and the turn with it.
-    pub fn interrupted(&mut self) -> Out {
+    /// completes as it is, a call that was running as not run, and the turn with it, with
+    /// what the user wrote to it that the model never got (`undelivered`).
+    pub fn interrupted(&mut self, undelivered: Vec<String>) -> Out {
         let mut out = Vec::new();
         self.close(&mut out);
         let mut subagents: Vec<_> = std::mem::take(&mut self.subagents).into_iter().collect();
         subagents.sort_by_key(|(index, _)| *index);
         for (_, (mut item, mut child)) in subagents {
-            out.extend(child.interrupted());
+            out.extend(child.interrupted(Vec::new()));
             if let ItemBody::Subagent { end, .. } = &mut item.body {
                 *end = Some(p::TurnEnd::Interrupted);
             }
@@ -531,6 +570,7 @@ impl Projector {
                     why: None,
                     answer: None,
                     verification: None,
+                    undelivered,
                 },
             );
             self.turn_open = false;
@@ -1008,6 +1048,7 @@ mod tests {
                     why: None,
                     answer: Some("README.md line 3 says hi.".into()),
                     verification: None,
+                    undelivered: Vec::new(),
                 },
             ),
             AgentEvent::SubagentFinished {
@@ -1043,6 +1084,7 @@ mod tests {
                 why: None,
                 answer: Some("Changed the greeting in main.rs; the README still says hi.".into()),
                 verification: Some("verified: `cargo test` passed after the last change".into()),
+                undelivered: Vec::new(),
             },
         ]
     }
@@ -1206,16 +1248,18 @@ mod tests {
         projector.event(AgentEvent::Reasoning {
             text: "thinking".into(),
         });
-        let out = projector.interrupted();
+        // with what the user wrote to it that the model never got
+        let out = projector.interrupted(vec!["and the README".into()]);
         assert!(matches!(out[0].1, p::EventKind::ItemCompleted { .. }));
         assert!(matches!(
-            out[1].1,
+            &out[1].1,
             p::EventKind::TurnCompleted {
                 end: p::TurnEnd::Interrupted,
+                undelivered,
                 ..
-            }
+            } if *undelivered == ["and the README"]
         ));
-        assert!(projector.interrupted().is_empty(), "once");
+        assert!(projector.interrupted(Vec::new()).is_empty(), "once");
         // a running call, and a subagent with its own
         let events = turn();
         let at = events
@@ -1226,7 +1270,7 @@ mod tests {
         for e in events.into_iter().take(at + 1) {
             projector.event(e);
         }
-        let out = projector.interrupted();
+        let out = projector.interrupted(Vec::new());
         let completed: Vec<(p::ThreadId, &ItemBody)> = out
             .iter()
             .filter_map(|(t, k)| match k {
@@ -1257,6 +1301,129 @@ mod tests {
             .map(|(t, _)| *t)
             .collect();
         assert_eq!(ends, [p::ThreadId(12), p::ThreadId(11)]);
+    }
+
+    /// What the user sees while waiting, and what they write meanwhile: the progress of the
+    /// generation that is the next to end, which closes nothing; the user's words as an
+    /// item of no generation where the model got them; and what never reached the model
+    /// with the turn's end.
+    #[test]
+    fn progress_and_what_the_user_wrote_meanwhile_come_where_they_belong() {
+        let progress = |phase, generated| AgentEvent::Progress {
+            phase,
+            prompt_total: Some(12_400),
+            prompt_cached: Some(4_000),
+            prompt_done: Some(12_400),
+            generated,
+            elapsed_ms: 900,
+            tokens_per_second: (generated > 1).then_some(33.5),
+        };
+        let read = Call::Read {
+            path: "a.rs".into(),
+            offset: None,
+            limit: None,
+        };
+        let events = vec![
+            AgentEvent::TurnStarted {
+                user: "Read a.rs".into(),
+                images: Vec::new(),
+            },
+            progress(Phase::Waiting, 0),
+            AgentEvent::Reasoning {
+                text: "Read it".into(),
+            },
+            progress(Phase::Reasoning, 2),
+            AgentEvent::Reasoning {
+                text: " first.".into(),
+            },
+            generation("step", "calls", 1, Vec::new()),
+            started("c1", "read", r#"{"path":"a.rs"}"#, read),
+            finished("c1", "read", "[read: a.rs — 1 of 1 lines]\n1│fn a() {}"),
+            AgentEvent::Steered {
+                text: "and b.rs".into(),
+            },
+            progress(Phase::Waiting, 0),
+            AgentEvent::Text {
+                text: "It holds a().".into(),
+            },
+            generation("step", "answer", 2, Vec::new()),
+            AgentEvent::TurnEnded {
+                end: "answer".into(),
+                why: None,
+                answer: Some("It holds a().".into()),
+                verification: None,
+                undelivered: vec!["and c.rs".into()],
+            },
+        ];
+        let mut projector = Projector::resumed(p::ThreadId(11), info(), 0, 0, 4);
+        let out: Out = events
+            .into_iter()
+            .flat_map(|e| projector.event(e))
+            .collect();
+        let shown: Vec<String> = out
+            .iter()
+            .filter_map(|(_, k)| match k {
+                p::EventKind::Progress { progress: g } => {
+                    Some(format!("progress {} {:?}", g.generation, g.phase))
+                }
+                p::EventKind::ItemCompleted { item } => Some(format!(
+                    "{} {:?}",
+                    serde_json::to_value(&item.body).unwrap()["kind"]
+                        .as_str()
+                        .unwrap(),
+                    item.generation
+                )),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                "progress 5 Waiting",
+                "progress 5 Reasoning",
+                "reasoning Some(5)",
+                "tool_call Some(5)",
+                "steer None",
+                "progress 6 Waiting",
+                "agent_message Some(6)",
+            ]
+        );
+        // the reasoning is one item, the progress inside it notwithstanding
+        let reasoning = out.iter().find_map(|(_, k)| match k {
+            p::EventKind::ItemCompleted { item } => match &item.body {
+                ItemBody::Reasoning { text } => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(reasoning.as_deref(), Some("Read it first."));
+        let wire = |kind: &p::EventKind| serde_json::to_value(kind).unwrap();
+        let steer = out
+            .iter()
+            .find(|(_, k)| matches!(k, p::EventKind::ItemStarted { item } if matches!(item.body, ItemBody::Steer { .. })))
+            .unwrap();
+        assert_eq!(
+            wire(&steer.1)["item"],
+            serde_json::json!({"id": 3, "turn": 1, "generation": null, "kind": "steer", "text": "and b.rs"})
+        );
+        let progress = out
+            .iter()
+            .find(|(_, k)| matches!(k, p::EventKind::Progress { .. }))
+            .unwrap();
+        assert_eq!(
+            wire(&progress.1),
+            serde_json::json!({"event": "progress", "progress": {"generation": 5, "phase": "waiting",
+                "prompt_total": 12_400, "prompt_cached": 4_000, "prompt_done": 12_400,
+                "generated": 0, "elapsed_ms": 900, "tokens_per_second": null}})
+        );
+        let end = wire(&out.last().unwrap().1);
+        assert_eq!(
+            (&end["event"], &end["undelivered"]),
+            (
+                &serde_json::json!("turn_completed"),
+                &serde_json::json!(["and c.rs"])
+            )
+        );
     }
 
     #[test]

@@ -1,0 +1,294 @@
+/* The empty state (welcome.tsx): the question, the server's status, the suggestions from
+   where the user is, the last sessions, the small links. It comes after panel.css; its
+   words, room, corners and colours are panel.css's tokens: dark, light and high contrast. */
+
+.welcome {
+  container-type: inline-size;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 28px var(--pad) var(--pad);
+}
+
+/* the question, and what a new session works with */
+.welcome-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-4);
+}
+.welcome-head h1 {
+  margin: 0;
+  font-size: var(--fs-h);
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.welcome-status {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  max-width: 100%;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.welcome-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.welcome-status-says {
+  flex-shrink: 0;
+  margin-left: -3px;
+  white-space: nowrap;
+}
+.welcome-status.is-failed .welcome-status-text,
+.welcome-status.is-failed .welcome-status-says {
+  color: var(--err);
+}
+.welcome-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.welcome-status.is-warn .welcome-dot {
+  background: var(--warn);
+}
+.welcome-status.is-failed .welcome-dot {
+  background: var(--err);
+}
+.welcome-pending {
+  --icon: 12px;
+  flex-shrink: 0;
+}
+.welcome-change {
+  flex-shrink: 0;
+  margin-left: var(--sp-1);
+  color: var(--link);
+}
+.welcome-change:hover {
+  color: var(--link-active);
+  text-decoration: underline;
+}
+
+/* a section: its small heading, its rows */
+.welcome-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.welcome-section h2 {
+  margin: 0;
+  padding: 0 var(--sp-4) var(--sp-3);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.welcome-section ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+/* what to do from where the user is */
+.suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-5);
+  width: 100%;
+  padding: var(--sp-4);
+  border-radius: var(--r-lg);
+  text-align: left;
+}
+.suggestion:hover {
+  background: var(--hover);
+}
+.suggestion:active {
+  background: var(--press);
+}
+.suggestion-icon {
+  flex-shrink: 0;
+  margin-top: var(--sp-1);
+}
+.suggestion.is-failure .suggestion-icon {
+  color: var(--err);
+}
+.suggestion.is-selection .suggestion-icon {
+  color: var(--link);
+}
+.suggestion.is-explain .suggestion-icon {
+  color: var(--purple);
+}
+.suggestion.is-tests .suggestion-icon {
+  color: var(--ok);
+}
+.suggestion-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+.suggestion-title,
+.suggestion-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.suggestion-detail {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+/* the last sessions; a session's delete button takes its time's place under the pointer */
+.recent ul {
+  gap: 0;
+}
+.recent li {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: var(--r);
+}
+.recent li:hover {
+  background: var(--hover);
+}
+.recent-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  height: 30px;
+  padding: 0 var(--sp-4);
+  text-align: left;
+}
+.recent-icon {
+  --icon: 13px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.recent-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-review {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  color: color-mix(in srgb, var(--ember) 80%, var(--fg));
+  background: color-mix(in srgb, var(--ember) 14%, transparent);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.recent-project {
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 35%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.recent-time {
+  flex-shrink: 0;
+  min-width: 52px;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: right;
+  white-space: nowrap;
+}
+.recent-delete {
+  position: absolute;
+  top: var(--sp-2);
+  right: var(--sp-2);
+  opacity: 0;
+}
+.recent li:hover .recent-delete,
+.recent-delete:focus-visible {
+  opacity: 1;
+}
+.recent li:hover:has(.recent-delete) .recent-time,
+.recent li:has(.recent-delete:focus-visible) .recent-time {
+  visibility: hidden;
+}
+.recent-all {
+  --icon: 14px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.recent-all:hover {
+  color: var(--fg);
+  background: var(--hover);
+}
+
+/* the settings a new session works with, small at the end */
+.welcome-links {
+  --icon: 13px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) 14px;
+  margin-top: auto;
+  padding: 0 var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.welcome-links button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted);
+}
+.welcome-links button:hover {
+  color: var(--fg);
+}
+
+/* a narrow side bar: the server's address goes (its hint has it), and the state stays */
+@container (max-width: 360px) {
+  .welcome-status-where {
+    display: none;
+  }
+}
+/* narrower: a session's time stays, the other project's name goes */
+@container (max-width: 300px) {
+  .recent-project {
+    display: none;
+  }
+  .recent-time {
+    min-width: 0;
+  }
+  .suggestion {
+    gap: var(--sp-4);
+  }
+}
+
+/* high contrast: a row under the pointer has the theme's border, as VS Code's lists */
+body.vscode-high-contrast .suggestion:hover,
+body.vscode-high-contrast .recent-all:hover,
+body.vscode-high-contrast .recent li:hover {
+  outline: 1px dashed var(--active-border);
+  outline-offset: -1px;
+}

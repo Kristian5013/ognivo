@@ -8,10 +8,14 @@
 //
 //   npm run package -w apps/vscode                 for this machine
 //   OGNIVO_BIN=path TARGET=linux-x64 npm run package -w apps/vscode
+//
+// A relative OGNIVO_BIN is where it was written: npm runs a workspace's script in its own
+// directory (apps/vscode), but keeps the directory it was started in as INIT_CWD, and
+// scripts/package.sh names the binary from the repo's root.
 
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -23,7 +27,7 @@ if (!(target in RUST)) throw new Error(`no package for ${target}: ${Object.keys(
 const exe = target.startsWith("win32") ? ".exe" : "";
 const version = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 
-let bin = process.env.OGNIVO_BIN;
+let bin = process.env.OGNIVO_BIN && resolve(process.env.INIT_CWD ?? process.cwd(), process.env.OGNIVO_BIN);
 if (!bin) {
   bin = join(repo, "target", "release", `ognivo${exe}`);
   execFileSync("cargo", ["build", "--release", "--locked", "-p", "ognivo-cli"], { cwd: repo, stdio: "inherit" });

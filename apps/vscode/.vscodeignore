@@ -5,6 +5,7 @@
 !package.json
 !dist/**
 !media/ognivo.svg
+!media/removed.svg
 !media/icon.png
 !bin/**
 !README.md

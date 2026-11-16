@@ -43,7 +43,7 @@ use futures::stream::{self, BoxStream, StreamExt, TryStreamExt};
 use serde_json::{Value, json};
 
 use crate::Family;
-use crate::driver::{DriverError, DriverEvent, Finished, ModelDriver, StepRequest};
+use crate::driver::{DriverError, DriverEvent, Finished, ModelDriver, Progress, StepRequest};
 use crate::engine::{
     self, CompletionRequest, Constraint, EngineError, SamplerSpec, Stop, TokenEvent, TokenId, Usage,
 };
@@ -1128,11 +1128,19 @@ async fn advance(
 ) -> Option<(Batch, Option<(NativeDriver, Generation)>)> {
     let mut batch = Vec::new();
     match g.events.next().await? {
+        Ok(TokenEvent::Progress(prompt)) => {
+            let p = Progress {
+                prompt: Some(prompt),
+                generated: None,
+            };
+            Some((vec![Ok(DriverEvent::Progress(p))], Some((this, g))))
+        }
         Ok(TokenEvent::Tokens { ids, text }) => {
             g.released.push_str(&text);
             if g.reader.stopped() {
                 // past the call or the answer: only the end of the stream is wanted
                 g.received += ids.len();
+                batch.push(Ok(g.generated()));
                 return Some((batch, Some((this, g))));
             }
             let pieces = match this.pieces(&ids).await {
@@ -1175,6 +1183,7 @@ async fn advance(
                 batch.push(Ok(DriverEvent::Finished(Box::new(f))));
                 return Some((batch, None));
             }
+            batch.push(Ok(g.generated()));
             Some((batch, Some((this, g))))
         }
         Ok(TokenEvent::Done { stop, usage }) => {
@@ -1368,6 +1377,16 @@ impl Counts {
 }
 
 impl Generation {
+    /// The ids the step generated so far, exactly: those of the requests before that
+    /// continued it, and this request's.
+    fn generated(&self) -> DriverEvent {
+        let received = u32::try_from(self.received).unwrap_or(u32::MAX);
+        DriverEvent::Progress(Progress {
+            prompt: None,
+            generated: Some(self.counts.predicted.saturating_add(received)),
+        })
+    }
+
     /// A reader's event for display; the loop the repetition guard saw in it, if any.
     fn show(&mut self, ev: Display, out: &mut Batch) -> Option<(Channel, Loop)> {
         match ev {
@@ -2187,6 +2206,10 @@ mod tests {
         /// The stream leaves out each id after which a character is not whole yet, as
         /// upstream llama.cpp does (class B); else it streams it with no text (class A).
         upstream: bool,
+        /// The stream says how far the prompt is read first, as upstream llama.cpp does
+        /// with `return_progress`: at its start and once it is read, each payload with the id
+        /// 0 of a token it never sampled.
+        progress: bool,
     }
 
     fn answer(fixture: &str) -> Completion {
@@ -2200,6 +2223,7 @@ mod tests {
             stop: "eos",
             lost: Vec::new(),
             upstream: false,
+            progress: false,
         }
     }
 
@@ -2384,12 +2408,19 @@ mod tests {
                                 .map(|v| v.as_u64().unwrap() as TokenId)
                                 .collect(),
                         };
+                        let total = prompt.len();
                         seen.lock().unwrap().push(prompt);
                         kept.lock().unwrap().push(body.clone());
                         let c = queue.lock().unwrap().next().expect("a completion");
                         // text goes out once it is whole UTF-8, as llama-server releases it
                         let (mut events, mut held, mut text) =
                             (String::new(), Vec::new(), String::new());
+                        for processed in [2, total].into_iter().filter(|_| c.progress) {
+                            let chunk = json!({"index": 0, "content": "", "tokens": [0], "stop": false,
+                                "tokens_predicted": 0, "tokens_evaluated": total,
+                                "prompt_progress": {"total": total, "cache": 2, "processed": processed, "time_ms": 5}});
+                            events.push_str(&format!("data: {chunk}\n\n"));
+                        }
                         for (i, id) in c.ids.iter().enumerate() {
                             held.extend_from_slice(&bytes_of(*id));
                             if let Ok(t) = std::str::from_utf8(&held) {
@@ -2615,6 +2646,56 @@ mod tests {
         ])
         .display();
         assert_eq!(sent, want);
+    }
+
+    /// Upstream llama-server says how far it read the prompt before the first id: the step
+    /// says so too, the id that comes with it is none of the generation, and the ids are
+    /// counted as they stream.
+    #[tokio::test]
+    async fn a_step_says_how_far_the_prompt_is_read_and_counts_its_ids() {
+        let (url, prompts, bodies) = fake_server_bodies(vec![Completion {
+            progress: true,
+            ..answer(CALL)
+        }])
+        .await;
+        let events = run(
+            &driver(&url),
+            request(vec![ChatMessage::user("Read a.rs")], 7),
+        )
+        .await;
+        let total = u32::try_from(prompts.lock().unwrap()[0].len()).unwrap();
+        let prompt: Vec<(u32, u32, u32)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(DriverEvent::Progress(Progress {
+                    prompt: Some(p), ..
+                })) => Some((p.total, p.cache, p.processed)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(prompt, [(total, 2, 2), (total, 2, total)]);
+        // one count per id, in order, the last of them all the ids
+        let counts: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(DriverEvent::Progress(Progress {
+                    generated: Some(n), ..
+                })) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        let ids = generation(CALL);
+        assert_eq!(counts, (1..=ids.len() as u32).collect::<Vec<_>>());
+        // the generation is what the model wrote, and nothing before it
+        let f = finished(&events);
+        assert!(matches!(f.outcome, Outcome::Calls(_)), "{:?}", f.outcome);
+        assert_eq!(f.reasoning, "Need the file.");
+        assert_eq!(f.tokens, Some(ids));
+        let body = &bodies.lock().unwrap()[0];
+        assert_eq!(
+            (&body["return_progress"], &body["timings_per_token"]),
+            (&json!(true), &json!(true))
+        );
     }
 
     #[tokio::test]

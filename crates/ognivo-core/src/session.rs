@@ -67,6 +67,10 @@ pub struct Notes {
     pub stopped: Option<String>,
     /// Files the user reverted since the model's last turn.
     pub reverted: Vec<String>,
+    /// Files the user undid part of the change to since the model's last turn. Left out
+    /// when there are none, so the notes keep the form they had before there were any.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub undone: Vec<String>,
     /// The user's requests, oldest first: a compaction quotes them.
     pub requests: Vec<String>,
     /// A turn began and did not end: ognivo stopped in it.

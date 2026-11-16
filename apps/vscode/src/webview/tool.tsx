@@ -1,22 +1,22 @@
 // A call in the thread, the way it reads best:
 // - what reads and searches is a line: what it looked at and what it found, which opens to
-//   its result;
-// - a command is a terminal's card: the command, how it ended, its output (open when it
-//   failed);
-// - a change is the file's diff: what it added and took out, its first lines, all of them
-//   on a click.
-// A call the model still writes shows as it comes. A file opens in the editor, a change in
-// the editor's diff.
+//   its result (thread.tsx folds such lines of a turn into one exploration);
+// - a command is a line too: the command and how it ended, which opens to its output (open
+//   when it failed), and the terminal that shows the agent's commands;
+// - a change is a file's card: its name and the lines it added and took out; a click opens
+//   the file, another the change in the editor's diff, and the card opens to its lines.
+// A call the model still writes shows at the conversation's end, its last lines as they
+// come (DraftPreview).
 
-import { type ReactNode, memo } from "react";
+import { type ReactNode, memo, useLayoutEffect, useRef, useState } from "react";
 
 import { highlightLines, languageOf } from "./highlight.ts";
-import { openDiff, openFile } from "./host.ts";
+import { openDiff, openFile, showCommands } from "./host.ts";
 import { Icon, IconButton } from "./icon.tsx";
 import { type FileDiff, diffsOf, splitPath } from "./model/diff.ts";
-import { body, header, refusalReason, seconds } from "./model/format.ts";
+import { body, draftText, header, plural, refusalReason, seconds } from "./model/format.ts";
 import type { Call, ToolItem } from "./model/model.ts";
-import type { Draft, DraftState } from "./model/store.ts";
+import type { Draft } from "./model/store.ts";
 
 export type CallState = "running" | "ok" | "failed" | "refused";
 
@@ -35,10 +35,6 @@ export function shape(tool: string | undefined): "command" | "change" | "line" {
   if (tool === "Bash") return "command";
   if (tool === "Edit" || tool === "Write" || tool === "ApplyPatch") return "change";
   return "line";
-}
-
-function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n} ${n === 1 ? one : many}`;
 }
 
 /** What the tool's own first line says it found, in few words. */
@@ -232,7 +228,7 @@ function LineBody({ item }: { item: ToolItem }) {
   return <Output text={body(item)} />;
 }
 
-function ToolLine({ item, open, onOpen, project }: { item: ToolItem; open?: boolean; onOpen: (open: boolean) => void; project: string }) {
+export function ToolLine({ item, open, onOpen, project }: { item: ToolItem; open?: boolean; onOpen: (open: boolean) => void; project: string }) {
   const state = callState(item);
   const { icon, verb, target, file } = lineOf(item);
   const meta = state === "ok" ? found(item) : undefined;
@@ -259,54 +255,63 @@ function ToolLine({ item, open, onOpen, project }: { item: ToolItem; open?: bool
   );
 }
 
-/** How a command ended, on the right of its card. */
-function CommandStatus({ item, state }: { item: ToolItem; state: CallState }) {
+/** How a command ended, after it: its exit code where that is not 0, and how long it took. */
+function CommandFacts({ item, state }: { item: ToolItem; state: CallState }) {
   const r = item.result;
-  const killed = r ? /^\[shell: (timed out|killed)/.exec(r.text) : null;
+  if (!r || state === "refused") return null;
+  const killed = /^\[shell: (timed out|killed)/.exec(r.text);
   // a command of a moment says no time
-  const time = r?.seconds !== undefined && r.seconds >= 0.1 && state !== "refused" ? <span className="muted">{seconds(r.seconds * 1000)}</span> : null;
-  if (state === "running") {
-    return (
-      <span className="cmd-status">
-        <Icon name="loading" spin /> <span className="muted">Running</span>
-      </span>
-    );
-  }
-  if (state === "refused") return <span className="cmd-status warn">Not run</span>;
+  const time = r.seconds !== undefined && r.seconds >= 0.1 ? seconds(r.seconds * 1000) : undefined;
+  const ended = killed ? (killed[1] === "timed out" ? "timed out" : "killed") : r.exit !== undefined && r.exit !== 0 ? `exit ${r.exit}` : state === "failed" ? "failed" : undefined;
+  if (!ended && !time) return null;
   return (
-    <span className="cmd-status">
-      {killed ? (
-        <span className="err">{killed[1] === "timed out" ? "Timed out" : "Killed"}</span>
-      ) : r?.exit !== undefined && r.exit !== 0 ? (
-        <span className="err">Exit {r.exit}</span>
-      ) : state === "failed" ? (
-        <span className="err">Failed</span>
-      ) : (
-        <Icon name="check" className="ok" />
-      )}
+    <span className="cmdrow-facts">
+      {ended && <span className="err">{ended}</span>}
+      {ended && time && " · "}
       {time}
     </span>
   );
 }
 
-function CommandCard({ item, open, onOpen }: { item: ToolItem; open?: boolean; onOpen: (open: boolean) => void }) {
+const COMMAND_ICON: Record<CallState, string> = { running: "loading", ok: "check", failed: "error", refused: "circle-slash" };
+const COMMAND_VERB: Record<CallState, string> = { running: "Running", ok: "Ran", failed: "Ran", refused: "Not run" };
+
+/** A command: a line of what ran and how it ended, open to its output when it failed. */
+function CommandRow({ item, open, onOpen }: { item: ToolItem; open?: boolean; onOpen: (open: boolean) => void }) {
   const call = item.call as Extract<Call, { name: "Bash" }>;
   const state = callState(item);
   const expanded = state !== "running" && (open ?? state === "failed");
   const [first, ...more] = call.command.split("\n");
   return (
-    <div className={`cmd is-${state}`}>
-      <button type="button" className="cmd-head" aria-expanded={expanded} disabled={state === "running"} onClick={() => onOpen(!expanded)}>
-        <Icon name="terminal" className="cmd-icon" />
-        <span className="cmd-line">
-          <span className="cmd-prompt">$</span> {first}
-        </span>
-        {more.length > 0 && <span className="cmd-more">+{plural(more.length, "line")}</span>}
-        <CommandStatus item={item} state={state} />
-        {state !== "running" && <Icon name="chevron-down" className="chev" />}
-      </button>
+    <div className={`cmdrow is-${state}`}>
+      <div className="cmdrow-head">
+        <button
+          type="button"
+          className="cmdrow-toggle"
+          aria-expanded={expanded}
+          disabled={state === "running"}
+          title={call.command}
+          onClick={() => onOpen(!expanded)}
+        >
+          <Icon name={COMMAND_ICON[state]} spin={state === "running"} className="cmdrow-icon" />
+          <span className="cmdrow-verb">{COMMAND_VERB[state]}</span>
+          <code className="cmdrow-line">{first}</code>
+          {more.length > 0 && <span className="cmdrow-more">+{plural(more.length, "line")}</span>}
+          <CommandFacts item={item} state={state} />
+          {state !== "running" && <Icon name="chevron-right" className="chev" />}
+        </button>
+        <button
+          type="button"
+          className="cmdrow-terminal reveal"
+          title="Show the agent's commands in a terminal"
+          onClick={() => void showCommands().catch(() => undefined)}
+        >
+          <Icon name="terminal" />
+          <span>Terminal</span>
+        </button>
+      </div>
       {expanded && (
-        <div className="cmd-body">
+        <div className="cmdrow-body">
           {more.length > 0 && <pre className="out cmd-full">{call.command}</pre>}
           {state === "refused" ? (
             <p className="out-note">Not allowed: {refusalReason(item.result!.text)}</p>
@@ -319,10 +324,7 @@ function CommandCard({ item, open, onOpen }: { item: ToolItem; open?: boolean; o
   );
 }
 
-/** Lines of a diff shown before a click shows all. */
-const PREVIEW = 12;
-
-function Delta({ added, removed }: { added: number; removed: number }) {
+export function Delta({ added, removed }: { added: number; removed: number }) {
   return (
     <span className="delta">
       {added > 0 && <span className="plus">+{added}</span>}
@@ -331,86 +333,92 @@ function Delta({ added, removed }: { added: number; removed: number }) {
   );
 }
 
-function FileDiffView({
-  diff,
-  state,
-  full,
-  onFull,
-  project,
-  thread,
-  writing,
-}: {
-  diff: FileDiff;
-  state: CallState | DraftState;
-  full: boolean;
-  onFull?: (full: boolean) => void;
-  project: string;
-  thread?: number;
-  /** What a call being written says it is doing: its last lines show. */
-  writing?: string;
-}) {
-  const lines = diff.lines;
-  const from = full ? 0 : writing ? Math.max(0, lines.length - PREVIEW) : 0;
-  const shown = full ? lines : lines.slice(from, from + PREVIEW);
-  const hidden = lines.length - shown.length;
-  // the lines highlighted together, what was and what is, in the file's language
+/** Lines of a diff the card shows when opened, before a click shows all. */
+const PREVIEW = 60;
+
+/** A change's lines: what it took out and put in, highlighted in the file's language. */
+function DiffLines({ diff }: { diff: FileDiff }) {
+  const [all, setAll] = useState(false);
+  const shown = all ? diff.lines : diff.lines.slice(0, PREVIEW);
+  const hidden = diff.lines.length - shown.length;
+  // the lines highlighted together, what was and what is
   const html = highlightLines(
     shown.map((l) => (l.kind === "gap" ? "" : l.text)),
     languageOf(diff.path),
   );
   return (
-    <div className="fdiff">
-      <div className="fdiff-head">
-        <Icon name={diff.created ? "new-file" : diff.deleted ? "trash" : "file"} className="fdiff-icon" />
-        <button type="button" className="fdiff-name" title={`Open ${diff.path}`} onClick={() => openFile(diff.path, project, diff.at)}>
-          <FileName path={diff.path} />
-        </button>
-        {diff.created && <span className="tag">new</span>}
-        {diff.deleted && <span className="tag">deleted</span>}
-        <span className="spacer" />
-        {writing ? (
-          <span className="writing">
-            {state === "writing" && <Icon name="loading" spin />} {writing}
-          </span>
-        ) : (
-          <Delta added={diff.added} removed={diff.removed} />
-        )}
-        {state === "running" && <Icon name="loading" spin />}
-        {state === "failed" && <span className="tag err">failed</span>}
-        {state === "refused" && <span className="tag warn">not allowed</span>}
-        {state === "ok" && thread !== undefined && (
-          <IconButton icon="diff" title="Open the change in the diff" className="reveal" onClick={() => openDiff(thread, diff.path, project)} />
-        )}
-      </div>
-      {shown.length > 0 && (
-        <div className="fdiff-body">
-          <div className="fdiff-lines">
-            {writing && hidden > 0 && <div className="dl gap">⋯ {plural(hidden, "line")} above</div>}
-            {shown.map((l, i) =>
-              l.kind === "gap" ? (
-                <div key={i} className="dl gap">
-                  ⋯
-                </div>
-              ) : (
-                <div key={i} className={`dl ${l.kind}`}>
-                  <span className="sign">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span>
-                  {html?.[i] ? <span className="tx" dangerouslySetInnerHTML={{ __html: html[i] }} /> : <span className="tx">{l.text || " "}</span>}
-                </div>
-              ),
-            )}
-          </div>
+    <div className="edit-body">
+      <div className="fdiff-body">
+        <div className="fdiff-lines">
+          {shown.map((l, i) =>
+            l.kind === "gap" ? (
+              <div key={i} className="dl gap">
+                ⋯
+              </div>
+            ) : (
+              <div key={i} className={`dl ${l.kind}`}>
+                <span className="sign">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : " "}</span>
+                {html?.[i] ? <span className="tx" dangerouslySetInnerHTML={{ __html: html[i] }} /> : <span className="tx">{l.text || " "}</span>}
+              </div>
+            ),
+          )}
         </div>
-      )}
-      {onFull && !writing && hidden > 0 && (
-        <button type="button" className="fdiff-more" onClick={() => onFull(true)}>
+      </div>
+      {hidden > 0 && (
+        <button type="button" className="fdiff-more" onClick={() => setAll(true)}>
           Show {plural(hidden, "more line", "more lines")}
         </button>
       )}
-      {onFull && !writing && full && lines.length > PREVIEW && (
-        <button type="button" className="fdiff-more" onClick={() => onFull(false)}>
-          Show less
+    </div>
+  );
+}
+
+/** A file a call changed: its name and lines, which open the file, the change in the
+ * editor's diff, and its lines here. */
+function FileEdit({
+  diff,
+  state,
+  open,
+  onOpen,
+  project,
+  thread,
+}: {
+  diff: FileDiff;
+  state: CallState;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  project: string;
+  thread?: number;
+}) {
+  const { name, dir } = splitPath(diff.path);
+  const lines = diff.lines.length > 0;
+  return (
+    <div className={`edit is-${state}${open && lines ? " open" : ""}`}>
+      <div className="edit-head">
+        <button type="button" className="edit-open" title={`Open ${diff.path}`} onClick={() => openFile(diff.path, project, diff.at)}>
+          <Icon name={diff.created ? "new-file" : diff.deleted ? "trash" : "file"} className="edit-icon" />
+          <span className="edit-name">{name}</span>
+          {dir && <span className="fdir">{dir}</span>}
+          <Delta added={diff.added} removed={diff.removed} />
         </button>
-      )}
+        {diff.created && <span className="tag">new</span>}
+        {diff.deleted && <span className="tag">deleted</span>}
+        {state === "running" && <Icon name="loading" spin className="edit-state" />}
+        {state === "failed" && <span className="tag err">failed</span>}
+        {state === "refused" && <span className="tag warn">not allowed</span>}
+        {state === "ok" && thread !== undefined && (
+          <IconButton icon="diff" title={`Show the change to ${name} in a diff`} className="edit-act" onClick={() => openDiff(thread, diff.path, project)} />
+        )}
+        {lines && (
+          <IconButton
+            icon="chevron-down"
+            title={open ? `Hide the lines of ${name}` : `Show the lines of ${name}`}
+            className={`edit-act edit-lines${open ? " on" : ""}`}
+            onClick={() => onOpen(!open)}
+          />
+        )}
+      </div>
+      {open && lines && <DiffLines diff={diff} />}
     </div>
   );
 }
@@ -419,7 +427,8 @@ function firstLines(text: string, n = 3): string {
   return text.replace(/^\[(error|refused)\]\s*/, "").split("\n").slice(0, n).join("\n");
 }
 
-function ChangeCard({
+/** A change: a card for each file it changed, and why it did not apply. */
+function EditCard({
   item,
   open,
   onOpen,
@@ -436,9 +445,9 @@ function ChangeCard({
   const files = diffsOf(item);
   const r = item.result;
   return (
-    <div className={`change is-${state}`}>
+    <div className={`edits is-${state}`}>
       {files.map((f) => (
-        <FileDiffView key={f.path} diff={f} state={state} full={Boolean(open)} onFull={onOpen} project={project} thread={thread} />
+        <FileEdit key={f.path} diff={f} state={state} open={Boolean(open)} onOpen={onOpen} project={project} thread={thread} />
       ))}
       {files.length === 0 && <p className="out-note">{item.shown}: no file in its arguments</p>}
       {r && (state === "failed" || state === "refused") && (
@@ -463,83 +472,47 @@ export const ToolView = memo(function ToolView({
 }) {
   switch (shape(item.call?.name)) {
     case "command":
-      return <CommandCard item={item} open={open} onOpen={onOpen} />;
+      return <CommandRow item={item} open={open} onOpen={onOpen} />;
     case "change":
-      return <ChangeCard item={item} open={open} onOpen={onOpen} project={project} thread={thread} />;
+      return <EditCard item={item} open={open} onOpen={onOpen} project={project} thread={thread} />;
     default:
       return <ToolLine item={item} open={open} onOpen={onOpen} project={project} />;
   }
 });
 
-/** The call a draft makes so far, for the tools whose drafts show as changes. */
-function draftCall(d: Draft): Call | undefined {
-  const f = (name: string) => d.fields.find(([n]) => n === name)?.[1];
-  switch (d.tool) {
-    case "Edit":
-      return f("path") === undefined ? undefined : { name: "Edit", path: f("path")!, old: f("old") ?? "", new: f("new") ?? "", replaceAll: false };
-    case "Write":
-      return f("path") === undefined ? undefined : { name: "Write", path: f("path")!, content: f("content") ?? "" };
-    case "ApplyPatch":
-      return { name: "ApplyPatch", patch: f("patch") ?? "" };
-    default:
-      return undefined;
-  }
-}
+/** Lines of a call being written that show at the conversation's end. */
+const WRITTEN_LINES = 5;
 
-function draftSummary(d: Draft): string {
-  const f = (name: string) => d.fields.find(([n]) => n === name)?.[1];
-  return (f("path") ?? f("pattern") ?? f("query") ?? f("command") ?? "").split("\n")[0]!;
-}
-
-const DRAFT_SAYS: Record<DraftState, string> = { writing: "Writing…", written: "About to run", void: "Not run" };
-
-/** A call the model writes, before it runs. */
-export const DraftView = memo(function DraftView({ draft, state, project }: { draft: Draft; state: DraftState; project: string }) {
-  const says = DRAFT_SAYS[state];
-  const kind = shape(draft.tool);
-  if (kind === "change") {
-    const call = draftCall(draft);
-    const files = call ? diffsOf({ kind: "tool", id: "draft", shown: draft.tool ?? "", raw: {}, call }) : [];
-    return (
-      <div className={`change draft is-${state}`}>
-        {files.length ? (
-          files.map((f) => <FileDiffView key={f.path} diff={f} state={state} full={false} project={project} writing={says} />)
-        ) : (
-          <div className="fdiff">
-            <div className="fdiff-head">
-              <Icon name="loading" spin className="fdiff-icon" />
-              <span className="writing">{says}</span>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-  if (kind === "command") {
-    const command = draftSummary(draft);
-    return (
-      <div className={`cmd draft is-${state}`}>
-        <div className="cmd-head">
-          <Icon name="terminal" className="cmd-icon" />
-          <span className="cmd-line">
-            <span className="cmd-prompt">$</span> {command}
-          </span>
-          <span className="cmd-status">
-            {state === "writing" && <Icon name="loading" spin />} <span className="muted">{says}</span>
-          </span>
-        </div>
-      </div>
-    );
-  }
+/** The last lines of a call the model writes: a file's text, a patch, a command, in its
+ * language, the top fading out. */
+export const DraftPreview = memo(function DraftPreview({ draft }: { draft: Draft }) {
+  const shown = draftText(draft);
+  // the lines' box cuts what goes above it: lines before the last ones, or long lines that
+  // wrap; its top fades out where it cuts
+  const box = useRef<HTMLDivElement>(null);
+  const [over, setOver] = useState(false);
+  useLayoutEffect(() => {
+    // the lines sit at the bottom, so what is cut is above the box's top: no scroll height
+    // says it, the first line's place does
+    const el = box.current;
+    const first = el?.firstElementChild;
+    if (el && first) setOver(first.getBoundingClientRect().top < el.getBoundingClientRect().top - 1);
+  });
+  if (!shown) return null;
+  const all = shown.text.replace(/\r\n?/g, "\n").split("\n");
+  const from = Math.max(0, all.length - WRITTEN_LINES);
+  const lines = all.slice(from);
+  const language = shown.kind === "command" ? "bash" : shown.kind === "patch" ? "diff" : shown.path ? languageOf(shown.path) : undefined;
+  const html = highlightLines(lines, language);
   return (
-    <div className={`tline draft is-${state}`}>
-      <div className="tline-head">
-        <span className="tline-toggle">
-          <Icon name={state === "writing" ? "loading" : "tools"} spin={state === "writing"} className="tline-icon" />
-          <span className="tline-verb">{draft.tool ?? "Call"}</span>
-          <span className="tline-target">{draftSummary(draft)}</span>
-          <span className="tline-meta">{says}</span>
-        </span>
+    <div className="live-preview" aria-hidden="true">
+      <div ref={box} className={`live-preview-lines${from > 0 || over ? " cut" : ""}`}>
+        {lines.map((l, i) => (
+          <div key={from + i} className="lp">
+            {html?.[i] ? <span dangerouslySetInnerHTML={{ __html: html[i] }} /> : <span>{l || " "}</span>}
+            {i === lines.length - 1 && <span className="caret" />}
+          </div>
+        ))}
       </div>
     </div>
   );

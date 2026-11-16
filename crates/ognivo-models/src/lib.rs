@@ -46,8 +46,12 @@ pub mod sse;
 pub mod template;
 
 pub use caps::{EngineCaps, ServerClass, ServerKind, StreamIds};
-pub use driver::{ChatDriver, DriverError, DriverEvent, Finished, ModelDriver, StepRequest};
-pub use engine::{CompletionRequest, EngineError, RawEngine, TokenEngine, TokenEvent, TokenId};
+pub use driver::{
+    ChatDriver, DriverError, DriverEvent, Finished, ModelDriver, Progress, StepRequest,
+};
+pub use engine::{
+    CompletionRequest, EngineError, PromptProgress, RawEngine, TokenEngine, TokenEvent, TokenId,
+};
 pub use family::Family;
 pub use generic::{
     Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, ExecutableCalls, FinishReason,

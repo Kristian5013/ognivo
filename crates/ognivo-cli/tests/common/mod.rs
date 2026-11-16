@@ -40,6 +40,35 @@ pub fn call_stream(id: &str, name: &str, args: &str) -> String {
     sse(&events)
 }
 
+/// [`call_stream`] as upstream llama-server sends it with `return_progress` and
+/// `timings_per_token`: how far it read the prompt of 12 400 tokens, 4 000 from its cache,
+/// each such chunk with the delta of an assistant message without content; then the call,
+/// each chunk with the server's count of the tokens so far.
+pub fn progress_call_stream(id: &str, name: &str, args: &str) -> String {
+    let timings =
+        |predicted: u32| json!({"cache_n": 4000, "prompt_n": 8400, "predicted_n": predicted});
+    let progress = |processed: u32| {
+        json!({"choices": [{"finish_reason": null, "index": 0, "delta": {"role": "assistant", "content": null}}],
+            "timings": timings(0),
+            "prompt_progress": {"total": 12400, "cache": 4000, "processed": processed, "time_ms": 50}})
+    };
+    let mut events = vec![progress(4000), progress(12400)];
+    let deltas = [
+        json!({"role": "assistant", "content": null}),
+        json!({"reasoning_content": "next step"}),
+        json!({"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": name, "arguments": "{"}}]}),
+        json!({"tool_calls": [{"index": 0, "function": {"arguments": &args[1..]}}]}),
+    ];
+    for (n, delta) in (1..).zip(deltas) {
+        let mut c = chunk(delta, None);
+        c["timings"] = timings(n);
+        events.push(c);
+    }
+    events.push(chunk(json!({}), Some("tool_calls")));
+    events.push(json!({"choices": [], "usage": {"prompt_tokens": 12400, "completion_tokens": 4}, "timings": timings(4)}));
+    sse(&events)
+}
+
 pub fn answer_stream(text: &str) -> String {
     sse(&[
         chunk(json!({"role": "assistant", "content": null}), None),
@@ -55,18 +84,46 @@ pub fn sse(events: &[Value]) -> String {
     )
 }
 
+/// What a fake server's `/props` say of its model's projector, which a test may switch while
+/// the server runs: `Some(true)` it runs one (`--mmproj`), `Some(false)` it runs none, `None`
+/// the server still loads its model and answers 503, as llama-server does then.
+pub type Vision = Arc<Mutex<Option<bool>>>;
+
 /// Serves `/props` (n_ctx 4096, one slot) whenever asked and `responses` to the chat
 /// requests in order; returns its URL and the bodies of the chat requests.
 pub async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let (url, bodies, _) = serve(None, responses, false).await;
+    let (url, bodies, _) = serve(None, responses, vision(Some(false))).await;
     (url, bodies)
 }
 
 /// [`fake_server`] with a projector: its model takes images.
 #[allow(dead_code)]
 pub async fn fake_seeing_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let (url, bodies, _) = serve(None, responses, true).await;
+    let (url, bodies, _) = serve(None, responses, vision(Some(true))).await;
     (url, bodies)
+}
+
+/// [`fake_server`] whose projector the test switches while it runs, as llama-server is
+/// started again with `--mmproj` or without it; it starts as `projector` says.
+pub async fn fake_switched_server(
+    responses: Vec<String>,
+    projector: Option<bool>,
+) -> (String, Arc<Mutex<Vec<Value>>>, Vision) {
+    let switch = vision(projector);
+    let (url, bodies, _) = serve(None, responses, switch.clone()).await;
+    (url, bodies, switch)
+}
+
+fn vision(projector: Option<bool>) -> Vision {
+    Arc::new(Mutex::new(projector))
+}
+
+/// What llama-server without a projector answers a chat request that holds an image.
+pub fn no_projector() -> String {
+    json_status(
+        "500 Internal Server Error",
+        &json!({"error": {"code": 500, "message": "image input is not supported - hint: if this is unexpected, you may need to provide the mmproj", "type": "server_error"}}),
+    )
 }
 
 /// llama-server's router with `models` (its `/models` list) in front of a fake server with
@@ -75,13 +132,17 @@ pub async fn fake_router(
     models: Value,
     responses: Vec<String>,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
-    serve(Some(models), responses, false).await
+    serve(Some(models), responses, vision(Some(false))).await
 }
 
 fn json_response(v: &Value) -> String {
+    json_status("200 OK", v)
+}
+
+fn json_status(status: &str, v: &Value) -> String {
     let body = v.to_string();
     format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
@@ -89,7 +150,7 @@ fn json_response(v: &Value) -> String {
 async fn serve(
     router: Option<Value>,
     responses: Vec<String>,
-    vision: bool,
+    vision: Vision,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -121,11 +182,17 @@ async fn serve(
                 Some(models) if head.starts_with("GET /models") => {
                     json_response(&json!({"data": models, "object": "list"}))
                 }
-                None if head.starts_with("GET /props") => json_response(&json!({
-                    "default_generation_settings": {"n_ctx": 4096},
-                    "total_slots": 1,
-                    "modalities": {"vision": vision},
-                })),
+                None if head.starts_with("GET /props") => match *vision.lock().unwrap() {
+                    Some(vision) => json_response(&json!({
+                        "default_generation_settings": {"n_ctx": 4096},
+                        "total_slots": 1,
+                        "modalities": {"vision": vision},
+                    })),
+                    None => json_status(
+                        "503 Service Unavailable",
+                        &json!({"error": {"code": 503, "message": "Loading model", "type": "unavailable_error"}}),
+                    ),
+                },
                 _ => {
                     seen.lock()
                         .unwrap()

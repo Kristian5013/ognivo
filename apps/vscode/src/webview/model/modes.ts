@@ -22,7 +22,7 @@ export const MODES: ModeInfo[] = [
   {
     mode: "edit_automatically",
     label: "Edit automatically",
-    says: "Edits apply at once, to review in Changes; commands ask as usual.",
+    says: "Edits apply at once, to keep or undo in the editor; commands ask as usual.",
     icon: "edit",
   },
   {

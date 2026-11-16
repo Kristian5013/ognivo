@@ -1,0 +1,951 @@
+/* The dock and the shell (app.tsx, approval.tsx, composer.tsx, chips.tsx, modelpop.tsx):
+   the session's title, the one-line bars under it, and below the conversation the question
+   the agent asks, the messages that wait for the turn, and the composer with its chips, its
+   pills and their popovers. It comes after panel.css; its words, room, corners and colours
+   are panel.css's tokens. */
+
+/* ---------------------------------------------------------------- the title, the bars */
+
+.head {
+  flex-shrink: 0;
+  display: flex;
+  min-width: 0;
+  padding: var(--sp-1) calc(var(--pad) - var(--sp-3)) var(--sp-3);
+}
+.head-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r);
+  color: var(--fg);
+  font-weight: 600;
+}
+.head-title:hover {
+  background: var(--hover);
+}
+.head-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.head-chev {
+  --icon: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.toolbar .head-title {
+  margin-left: var(--sp-2);
+  font-weight: 500;
+}
+
+/* a word on what shows, in one line */
+.bar {
+  --icon: 14px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  height: 30px;
+  margin: 0 var(--pad) var(--sp-3);
+  padding: 0 var(--sp-1) 0 var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.app > .bar:first-child,
+.toolbar + .bar {
+  margin-top: var(--sp-4);
+}
+.bar > .codicon {
+  flex-shrink: 0;
+}
+.bar-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bar .btn {
+  flex-shrink: 0;
+}
+.bar.warn > .codicon {
+  color: var(--warn);
+}
+.bar.warn .bar-text {
+  color: var(--fg);
+}
+
+/* ---------------------------------------------------------------- the dock */
+
+.dock {
+  container: dock / inline-size;
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--pad) var(--sp-6);
+}
+.dock-hint {
+  padding: var(--sp-4) 0 var(--sp-1);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------- the agent's question */
+
+/* one card, its keys where the focus is in it */
+.ask {
+  container-type: inline-size;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-5);
+  padding: var(--sp-6);
+  border: 1px solid color-mix(in srgb, var(--ember) 45%, var(--line));
+  border-radius: var(--r-xl);
+  background: var(--widget-bg);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--ember) 30%, transparent),
+    var(--shadow);
+}
+.ask.asking {
+  animation: ask-glow 2.4s ease-in-out infinite;
+}
+@keyframes ask-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--ember) 30%, transparent),
+      var(--shadow);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--ember) 75%, transparent),
+      var(--shadow);
+  }
+}
+/* the card has the keys: it stops calling (no glow) and its border is the focus's, one ring
+   rather than a focus outline around the ember one */
+.ask:focus {
+  outline: none;
+}
+.ask:focus-visible {
+  outline: 1px solid var(--focus);
+  outline-offset: -1px;
+  box-shadow: var(--shadow);
+  animation: none;
+}
+.ask.denying {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow);
+}
+.ask-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.ask-icon {
+  flex-shrink: 0;
+  color: var(--ember);
+}
+.ask-title {
+  flex-shrink: 0;
+  color: var(--fg);
+  font-weight: 600;
+}
+/* the question itself wraps in a narrow side bar; the deny form's words around the action
+   ("Not", "What instead?") stay whole */
+.ask-icon + .ask-title {
+  flex-shrink: 1;
+  min-width: 0;
+}
+.ask-agent {
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ask-action {
+  margin: 0;
+  max-height: 140px;
+  overflow: auto;
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--code-bg);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: var(--fs-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ask-prompt {
+  color: var(--muted);
+  user-select: none;
+}
+/* the reason in one line; all of it in its tooltip */
+.ask-why {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.ask-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+.ask-no {
+  margin-left: auto;
+}
+/* VS Code's keybinding label, as the button's own text: not the page's default colours */
+.ask kbd {
+  display: inline-block;
+  margin-left: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border: none;
+  border-radius: var(--r-sm);
+  box-shadow: none;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  color: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  vertical-align: baseline;
+  opacity: 1;
+}
+.ask-instead {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-5);
+}
+.ask-instead .ask-head {
+  gap: var(--sp-2);
+}
+.ask-not {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  font-weight: 600;
+}
+.ask-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-weight: 400;
+}
+.ask-instead input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+}
+
+/* ---------------------------------------------------------------- what waits for the turn */
+
+/* a message sent into the running turn */
+.steered {
+  --icon: 14px;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  font-size: var(--fs-sm);
+}
+.steered .codicon {
+  flex-shrink: 0;
+  color: var(--ember);
+}
+.steered span:not(.codicon) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the messages that wait for the turn to end */
+.queue {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-3);
+  max-height: 140px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+.queued {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-5);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  font-size: var(--fs-sm);
+}
+.queued-icon {
+  --icon: 13px;
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.queued-label {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.queued-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queued .btn,
+.queued .icon-button {
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------- the composer */
+
+.composer {
+  container-type: inline-size;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4) var(--sp-3) var(--sp-5);
+  border: 1px solid var(--input-border);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  transition: border-color 0.12s;
+  cursor: text;
+}
+.composer:focus-within {
+  border-color: var(--focus);
+}
+.composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 42px;
+  resize: none;
+  padding: var(--sp-1) 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  line-height: 1.5;
+}
+.composer.dropping {
+  border-color: var(--focus);
+  background: color-mix(in srgb, var(--focus) 8%, var(--surface));
+}
+.composer-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+  cursor: default;
+}
+.composer-bar .attach {
+  margin-right: var(--sp-1);
+  color: var(--muted);
+}
+.composer-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  color: var(--err);
+  font-size: var(--fs-sm);
+}
+.composer-error > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.composer-error .icon-button {
+  width: 18px;
+  height: 18px;
+}
+
+/* what goes with the message: chips (panel.css), and their x */
+.ctx-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  min-width: 0;
+  cursor: default;
+}
+.ctx-chip {
+  padding-right: var(--sp-1);
+}
+.ctx-chip-hint {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.ctx-chip-x {
+  --icon: 11px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: var(--muted);
+}
+.ctx-chip-x:hover {
+  background: var(--press);
+  color: var(--fg);
+}
+.ctx-chip.is-file .ctx-chip-icon {
+  color: var(--file-icon);
+}
+.ctx-chip.is-selection .ctx-chip-icon {
+  color: var(--link);
+}
+.ctx-chip.is-terminal .ctx-chip-icon,
+.ctx-chip.is-error .ctx-chip-icon {
+  color: var(--err);
+}
+.ctx-chip.is-warning .ctx-chip-icon {
+  color: var(--warn);
+}
+.ctx-chip-thumb {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-left: calc(-1 * var(--sp-2));
+  border-radius: 3px;
+  object-fit: cover;
+}
+/* a failed command offered, not attached: dashed, with a + */
+.ctx-chip.suggest {
+  border-style: dashed;
+  border-color: var(--line-strong);
+  background: transparent;
+  color: var(--muted);
+}
+.ctx-chip.suggest:hover {
+  color: var(--fg);
+}
+.ctx-chip-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  height: 100%;
+  color: inherit;
+}
+.ctx-chip.suggest .ctx-chip-icon {
+  color: inherit;
+}
+
+/* the files `@` finds */
+.mentions {
+  position: absolute;
+  bottom: calc(100% + var(--sp-3));
+  left: 0;
+  right: 0;
+  z-index: 10;
+  margin: 0;
+  padding: var(--sp-2);
+  list-style: none;
+  border: 1px solid var(--menu-border);
+  border-radius: var(--r-lg);
+  background: var(--menu-bg);
+  box-shadow: var(--shadow);
+}
+.mentions button {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  height: var(--row);
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-sm);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
+.mentions button.chosen,
+.mentions button:hover {
+  background: var(--list-chosen);
+  color: var(--list-chosen-fg);
+}
+
+/* ---------------------------------------------------------------- the composer's pills */
+
+.pill {
+  --icon: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: 100%;
+  height: var(--row);
+  padding: 0 7px;
+  border-radius: var(--r);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+.pill:hover,
+.pill[aria-expanded="true"] {
+  color: var(--fg);
+  background: var(--hover);
+}
+.pill-chev {
+  --icon: 11px;
+  opacity: 0.7;
+}
+.pill-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pill.mode-auto,
+.menu-icon.mode-auto {
+  color: var(--warn);
+}
+.pill.mode-plan,
+.menu-icon.mode-plan {
+  color: var(--ember);
+}
+.pill.mode-auto:hover,
+.pill.mode-plan:hover {
+  color: var(--fg);
+}
+/* the modes' menu opens above the composer (its box, not the pill's), not over what is
+   written in it */
+.composer .picker {
+  position: static;
+  flex-shrink: 0;
+}
+.composer .picker > .menu {
+  left: 0;
+  bottom: calc(100% + var(--sp-4));
+}
+
+/* the model's pill: its name, and its level beside it while there is room. Where there is
+   none the level goes to a second line, out of sight, with the chevron, rather than show as
+   "m…" */
+.pill.model {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  min-width: 56px;
+  overflow: hidden;
+}
+.pill.model > * {
+  line-height: var(--row);
+}
+.pill.model .pill-text {
+  flex-shrink: 1;
+  min-width: 3ch;
+}
+.pill.model .pill-level {
+  flex-shrink: 0;
+  color: var(--subtle);
+}
+.pill.model[aria-expanded="true"] .pill-level {
+  color: var(--muted);
+}
+
+/* the session's notes, by the ring */
+.pill.notes {
+  flex-shrink: 0;
+  gap: 3px;
+  padding: 0 var(--sp-3);
+}
+.pill.notes.err {
+  color: var(--err);
+}
+.notes-count {
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* how full the context is */
+.ring {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--row);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r);
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.ring:hover {
+  color: var(--muted);
+  background: var(--hover);
+}
+.ring circle {
+  fill: none;
+  stroke-width: 2;
+}
+.ring-track {
+  stroke: var(--line-strong);
+}
+.ring-fill {
+  stroke: var(--muted);
+  stroke-linecap: round;
+}
+.ring.warn {
+  color: var(--warn);
+}
+.ring.warn .ring-fill {
+  stroke: var(--warn);
+}
+
+/* send, queue and stop */
+.round {
+  --icon: 14px;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  margin-left: var(--sp-1);
+  border-radius: 50%;
+  transition:
+    background 0.12s,
+    color 0.12s;
+}
+.round.send {
+  color: var(--muted);
+  background: var(--chip-bg);
+}
+.round.send.ready {
+  border: 1px solid var(--accent-border);
+  color: var(--accent-fg);
+  background: var(--accent);
+}
+.round.send.ready:hover {
+  background: var(--accent-hover);
+}
+.round.stop {
+  background: var(--fg);
+}
+.round.stop:hover {
+  opacity: 0.85;
+}
+.stop-square {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--bg);
+}
+
+/* ---------------------------------------------------------------- the composer's popovers */
+
+/* above the composer, as wide as it */
+.modelpop,
+.notes-pop {
+  --icon: 14px;
+  position: fixed;
+  z-index: 40;
+  overflow-y: auto;
+  border: 1px solid var(--menu-border);
+  border-radius: var(--r-xl);
+  background: var(--menu-bg);
+  box-shadow: var(--shadow);
+  font-size: var(--fs-sm);
+  cursor: default;
+  animation: pop-in 0.12s ease-out;
+}
+@keyframes pop-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.notes-list {
+  display: grid;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: var(--sp-3);
+  list-style: none;
+}
+.notes-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--muted);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.notes-item > .codicon {
+  flex-shrink: 0;
+  margin-top: var(--sp-1);
+}
+.notes-item.err {
+  color: var(--err);
+}
+.notes-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+
+.mp-server {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  padding: 7px var(--sp-3) 7px var(--sp-6);
+  border-bottom: 1px solid var(--line);
+}
+.mp-server > .codicon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+/* where room is short, the address keeps it and what the server is gives way */
+.mp-address {
+  flex-shrink: 0;
+  max-width: 60%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.mp-what {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mp-server .mp-link {
+  flex-shrink: 0;
+}
+.mp-note {
+  padding: var(--sp-4) var(--sp-6);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  line-height: 1.45;
+}
+.mp-section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-6) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+}
+.mp-title {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.mp-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.mp-for {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.mp-models {
+  display: grid;
+  margin: 0 calc(-1 * var(--sp-6)) calc(-1 * var(--sp-2));
+}
+.mp-model {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 var(--sp-6);
+  text-align: left;
+}
+.mp-model:hover,
+.mp-model:focus-visible {
+  outline: none;
+  background: var(--list-hover);
+}
+.mp-model.on {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.mp-radio {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border: 1.5px solid var(--muted);
+  border-radius: 50%;
+}
+.mp-model.on .mp-radio {
+  border-color: var(--link);
+}
+.mp-model.on .mp-radio::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--link);
+}
+/* the model's name first; its state and profile in what room is left */
+.mp-name {
+  flex-shrink: 0;
+  max-width: 72%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: var(--fs);
+}
+.mp-meta {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.seg.mp-levels {
+  display: flex;
+  width: 100%;
+}
+.seg.mp-levels button {
+  flex: 1;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 var(--sp-3);
+}
+.mp-hint {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.mp-context {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+.mp-context .select {
+  min-width: 0;
+  margin-left: auto;
+}
+.mp-error {
+  padding: var(--sp-3) var(--sp-6);
+  border-bottom: 1px solid var(--line);
+  color: var(--err);
+}
+.mp-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-3);
+}
+.mp-link {
+  --icon: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mp-link:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+
+/* ---------------------------------------------------------------- narrow */
+
+/* the composer's own width (its content box): what gives way first */
+@container (max-width: 440px) {
+  .answer-now > span:not(.codicon) {
+    display: none;
+  }
+}
+@container (max-width: 330px) {
+  .ring-text,
+  .composer .pill-chev {
+    display: none;
+  }
+  .pill {
+    padding: 0 5px;
+  }
+}
+@container (max-width: 300px) {
+  .ring,
+  .ctx-chip-hint {
+    display: none;
+  }
+}
+@container (max-width: 270px) {
+  .picker .pill > span:not(.codicon) {
+    display: none;
+  }
+}
+/* a side bar of 240px: the + goes (an image still comes by paste or drop) */
+@container (max-width: 210px) {
+  .composer-bar .attach {
+    display: none;
+  }
+}
+/* the queue's label goes, its clock stays */
+@container dock (max-width: 300px) {
+  .queued-label {
+    display: none;
+  }
+}
+/* the question's buttons one under the other, all as wide, the answer first */
+@container (max-width: 340px) {
+  .ask-buttons {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .ask-buttons .spacer {
+    display: none;
+  }
+  .ask-buttons .btn.primary {
+    order: -2;
+  }
+  .ask-buttons .btn.secondary {
+    order: -1;
+  }
+  .ask .ask-no {
+    margin-left: 0;
+  }
+}
+
+/* high contrast: the send button's circle has the theme's border, as its other buttons;
+   what is under the pointer has the theme's dashed border, as VS Code's lists */
+body.vscode-high-contrast .round.send {
+  border: 1px solid var(--line);
+}
+body.vscode-high-contrast .pill:hover,
+body.vscode-high-contrast .mp-model:hover,
+body.vscode-high-contrast .mp-link:hover,
+body.vscode-high-contrast .head-title:hover {
+  outline: 1px dashed var(--active-border);
+  outline-offset: -1px;
+}

@@ -5,7 +5,9 @@
 //! - The system prompt of a conversation is a `system` step (again only when it changed),
 //!   a compaction's note is one too, with the compaction in its `extra`, and so is every
 //!   note ognivo gave the model.
-//! - The user's messages are `user` steps, with what their images were in `extra`.
+//! - The user's messages are `user` steps, with what their images were in `extra`; so is
+//!   what the user wrote while a turn ran (`turn/steer`), where the model got it, with
+//!   `steered` in its `extra`.
 //! - Each generation is an `agent` step: its text, its reasoning, the calls that ran and
 //!   their results as the observation, its tokens as metrics (`prompt_tokens` counts the
 //!   cached ones too, as ATIF has it). Its `extra` holds why it ran (`step`, or `summary`
@@ -161,6 +163,13 @@ impl Builder {
                 self.agent = None;
                 let step =
                     json!({"source": "system", "message": d["text"], "extra": {"from": "ognivo"}});
+                self.push(step, at);
+            }
+            // the model got it with the next step, after the results of the one before
+            "steered" => {
+                self.agent = None;
+                let step =
+                    json!({"source": "user", "message": d["text"], "extra": {"steered": true}});
                 self.push(step, at);
             }
             "generation" => {

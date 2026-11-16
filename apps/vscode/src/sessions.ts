@@ -9,8 +9,9 @@ import type { Connection } from "./client.ts";
 import { ERRORS } from "./shared/protocol.ts";
 import type * as P from "./shared/protocol.ts";
 import { CoreError } from "./shared/rpc.ts";
-import { ago, samePath } from "./shared/text.ts";
+import { ago } from "./shared/text.ts";
 import { folders } from "./view.ts";
+import { iconless, unlinked } from "./wording.ts";
 
 type SessionItem = vscode.QuickPickItem & { thread?: number; title?: string };
 
@@ -33,7 +34,7 @@ export async function deleteSession(connection: Connection, thread: number, titl
     await core.call("thread/delete", { thread });
   } catch (e) {
     const busy = e instanceof CoreError && e.code === ERRORS.busy;
-    void vscode.window.showErrorMessage(busy ? "ognivo: a turn of the session runs: stop it first." : `ognivo: ${e instanceof Error ? e.message : String(e)}`);
+    void vscode.window.showErrorMessage(busy ? "ognivo: a turn of the session runs: stop it first." : unlinked(`ognivo: ${e instanceof Error ? e.message : String(e)}`));
     return false;
   }
   return true;
@@ -43,26 +44,34 @@ export async function deleteSession(connection: Connection, thread: number, titl
  * button deletes it. */
 export async function pickSession(connection: Connection, onDeleted: (thread: number) => void): Promise<number | undefined> {
   const core = await connection.get();
-  const here = new Set(folders().map(samePath));
-  const item = (t: P.ThreadSummary): SessionItem => ({
-    label: t.title || "New session",
+  // a title or a path is what it says: `$(pwd)` in it draws no icon
+  const item = (t: P.ThreadSummary, here: boolean): SessionItem => ({
+    label: iconless(t.title) || "New session",
     description: [t.profile, `${t.turns} ${t.turns === 1 ? "turn" : "turns"}`, t.unreviewed ? `${t.unreviewed} unreviewed` : ""]
       .filter(Boolean)
       .join(" · "),
-    detail: `${t.running ? "$(loading~spin) running · " : ""}${ago(t.updated)}${here.has(samePath(t.project)) ? "" : ` · ${t.project}`}`,
+    detail: `${t.running ? "$(loading~spin) running · " : ""}${ago(t.updated)}${here ? "" : ` · ${iconless(t.project)}`}`,
     thread: t.thread,
     title: t.title,
     buttons: [DELETE],
   });
+  // this workspace's are the core's sessions of each folder: the core names a project by its
+  // real path, and finds a folder's by any spelling of it (a link, an 8.3 name)
   const list = async (): Promise<SessionItem[]> => {
-    const { threads } = await core.call("thread/list", { project: null, limit: 200 });
-    const mine = threads.filter((t) => here.has(samePath(t.project)) && t.kind !== "subagent");
-    const others = threads.filter((t) => !here.has(samePath(t.project)) && t.kind !== "subagent");
+    const [all, each] = await Promise.all([
+      core.call("thread/list", { project: null, limit: 200 }),
+      Promise.all(folders().map((project) => core.call("thread/list", { project, limit: 200 }))),
+    ]);
+    const here = new Map<number, P.ThreadSummary>();
+    for (const t of each.flatMap((r) => r.threads)) if (t.kind !== "subagent") here.set(t.thread, t);
+    // the newest first, as the core lists them
+    const mine = [...here.values()].sort((a, b) => b.updated - a.updated || b.thread - a.thread);
+    const others = all.threads.filter((t) => !here.has(t.thread) && t.kind !== "subagent");
     return [
       ...(mine.length ? [{ label: "This workspace", kind: vscode.QuickPickItemKind.Separator }] : []),
-      ...mine.map(item),
+      ...mine.map((t) => item(t, true)),
       ...(others.length ? [{ label: "Other projects", kind: vscode.QuickPickItemKind.Separator }] : []),
-      ...others.map(item),
+      ...others.map((t) => item(t, false)),
     ];
   };
   const items = await list();
@@ -118,11 +127,11 @@ export async function chooseModel(connection: Connection): Promise<void> {
   let detected: P.Detected;
   try {
     detected = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: `ognivo: asking ${url} what it runs` },
+      { location: vscode.ProgressLocation.Notification, title: unlinked(`ognivo: asking ${url} what it runs`) },
       () => core.call("server/detect", { url, api_key: null, model: null }),
     );
   } catch (e) {
-    void vscode.window.showErrorMessage(`ognivo: ${url} did not answer: ${e instanceof Error ? e.message : String(e)}`);
+    void vscode.window.showErrorMessage(unlinked(`ognivo: ${url} did not answer: ${e instanceof Error ? e.message : String(e)}`));
     return;
   }
   await settings.update("server", url, vscode.ConfigurationTarget.Global);
@@ -142,6 +151,6 @@ export async function chooseModel(connection: Connection): Promise<void> {
   await settings.update("model", model, vscode.ConfigurationTarget.Global);
   const profile = model ? (await core.call("server/detect", { url, api_key: null, model })).profile : detected.profile;
   void vscode.window.showInformationMessage(
-    `ognivo: new sessions work with ${model || detected.model || url}${profile ? ` (profile ${profile})` : ": no profile fits it, so the Generic path guesses"}.`,
+    unlinked(`ognivo: new sessions work with ${model || detected.model || url}${profile ? ` (profile ${profile})` : ": no profile fits it, so the Generic path guesses"}.`),
   );
 }

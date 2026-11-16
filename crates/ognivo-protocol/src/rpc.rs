@@ -8,7 +8,8 @@
 //!   while a question waits gets it too. The first answer counts. A question that is
 //!   answered elsewhere or no longer waits is withdrawn with [`CANCEL`].
 //! - A client that comes back reads what it missed: `thread/read` with the last `seq` it
-//!   saw. Text deltas are not kept; the items they make up are.
+//!   saw. Text deltas are not kept, the items they make up are; nor is what only tells the
+//!   clients there how things stand ([`crate::EventKind::kept`]).
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -34,10 +35,15 @@ pub const TURN_START: &str = "turn/start";
 pub const TURN_INTERRUPT: &str = "turn/interrupt";
 pub const TURN_ANSWER_NOW: &str = "turn/answer_now";
 pub const TURN_EDIT: &str = "turn/edit";
+pub const TURN_STEER: &str = "turn/steer";
 pub const THREAD_MODE: &str = "thread/mode";
+/// Asks the open thread's server again whether its model takes images ([`Vision`]).
+pub const THREAD_VISION: &str = "thread/vision";
 pub const CHANGES_LIST: &str = "changes/list";
 pub const CHANGES_ACCEPT: &str = "changes/accept";
 pub const CHANGES_REVERT: &str = "changes/revert";
+pub const CHANGES_ACCEPT_HUNK: &str = "changes/accept_hunk";
+pub const CHANGES_REVERT_HUNK: &str = "changes/revert_hunk";
 pub const CHANGES_BASE: &str = "changes/base";
 pub const CORE_QUIT: &str = "core/quit";
 
@@ -66,6 +72,11 @@ pub mod error {
     pub const UNSUPPORTED: i64 = -32005;
     /// The turn is not in the conversation any more: a `/clear` or a compaction came after.
     pub const NO_TURN: i64 = -32006;
+    /// The file's change has no hunk equal to the one sent any more: the file changed since
+    /// the client listed it. It lists the changes again.
+    pub const STALE: i64 = -32007;
+    /// No turn of the thread runs: the client starts one instead.
+    pub const IDLE: i64 = -32008;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -132,7 +143,7 @@ pub struct ThreadSummary {
     pub context: Option<Context>,
     /// Open: its mode.
     pub mode: Option<Mode>,
-    /// Open: whether its model takes images.
+    /// Open: whether its model takes images, as its server last said (`thread/vision`).
     #[serde(default)]
     pub vision: Option<bool>,
 }
@@ -249,7 +260,9 @@ pub struct Opened {
     pub answer_now: bool,
     pub context: Context,
     pub mode: Mode,
-    /// Whether its model takes images (`/props`): `turn/start` refuses them otherwise.
+    /// Whether its model takes images, as its server's `/props` said at the start. While it
+    /// takes none, `turn/start` asks the server again before it refuses images, and so does
+    /// `thread/vision`.
     #[serde(default)]
     pub vision: bool,
 }
@@ -265,6 +278,17 @@ pub struct SetMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ThreadRef {
     pub thread: ThreadId,
+}
+
+/// `thread/vision`: whether the open thread's model takes images, its server's `/props` read
+/// again; params are a `ThreadRef`. A server started with its projector (`--mmproj`) since
+/// the thread opened takes images from then on, one started again without it none: what
+/// `/props` say becomes the thread's, which `turn/start` and `thread/list` go by. `/props`
+/// that do not say, or do not come within 3 s, leave it as it was. Answered while a turn
+/// runs too; `NO_THREAD` for a thread the core does not have open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct Vision {
+    pub vision: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -323,6 +347,17 @@ pub struct EditTurn {
     pub images: Vec<NewImage>,
 }
 
+/// `turn/steer`: what the user writes while a turn of the thread runs, which the model gets
+/// with its next request (an item `steer` says where); what the turn ends without giving it
+/// comes back in `turn_completed`'s `undelivered`. The answer is `Done`; an error `IDLE` when
+/// no turn runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SteerTurn {
+    pub thread: ThreadId,
+    /// The user's message; not empty.
+    pub text: String,
+}
+
 /// What the agent changed and nobody reviewed yet: its edit journal (§8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct Changes {
@@ -374,6 +409,20 @@ pub struct Revert {
 pub struct Reverted {
     /// The agent had created the file, and it is gone.
     pub removed: bool,
+}
+
+/// `changes/accept_hunk` and `changes/revert_hunk`: one hunk of a file's unreviewed change,
+/// kept (what the file was before takes it) or undone (the file loses it). The answer is
+/// the thread's `Changes` after it. Errors: `STALE` when the file's change has no hunk
+/// equal to `hunk` now; `JOURNAL` for a file the agent created or deleted, one that is not
+/// UTF-8 or has no change; `BUSY` while a turn runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct HunkRef {
+    pub thread: ThreadId,
+    /// As `changes/list` names it: relative to the project root inside it, absolute outside.
+    pub path: String,
+    /// The hunk as `changes/list` gave it.
+    pub hunk: Hunk,
 }
 
 /// `changes/base`: what a file with an unreviewed change held before it, which a client

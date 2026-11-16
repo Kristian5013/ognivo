@@ -27,7 +27,12 @@ answer: string | null,
 /**
  * What the facts of the turn say of the answer, e.g. `NOT verified: …`.
  */
-verification: string | null, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, });
+verification: string | null, 
+/**
+ * What the user wrote while it ran (`turn/steer`) and the model never got, because
+ * the turn ended first, in the order it came: a client sends it as the next turn.
+ */
+undelivered?: Array<string>, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, } | { "event": "progress", progress: Progress, } | { "event": "changes_updated" });
 
 export type EventKind = { "event": "thread_started", info: ThreadInfo, } | { "event": "turn_started", turn: TurnId, 
 /**
@@ -49,7 +54,12 @@ answer: string | null,
 /**
  * What the facts of the turn say of the answer, e.g. `NOT verified: …`.
  */
-verification: string | null, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, };
+verification: string | null, 
+/**
+ * What the user wrote while it ran (`turn/steer`) and the model never got, because
+ * the turn ended first, in the order it came: a client sends it as the next turn.
+ */
+undelivered?: Array<string>, } | { "event": "mode_changed", mode: Mode, } | { "event": "call_draft", draft: CallDraft, } | { "event": "progress", progress: Progress, } | { "event": "changes_updated" };
 
 export type ThreadId = number;
 
@@ -158,7 +168,7 @@ end: TurnEnd | null, steps: number | null,
 /**
  * The files it changed.
  */
-changed: Array<string>, });
+changed: Array<string>, } | { "kind": "steer", text: string, });
 
 export type ItemBody = { "kind": "agent_message", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "tool_call", 
 /**
@@ -224,7 +234,7 @@ end: TurnEnd | null, steps: number | null,
 /**
  * The files it changed.
  */
-changed: Array<string>, };
+changed: Array<string>, } | { "kind": "steer", text: string, };
 
 export type Call = { "name": "Read", path: string, offset: number | null, limit: number | null, } | { "name": "Edit", path: string, old: string, new: string, replace_all: boolean, } | { "name": "Write", path: string, content: string, } | { "name": "ApplyPatch", patch: string, } | { "name": "Bash", command: string, timeout_ms: number | null, } | { "name": "Grep", pattern: string, path: string | null, glob: string | null, } | { "name": "Glob", pattern: string, path: string | null, } | { "name": "Task", tasks: Array<Task>, } | { "name": "Mcp", server: string, tool: string, 
 /**
@@ -325,6 +335,39 @@ tool: string | null,
  */
 field: string | null, text: string, };
 
+export type Progress = { 
+/**
+ * The generation it is about, by its number in the thread, as `call_draft`'s.
+ */
+generation: number, phase: ProgressPhase, 
+/**
+ * The prompt's tokens in all; `None` when the server does not say.
+ */
+prompt_total: number | null, 
+/**
+ * Of `prompt_total`, those the server took from its KV cache; `None` when it does not
+ * say.
+ */
+prompt_cached: number | null, 
+/**
+ * Of `prompt_total`, those the server has read so far; `None` when it does not say.
+ */
+prompt_done: number | null, 
+/**
+ * The tokens the generation wrote so far, reasoning and calls included.
+ */
+generated: number, 
+/**
+ * Milliseconds since the request went out.
+ */
+elapsed_ms: number, 
+/**
+ * Tokens a second the generation writes, so far; `None` before its second token.
+ */
+tokens_per_second: number | null, };
+
+export type ProgressPhase = "waiting" | "prompt" | "reasoning" | "writing";
+
 export type Image = { 
 /**
  * `image/png`, `image/jpeg`, `image/gif` or `image/bmp`.
@@ -410,7 +453,7 @@ context: Context | null,
  */
 mode: Mode | null, 
 /**
- * Open: whether its model takes images.
+ * Open: whether its model takes images, as its server last said (`thread/vision`).
  */
 vision: boolean | null, };
 
@@ -502,13 +545,17 @@ notes: Array<string>,
  */
 answer_now: boolean, context: Context, mode: Mode, 
 /**
- * Whether its model takes images (`/props`): `turn/start` refuses them otherwise.
+ * Whether its model takes images, as its server's `/props` said at the start. While it
+ * takes none, `turn/start` asks the server again before it refuses images, and so does
+ * `thread/vision`.
  */
 vision: boolean, };
 
 export type SetMode = { thread: ThreadId, mode: Mode, };
 
 export type ThreadRef = { thread: ThreadId, };
+
+export type Vision = { vision: boolean, };
 
 export type ReadThread = { thread: ThreadId, 
 /**
@@ -546,6 +593,12 @@ export type EditTurn = { thread: ThreadId, turn: TurnId, text: string,
  * The images of the message written anew, as `turn/start` takes them.
  */
 images?: Array<NewImage>, };
+
+export type SteerTurn = { thread: ThreadId, 
+/**
+ * The user's message; not empty.
+ */
+text: string, };
 
 export type NewImage = { 
 /**
@@ -609,6 +662,16 @@ export type Reverted = {
  * The agent had created the file, and it is gone.
  */
 removed: boolean, };
+
+export type HunkRef = { thread: ThreadId, 
+/**
+ * As `changes/list` names it: relative to the project root inside it, absolute outside.
+ */
+path: string, 
+/**
+ * The hunk as `changes/list` gave it.
+ */
+hunk: Hunk, };
 
 export type BaseOf = { thread: ThreadId, 
 /**
@@ -836,10 +899,14 @@ export type Methods = {
   "turn/interrupt": { params: ThreadRef; result: Done };
   "turn/answer_now": { params: ThreadRef; result: Done };
   "turn/edit": { params: EditTurn; result: Done };
+  "turn/steer": { params: SteerTurn; result: Done };
   "thread/mode": { params: SetMode; result: Done };
+  "thread/vision": { params: ThreadRef; result: Vision };
   "changes/list": { params: ThreadRef; result: Changes };
   "changes/accept": { params: Accept; result: Accepted };
   "changes/revert": { params: Revert; result: Reverted };
+  "changes/accept_hunk": { params: HunkRef; result: Changes };
+  "changes/revert_hunk": { params: HunkRef; result: Changes };
   "changes/base": { params: BaseOf; result: Base };
   "core/quit": { params: Quit; result: Done };
 };
@@ -856,4 +923,4 @@ export type Asks = {
 export const NOTIFY_EVENT = "event";
 export const NOTIFY_CANCEL = "$/cancelRequest";
 
-export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005, noTurn: -32006 } as const;
+export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005, noTurn: -32006, stale: -32007, idle: -32008 } as const;

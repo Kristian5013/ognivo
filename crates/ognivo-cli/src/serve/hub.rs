@@ -153,8 +153,10 @@ impl Hub {
         }
     }
 
-    /// Numbers `out`, keeps it in the store but the deltas, and sends it to the clients.
-    /// `root` is the user's thread whose events these are, its subagents' included.
+    /// Numbers `out`, keeps in the store what is kept ([`p::EventKind::kept`]: not what
+    /// streams, nor what only tells the clients there how things stand), and sends it all
+    /// to the clients. `root` is the user's thread whose events these are, its subagents'
+    /// included.
     pub fn emit(&self, root: p::ThreadId, out: Out) {
         if out.is_empty() {
             return;
@@ -163,11 +165,9 @@ impl Hub {
         let clients = lock(&self.clients);
         for (thread, kind) in out {
             log.seq += 1;
-            // what streams is kept in the items it makes up
-            let keep = !matches!(
-                kind,
-                p::EventKind::ItemDelta { .. } | p::EventKind::CallDraft { .. }
-            );
+            // what streams is kept in the items it makes up; what only tells the clients
+            // there how things stand is not kept at all
+            let keep = kind.kept();
             let event = p::Event {
                 seq: log.seq,
                 thread,

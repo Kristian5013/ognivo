@@ -3,6 +3,10 @@
 
 import "@vscode/codicons/dist/codicon.css";
 import "./panel.css";
+// after the panel's, so that their rules win over its
+import "./thread.css";
+import "./dock.css";
+import "./welcome.css";
 
 import { createRoot } from "react-dom/client";
 

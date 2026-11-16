@@ -1,0 +1,706 @@
+/* The thread's styles (thread.tsx, tool.tsx): a calm conversation, a line a step; the
+   cards of what changed; the summary of a turn; the line at the end of a running turn. It
+   comes after panel.css and refines its rules for the thread. Its words, room, corners and
+   colours are panel.css's tokens. */
+
+.thread-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  container-type: inline-size;
+  /* a line's icon; an icon button keeps VS Code's 16px */
+  --icon: 14px;
+}
+
+/* ---------------------------------------------------------------- a step's line */
+
+/* reasoning, an exploration: a line as wide as the row, its chevron at the end */
+.think-head,
+.steps-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: calc(100% + 2 * var(--sp-3));
+  min-width: 0;
+  height: var(--row);
+  margin: 0 calc(-1 * var(--sp-3));
+  padding: 0 var(--sp-3);
+  border-radius: var(--r);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+.think-head:hover:not(:disabled),
+.steps-head:hover {
+  background: var(--hover);
+  color: var(--fg);
+}
+.think-icon,
+.steps-icon {
+  flex-shrink: 0;
+}
+.think.live .think-icon,
+.steps.is-running .steps-icon {
+  color: var(--ember);
+}
+.think-head .chev,
+.steps-head .chev {
+  --icon: 12px;
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0;
+  transition:
+    opacity 0.1s,
+    transform 0.12s;
+}
+.think-head:hover .chev,
+.think-head:focus-visible .chev,
+.steps-head:hover .chev,
+.steps-head:focus-visible .chev {
+  opacity: 1;
+}
+.think-head[aria-expanded="true"] .chev,
+.steps-head[aria-expanded="true"] .chev {
+  opacity: 1;
+  transform: rotate(90deg);
+}
+.steps-say {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.steps-head .tag {
+  flex-shrink: 0;
+}
+/* what is under a line: its guide under the middle of the line's icon (7px), then the
+   thought, or an exploration's calls and thoughts */
+.think-text {
+  margin: var(--sp-1) 0 var(--sp-3) 7px;
+  padding: var(--sp-1) 0 var(--sp-1) var(--sp-6);
+  border-left: 1px solid var(--line-strong);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.steps-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 0 0 var(--sp-2) 7px;
+  padding-left: var(--sp-6);
+  border-left: 1px solid var(--line-strong);
+}
+
+/* ---------------------------------------------------------------- ognivo's notes */
+
+/* ognivo's notes and the records of a turn (an approval, the instructions) are lines as
+   tall as a step's, their icon and words where a step has them (panel.css); the notes are
+   quieter */
+.note.notice {
+  color: var(--subtle);
+}
+button.note.notice:hover {
+  color: var(--muted);
+}
+
+/* what the user wrote while the agent worked: the mark, and the words and chips beside it */
+.steer {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  width: fit-content;
+  max-width: calc(100% - var(--sp-6));
+  margin-left: var(--sp-6);
+  padding: var(--sp-2) var(--sp-5) var(--sp-2) var(--sp-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  font-size: var(--fs-sm);
+}
+.steer-mark {
+  flex-shrink: 0;
+  color: var(--ember);
+}
+.steer-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+}
+.steer-text {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+}
+.steer-chip {
+  --icon: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+/* ---------------------------------------------------------------- the user's message */
+
+/* what the message carried from the editor: a chip each (panel.css), open to what it
+   carried */
+.msg-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+}
+.msg-user > .msg-chips:first-child {
+  margin-top: 0;
+}
+button.msg-chip:hover {
+  border-color: var(--line-strong);
+}
+.msg-chip.on {
+  border-color: var(--focus);
+}
+.msg-chip-detail {
+  margin-top: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+.msg-chip-detail .md > ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.msg-chips.editing-chips {
+  margin: 0;
+  padding: 0 var(--sp-6) var(--sp-3);
+}
+
+/* ---------------------------------------------------------------- a command */
+
+.cmdrow-head {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0 calc(-1 * var(--sp-3));
+  border-radius: var(--r);
+}
+.cmdrow-head:hover {
+  background: var(--hover);
+}
+.cmdrow-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  height: var(--row);
+  padding: 0 var(--sp-3);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+.cmdrow-toggle:hover .cmdrow-verb {
+  color: var(--fg);
+}
+.cmdrow-icon {
+  flex-shrink: 0;
+}
+.cmdrow.is-running .cmdrow-icon {
+  color: var(--ember);
+}
+.cmdrow.is-ok .cmdrow-icon {
+  color: var(--ok);
+}
+.cmdrow.is-failed .cmdrow-icon {
+  color: var(--err);
+}
+.cmdrow.is-refused .cmdrow-icon {
+  color: var(--warn);
+}
+.cmdrow-verb {
+  flex-shrink: 0;
+}
+.cmdrow-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  font-size: var(--fs-code-sm);
+}
+.cmdrow-more {
+  flex-shrink: 0;
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+}
+.cmdrow-facts {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: var(--sp-3);
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+.cmdrow-facts .err {
+  color: var(--err);
+}
+.cmdrow-toggle .chev {
+  --icon: 12px;
+  flex-shrink: 0;
+  margin-left: auto;
+  opacity: 0;
+  transition:
+    opacity 0.1s,
+    transform 0.12s;
+}
+.cmdrow-facts + .chev {
+  margin-left: 0;
+}
+.cmdrow-toggle:hover .chev,
+.cmdrow-toggle:focus-visible .chev {
+  opacity: 1;
+}
+.cmdrow-toggle[aria-expanded="true"] .chev {
+  opacity: 1;
+  transform: rotate(90deg);
+}
+/* the terminal that shows the agent's commands, on hover */
+.cmdrow-terminal {
+  --icon: 13px;
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 22px;
+  margin-right: var(--sp-1);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-sm);
+  color: var(--link);
+  font-size: var(--fs-xs);
+}
+.cmdrow-terminal:hover {
+  background: var(--hover);
+}
+.cmdrow-head:hover .reveal,
+.cmdrow-head:focus-within .reveal {
+  opacity: 1;
+}
+.cmdrow-body {
+  margin: var(--sp-1) 0 var(--sp-3) 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.cmdrow.is-failed .cmdrow-body {
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line));
+}
+.cmdrow-body .out {
+  max-height: 260px;
+  border: none;
+  border-radius: 0;
+  background: var(--term-bg);
+}
+.cmdrow-body .cmd-full {
+  border-bottom: 1px solid var(--line);
+  color: var(--fg);
+}
+.cmdrow-body .out-note {
+  padding: var(--sp-3) var(--sp-5);
+}
+
+/* ---------------------------------------------------------------- a change */
+
+.edits {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--sp-3);
+}
+.edit {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  overflow: hidden;
+}
+.edit:hover {
+  border-color: var(--line-strong);
+}
+.edit-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 34px;
+  padding-right: var(--sp-2);
+}
+.edit-open {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--sp-3) 0 var(--sp-5);
+  text-align: left;
+}
+.edit-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+/* a file's name keeps its room; the directory after it takes what is left and goes first
+   (with a share of the shrinking the name lost a pixel, and showed as "config.to…") */
+.edit-name,
+.summary-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono);
+  font-size: var(--fs-name);
+  color: var(--fg);
+}
+.edit-open .fdir,
+.summary-file .fdir {
+  flex: 1 1 0;
+  max-width: max-content;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.edit-open:hover .edit-name {
+  text-decoration: underline;
+}
+.edit-head .tag,
+.edit-state,
+.edit-act {
+  flex-shrink: 0;
+}
+.edit-state {
+  margin: 0 var(--sp-2);
+  color: var(--ember);
+}
+.edit-lines .codicon {
+  transition: transform 0.12s;
+}
+.edit-lines.on .codicon {
+  transform: rotate(180deg);
+}
+.edit.open .edit-body {
+  border-top: 1px solid var(--line);
+}
+.edit-body .fdiff-body {
+  max-height: 420px;
+  overflow: auto;
+  border-top: none;
+}
+.edits.is-failed .edit,
+.edits.is-refused .edit {
+  opacity: 0.75;
+}
+
+/* ---------------------------------------------------------------- the end of a turn */
+
+.turn-end {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  gap: var(--sp-3);
+}
+.turn-end > * {
+  max-width: 100%;
+}
+.turn-end .stopped {
+  justify-self: stretch;
+}
+.verdict-text {
+  min-width: 0;
+}
+.verdict-text strong {
+  font-weight: 600;
+}
+
+/* the changes that wait for a review: what the facts say, each file, what to do with them */
+.summary {
+  justify-self: stretch;
+  container-type: inline-size;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--card);
+  overflow: hidden;
+}
+.summary-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-6);
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.summary-head .verdict-icon {
+  flex-shrink: 0;
+  margin-top: var(--sp-1);
+  color: var(--ok);
+}
+.summary-head strong {
+  color: var(--ok);
+}
+.summary.is-warn .summary-head .verdict-icon,
+.summary.is-warn .summary-head strong {
+  color: var(--warn);
+}
+.summary-head .codicon-diff.verdict-icon {
+  color: var(--muted);
+}
+.summary-head .codicon-diff + .verdict-text strong {
+  color: var(--fg);
+}
+.summary-files {
+  margin: 0;
+  padding: var(--sp-2) 0;
+  list-style: none;
+}
+.summary-files li {
+  display: flex;
+  align-items: center;
+  padding-right: var(--sp-3);
+}
+.summary-files li:hover {
+  background: var(--hover);
+}
+.summary-file {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  height: var(--row-lg);
+  padding: 0 var(--sp-3) 0 var(--sp-6);
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+.summary-icon {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.summary-file:hover .summary-name {
+  text-decoration: underline;
+}
+.summary-file .tag,
+.summary-file .warn,
+.summary-file .delta {
+  flex-shrink: 0;
+}
+.summary-act {
+  flex-shrink: 0;
+  opacity: 0;
+}
+.summary-files li:hover .summary-act,
+.summary-act:focus-visible {
+  opacity: 1;
+}
+.summary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+@container (max-width: 250px) {
+  .summary-actions .spacer {
+    display: none;
+  }
+  .summary-actions .btn {
+    flex: 1;
+    justify-content: center;
+  }
+}
+.summary-error {
+  padding: 0 var(--sp-6) var(--sp-4);
+  color: var(--err);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.summary-done {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.summary-done .codicon-check {
+  color: var(--ok);
+}
+/* what the turn cost */
+.turn-meta {
+  padding: 0 var(--sp-1);
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.turn-meta-fact {
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- the line at the end */
+
+.thread-bottom.live-box {
+  height: auto;
+  min-height: var(--pad);
+  padding: 0 var(--pad) var(--pad);
+}
+/* the spark, and beside it what the turn does and its facts, which wrap under the words */
+.live-line {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  padding-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 18px;
+}
+.live-spark,
+.live-icon {
+  flex-shrink: 0;
+  margin-top: var(--sp-1);
+}
+.live-spark {
+  fill: var(--ember);
+  animation: live-spin 2.4s linear infinite;
+}
+.live-icon {
+  color: var(--warn);
+}
+.live-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--sp-4);
+  min-width: 0;
+}
+.live-say {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  /* the ember passes over the words */
+  background: linear-gradient(90deg, var(--fg) 0%, var(--fg) 35%, var(--ember) 50%, var(--fg) 65%, var(--fg) 100%);
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: live-shine 2.6s linear infinite;
+}
+.live-line.is-asking .live-say {
+  background: none;
+  color: var(--warn);
+  animation: none;
+}
+.live-facts {
+  color: var(--subtle);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* the last lines of a call being written; a long line wraps and the lines sit at the
+   bottom of their box, five lines at most, so that what comes is always in sight; where
+   the box cuts lines above, its top fades out */
+.live-preview {
+  margin: var(--sp-3) 0 0 22px;
+  padding: var(--sp-3) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--mono);
+  font-size: var(--fs-code);
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.live-preview-lines {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: calc(18px * 5);
+  overflow: hidden;
+}
+.live-preview-lines.cut {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 30px);
+  mask-image: linear-gradient(to bottom, transparent, black 30px);
+}
+/* a line keeps its height, its wrapped lines too: the box cuts above them, not into them */
+.lp {
+  flex-shrink: 0;
+  min-height: 18px;
+}
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 1px;
+  vertical-align: -2px;
+  background: var(--ember);
+  animation: live-blink 1s steps(1) infinite;
+}
+@keyframes live-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes live-shine {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+@keyframes live-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* ---------------------------------------------------------------- narrow */
+
+@container (max-width: 300px) {
+  .cmdrow-terminal span:not(.codicon),
+  .cmdrow-more {
+    display: none;
+  }
+  .live-preview {
+    margin-left: 0;
+  }
+}
+/* narrower (a side bar under 290px): a card's file keeps its name, its directory goes (its
+   tooltip has it); the summary is a container of its own, 30px narrower than the thread */
+@container (max-width: 289px) {
+  .edit-open .fdir {
+    display: none;
+  }
+}
+@container (max-width: 259px) {
+  .summary-file .fdir {
+    display: none;
+  }
+}
+
+/* high contrast: a line under the pointer has the theme's dashed border, as VS Code's lists */
+body.vscode-high-contrast .think-head:hover:not(:disabled),
+body.vscode-high-contrast .steps-head:hover,
+body.vscode-high-contrast .cmdrow-head:hover,
+body.vscode-high-contrast .tline-head:hover,
+body.vscode-high-contrast .summary-files li:hover {
+  outline: 1px dashed var(--active-border);
+  outline-offset: -1px;
+}
