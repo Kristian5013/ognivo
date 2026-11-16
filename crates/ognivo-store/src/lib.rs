@@ -728,7 +728,7 @@ impl Store {
             .map(|file| {
                 Ok(ReadyFile {
                     file,
-                    base: file.base.as_deref().map(&blob).transpose()?,
+                    base: file.base.as_deref().map(blob).transpose()?,
                     current: blob(file.current.as_slice())?,
                 })
             })

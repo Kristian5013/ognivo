@@ -366,6 +366,9 @@ export async function launch(o: LaunchOptions = {}): Promise<VsCode> {
       "chat.disableAIFeatures": true,
       // dialogs in the workbench, where the test sees them, not the system's
       "window.dialogStyle": "custom",
+      // a terminal's text in the page, where the test reads it: on Windows VS Code moves a
+      // terminal to WebGL even with --disable-gpu, and its canvas holds no text to find
+      "terminal.integrated.gpuAcceleration": "off",
       ...o.settings,
     }),
   );
