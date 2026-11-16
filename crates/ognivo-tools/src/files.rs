@@ -647,7 +647,8 @@ mod tests {
     #[test]
     fn a_patch_plans_every_file_or_none() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+        // as a session's root is (Windows names the temporary directory `RUNNER~1`)
+        let root = &ognivo_os::canonicalize(dir.path()).unwrap();
         file(root, "a.txt", "one\ntwo\nthree\n");
         let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n one\n-two\n+TWO\n three\n*** Add File: b.txt\n+new\n*** End Patch";
         let changes = plan_patch(root, root, patch, |_| false, LineStyle::Bar).unwrap();
