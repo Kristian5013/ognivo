@@ -659,6 +659,84 @@ impl Projector {
     }
 }
 
+/// Why a turn that a core left running ended, as its kept stream says it.
+pub const STOPPED_MID_TURN: &str = "ognivo stopped before the turn ended";
+
+/// What a core that stopped mid-turn left open in a thread's kept stream, and those of its
+/// subagents, closed as a stop closes it ([`Projector::interrupted`]). A core that was
+/// killed, crashed, or went down with its machine never wrote its turn's end, and a client
+/// reading the stream would show that turn running for good, with a stop that reaches no
+/// core. Each item that began and never completed completes as it was, a call as not run to
+/// its end and a subagent as interrupted; each turn that began and never ended ends as
+/// interrupted, saying why. A subagent's thread closes before its parent's. Only for a
+/// stream that no core runs a turn of.
+pub fn left_open(events: &[p::Event]) -> Out {
+    // each thread in the order it first came: its items begun and not completed, and the
+    // turn it began and did not end
+    let mut threads: Vec<(p::ThreadId, Vec<p::Item>, Option<p::TurnId>)> = Vec::new();
+    for e in events {
+        let at = match threads.iter().position(|(t, ..)| *t == e.thread) {
+            Some(at) => at,
+            None => {
+                threads.push((e.thread, Vec::new(), None));
+                threads.len() - 1
+            }
+        };
+        let (_, items, turn) = &mut threads[at];
+        match &e.kind {
+            p::EventKind::TurnStarted { turn: t, .. } => *turn = Some(*t),
+            // a turn that ended left nothing running
+            p::EventKind::TurnCompleted { .. } => {
+                *turn = None;
+                items.clear();
+            }
+            p::EventKind::ItemStarted { item } => items.push(item.clone()),
+            p::EventKind::ItemCompleted { item } => items.retain(|i| i.id != item.id),
+            _ => {}
+        }
+    }
+    let mut out = Out::new();
+    for (thread, items, turn) in threads.into_iter().rev() {
+        for mut item in items {
+            match &mut item.body {
+                ItemBody::ToolCall {
+                    result: result @ None,
+                    ..
+                } => {
+                    *result = Some(p::ToolResult {
+                        outcome: p::Outcome::Skipped,
+                        text: "[ognivo] ognivo stopped before the call ended; it may have done part of its work".into(),
+                        images: Vec::new(),
+                        exit_code: None,
+                        duration_ms: 0,
+                    });
+                }
+                ItemBody::Subagent {
+                    end: end @ None, ..
+                } => {
+                    *end = Some(p::TurnEnd::Interrupted);
+                }
+                _ => {}
+            }
+            out.push((thread, p::EventKind::ItemCompleted { item }));
+        }
+        if let Some(turn) = turn {
+            out.push((
+                thread,
+                p::EventKind::TurnCompleted {
+                    turn,
+                    end: p::TurnEnd::Interrupted,
+                    why: Some(STOPPED_MID_TURN.into()),
+                    answer: None,
+                    verification: None,
+                    undelivered: Vec::new(),
+                },
+            ));
+        }
+    }
+    out
+}
+
 /// A call in the clients' terms.
 fn call_of(c: &Call) -> p::Call {
     let n = |n: &Option<usize>| n.map(|n| n as u32);
@@ -1535,5 +1613,154 @@ mod tests {
             r("[error] main.rs: no such file"),
             (p::Outcome::Error, None)
         );
+    }
+
+    #[test]
+    fn a_turn_a_core_left_running_ends_as_a_stop_ends_it() {
+        let (root, sub) = (p::ThreadId(1), p::ThreadId(2));
+        let item = |id: u32, turn: u32, body: ItemBody| p::Item {
+            id: p::ItemId(id),
+            turn: p::TurnId(turn),
+            generation: Some(1),
+            body,
+        };
+        let call = |id: u32| {
+            item(
+                id,
+                2,
+                ItemBody::ToolCall {
+                    call_id: format!("c{id}"),
+                    tool: "bash".into(),
+                    arguments: "{}".into(),
+                    call: None,
+                    result: None,
+                    changes: Vec::new(),
+                },
+            )
+        };
+        let thought = |id: u32, turn: u32| {
+            item(
+                id,
+                turn,
+                ItemBody::Reasoning {
+                    text: String::new(),
+                },
+            )
+        };
+        let task = item(
+            4,
+            2,
+            ItemBody::Subagent {
+                index: 0,
+                title: "look".into(),
+                write: None,
+                thread: Some(sub),
+                end: None,
+                steps: None,
+                changed: Vec::new(),
+            },
+        );
+        let started = |turn: u32| p::EventKind::TurnStarted {
+            turn: p::TurnId(turn),
+            user: "go".into(),
+            images: Vec::new(),
+        };
+        let kinds = vec![
+            (root, started(1)),
+            (
+                root,
+                p::EventKind::ItemStarted {
+                    item: thought(1, 1),
+                },
+            ),
+            (
+                root,
+                p::EventKind::ItemCompleted {
+                    item: thought(1, 1),
+                },
+            ),
+            (
+                root,
+                p::EventKind::TurnCompleted {
+                    turn: p::TurnId(1),
+                    end: p::TurnEnd::Answer,
+                    why: None,
+                    answer: Some("done".into()),
+                    verification: None,
+                    undelivered: Vec::new(),
+                },
+            ),
+            (root, started(2)),
+            // a call that ended, one that ran when the core went, and a subagent at work
+            (root, p::EventKind::ItemStarted { item: call(2) }),
+            (root, p::EventKind::ItemCompleted { item: call(2) }),
+            (root, p::EventKind::ItemStarted { item: call(3) }),
+            (root, p::EventKind::ItemStarted { item: task.clone() }),
+            (sub, started(1)),
+            (
+                sub,
+                p::EventKind::ItemStarted {
+                    item: thought(1, 1),
+                },
+            ),
+        ];
+        let events: Vec<p::Event> = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(i, (thread, kind))| p::Event {
+                seq: i as u64 + 1,
+                thread,
+                kind,
+            })
+            .collect();
+        let interrupted = |turn: u32| p::EventKind::TurnCompleted {
+            turn: p::TurnId(turn),
+            end: p::TurnEnd::Interrupted,
+            why: Some(STOPPED_MID_TURN.into()),
+            answer: None,
+            verification: None,
+            undelivered: Vec::new(),
+        };
+        let mut stopped = call(3);
+        if let ItemBody::ToolCall { result, .. } = &mut stopped.body {
+            *result = Some(p::ToolResult {
+                outcome: p::Outcome::Skipped,
+                text: "[ognivo] ognivo stopped before the call ended; it may have done part of its work".into(),
+                images: Vec::new(),
+                exit_code: None,
+                duration_ms: 0,
+            });
+        }
+        let mut ended = task;
+        if let ItemBody::Subagent { end, .. } = &mut ended.body {
+            *end = Some(p::TurnEnd::Interrupted);
+        }
+        assert_eq!(
+            left_open(&events),
+            vec![
+                (
+                    sub,
+                    p::EventKind::ItemCompleted {
+                        item: thought(1, 1)
+                    }
+                ),
+                (sub, interrupted(1)),
+                (root, p::EventKind::ItemCompleted { item: stopped }),
+                (root, p::EventKind::ItemCompleted { item: ended }),
+                (root, interrupted(2)),
+            ]
+        );
+        // closed, the stream has nothing more to close; one that ended had nothing
+        let mut closed = events.clone();
+        let next = closed.len() as u64 + 1;
+        for (i, (thread, kind)) in left_open(&events).into_iter().enumerate() {
+            closed.push(p::Event {
+                seq: next + i as u64,
+                thread,
+                kind,
+            });
+        }
+        assert_eq!(left_open(&closed), Vec::new());
+        assert_eq!(left_open(&events[..4]), Vec::new());
     }
 }

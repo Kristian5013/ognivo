@@ -378,6 +378,8 @@ pub async fn delete(hub: &Hub, a: rpc::ThreadRef) -> Reply {
 }
 
 pub fn read(hub: &Hub, a: rpc::ReadThread) -> Reply {
+    // a turn that a core before this one left running ends before anyone reads it
+    hub.close_left_open(a.thread);
     let after = a.after.unwrap_or(0).min(i64::MAX as u64) as i64;
     let rows = lock(&hub.reader)
         .wire(a.thread.0, after)
@@ -450,6 +452,9 @@ pub async fn resume(hub: &Arc<Hub>, a: rpc::ResumeThread) -> Reply {
             format!("there is no thread {}", a.thread.0),
         ));
     };
+    // its stream goes on from where it ends: a turn a core before this one left running
+    // ended first, as its agent ends it in the conversation
+    hub.close_left_open(a.thread);
     let server = a.server.unwrap_or_else(|| {
         let (url, model) = split_server(&row.server);
         rpc::Server {

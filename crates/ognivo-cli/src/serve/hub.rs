@@ -2,13 +2,13 @@
 //! its numbering and its log in the store, the questions waiting for an answer, and the
 //! open threads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use ognivo_core::protocol::Out;
+use ognivo_core::protocol::{self as projection, Out};
 use ognivo_protocol::{self as p, rpc};
 use ognivo_store::Store;
 use serde_json::{Value, json};
@@ -29,7 +29,10 @@ pub struct Hub {
     pub data_dir: PathBuf,
     /// For what the clients read: threads, their events, their trajectories.
     pub reader: Mutex<Store>,
-    // the locks are taken in this order: log, clients, asks
+    // the locks are taken in this order: log, clients, asks; `looked` before any other
+    /// Threads whose kept stream this core looked at for a turn that a core before it left
+    /// running ([`Hub::close_left_open`]).
+    looked: Mutex<HashSet<i64>>,
     log: Mutex<Log>,
     clients: Mutex<HashMap<u64, Client>>,
     asks: Mutex<Asks>,
@@ -80,6 +83,7 @@ impl Hub {
         Ok(Self {
             data_dir,
             reader: Mutex::new(reader),
+            looked: Mutex::new(HashSet::new()),
             log: Mutex::new(Log {
                 store,
                 seq: seq.max(0) as u64,
@@ -151,6 +155,29 @@ impl Hub {
         if let Some(c) = lock(&self.clients).get(&client) {
             let _ = c.out.send(line);
         }
+    }
+
+    /// Closes in the kept stream of the user's thread `root`, once in the core's life and
+    /// before a client reads it or it opens, what a core before this one left running: that
+    /// core was killed, crashed, or went down with its machine mid-turn, so the stream would
+    /// show the turn running for good ([`projection::left_open`]). A thread this core has
+    /// open is its own: its turns end as they run.
+    pub fn close_left_open(&self, root: p::ThreadId) {
+        let mut looked = lock(&self.looked);
+        if looked.contains(&root.0) || lock(&self.threads).contains_key(&root.0) {
+            return;
+        }
+        let rows = match lock(&self.reader).wire(root.0, 0) {
+            Ok(rows) => rows,
+            // not looked at: the next read tries again
+            Err(_) => return,
+        };
+        let events: Vec<p::Event> = rows
+            .iter()
+            .filter_map(|r| serde_json::from_str(r).ok())
+            .collect();
+        self.emit(root, projection::left_open(&events));
+        looked.insert(root.0);
     }
 
     /// Numbers `out`, keeps in the store what is kept ([`p::EventKind::kept`]: not what

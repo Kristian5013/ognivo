@@ -193,6 +193,18 @@ async fn serve(
                         &json!({"error": {"code": 503, "message": "Loading model", "type": "unavailable_error"}}),
                     ),
                 },
+                // as llama-server counts a text: gpt-oss-20b's probe is its one token, as a
+                // thread picked up again finds its profile; any other text a token for each
+                // four bytes of the request
+                _ if head.starts_with("POST /tokenize") => {
+                    let asked: Value = serde_json::from_slice(&body).unwrap_or_default();
+                    let tokens = if asked["content"] == "<|channel|>" {
+                        vec![200005]
+                    } else {
+                        vec![1; body.len().div_ceil(4)]
+                    };
+                    json_response(&json!({ "tokens": tokens }))
+                }
                 _ => {
                     seen.lock()
                         .unwrap()

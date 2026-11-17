@@ -1816,3 +1816,116 @@ async fn the_core_names_its_program_and_quits_when_asked_while_no_turn_runs() {
     };
     assert!(status.success(), "{status:?}");
 }
+
+/// A core that went away mid-turn (killed here, as a crash does, or a machine that goes
+/// down) never wrote its turn's end. The next core ends that turn in the kept stream before
+/// a client reads it, and once: no client shows it running with a stop that reaches no
+/// core. The thread goes on from there, and its model hears why the turn ended.
+#[tokio::test]
+async fn a_turn_a_core_left_running_ends_before_the_next_core_shows_it() {
+    let (url, bodies) = fake_server(vec![HANG.to_owned(), answer_stream("Going on.")]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let socket = socket(dir.path());
+    let mut child = core(dir.path(), "60");
+    let mut a = Client::connect(&socket).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let thread = a.ok("thread/start", start(&root, &url)).await["thread"].clone();
+    a.ok("turn/start", json!({"thread": thread, "text": "wait"}))
+        .await;
+    a.until(|m| event(m, "turn_started")).await;
+    // the core goes while the server holds its request
+    let began = Instant::now();
+    while bodies.lock().unwrap().is_empty() {
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the request did not come"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(a);
+
+    let mut child = core(dir.path(), "60");
+    let mut b = Client::connect(&socket).await;
+    b.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let listed = b
+        .ok("thread/list", json!({"project": null, "limit": null}))
+        .await;
+    assert_eq!(listed["threads"][0]["running"], false, "{listed}");
+    let ends = |read: &Value| -> Vec<Value> {
+        read["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["event"] == "turn_completed")
+            .cloned()
+            .collect()
+    };
+    let read = b
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    let last = read["events"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["event"], "turn_completed", "{read}");
+    assert_eq!(last["turn"], 1);
+    assert_eq!(last["end"], "interrupted");
+    assert_eq!(last["why"], "ognivo stopped before the turn ended");
+    // a client there as it ended got it live
+    let live = b.until(|m| event(m, "turn_completed")).await;
+    assert_eq!(live.last().unwrap()["params"]["seq"], last["seq"]);
+    // read again: ended once
+    let again = b
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    assert_eq!(ends(&again).len(), 1, "{again}");
+
+    // the thread goes on, and its model hears why the last turn ended
+    b.ok(
+        "thread/resume",
+        json!({
+            "thread": thread, "server": null, "native": false, "priors": false,
+            "subagents": false, "context": null, "mode": null
+        }),
+    )
+    .await;
+    b.ok("turn/start", json!({"thread": thread, "text": "go on"}))
+        .await;
+    let got = b
+        .until(|m| event(m, "turn_completed") && m["params"]["turn"] == 2)
+        .await;
+    assert_eq!(got.last().unwrap()["params"]["answer"], "Going on.");
+    let read = b
+        .ok("thread/read", json!({"thread": thread, "after": null}))
+        .await;
+    let ends = ends(&read);
+    assert_eq!(
+        ends.iter()
+            .map(|e| (e["turn"].clone(), e["end"].clone()))
+            .collect::<Vec<_>>(),
+        [
+            (json!(1), json!("interrupted")),
+            (json!(2), json!("answer"))
+        ],
+        "{read}"
+    );
+    let sent = bodies.lock().unwrap().last().unwrap()["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()["content"]
+        .clone();
+    assert!(
+        sent.as_str()
+            .unwrap()
+            .contains("[ognivo] ognivo stopped before the last turn ended"),
+        "{sent}"
+    );
+    drop(b);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
