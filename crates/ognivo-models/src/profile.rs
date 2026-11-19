@@ -150,7 +150,9 @@ pub struct ContextBudget {
     pub working_max: u32,
     /// Fraction of `working_max` at which compaction starts.
     pub compact_at: f32,
-    /// `max_tokens` of a main step: fixed, never the window remainder.
+    /// `max_tokens` of a main step's request: fixed, never the window remainder. On the
+    /// Native path a step whose tokens ran out while the model wrote a call or its answer
+    /// goes on with as many again, a few times, while the slot holds it.
     pub max_tokens: u32,
     /// The most the model works with: the window it was trained for, or less where it
     /// breaks. A session's working context stays under it, whatever the server's window.

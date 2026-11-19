@@ -99,6 +99,11 @@ const SEPARATOR: TokenId = 200_007;
 const MAX_CONTINUATIONS: u8 = 2;
 /// Tokens of reasoning a step may go on with once its reasoning was ended.
 const REASONING_AFTER_END: usize = 512;
+/// Requests that may continue a step whose tokens ran out while the model wrote a call or
+/// its answer, each with the step's tokens again, as long as the slot's context holds them:
+/// a long file goes on being written instead of being cut and thrown away. Reasoning has
+/// its own budget and does not go on so.
+const MAX_WRITING_CONTINUATIONS: u8 = 3;
 /// The fewest tokens a continuing request may generate.
 const MIN_PREDICT: u32 = 256;
 
@@ -932,6 +937,7 @@ impl NativeDriver {
             sampler,
             max_tokens: req.max_tokens,
             continued: 0,
+            wrote_on: 0,
             thought: 0,
             budget: req.max_tokens as usize * 3 / 4,
             request_start: 0,
@@ -999,21 +1005,43 @@ impl NativeDriver {
         g.open = None;
         g.continued += 1;
         g.budget = g.thought + REASONING_AFTER_END;
+        let used = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        let n_predict = g.max_tokens.saturating_sub(used).max(MIN_PREDICT);
+        self.request_more(g, &ids, n_predict).await
+    }
+
+    /// The step goes on writing once its tokens ran out in the middle of a call or of its
+    /// answer: a new request continues the prompt and the generation so far as they stand,
+    /// with the step's tokens again, so the slot's cache holds all of it and the reader reads
+    /// on where it stopped. A slot whose context fills ends the step as cut.
+    async fn write_on(&self, g: &mut Generation) -> Result<(), DriverError> {
+        let ids = g.reader.ids().to_vec();
+        g.wrote_on += 1;
+        self.request_more(g, &ids, g.max_tokens).await
+    }
+
+    /// A request that continues the step: its prompt, then `ids`, the step's generation so
+    /// far, from which the new request generates up to `n_predict` tokens.
+    async fn request_more(
+        &self,
+        g: &mut Generation,
+        ids: &[TokenId],
+        n_predict: u32,
+    ) -> Result<(), DriverError> {
         g.request_start = ids.len();
         let mut prompt = g.prompt.clone();
-        prompt.extend_from_slice(&ids);
-        let used = u32::try_from(ids.len()).unwrap_or(u32::MAX);
+        prompt.extend_from_slice(ids);
         let completion = CompletionRequest {
             prompt,
             sampler: g.sampler,
-            n_predict: g.max_tokens.saturating_sub(used).max(MIN_PREDICT),
+            n_predict,
             slot: self.slot,
             constraint: g.constraint.clone(),
             banned: Vec::new(),
         };
         let mut body = engine::completion_body(&completion);
         if let Some(m) = &g.media {
-            body["prompt"] = m.prompt(&self.text_of_ids(&ids, &m.guard).await?);
+            body["prompt"] = m.prompt(&self.text_of_ids(ids, &m.guard).await?);
         }
         let payloads = self
             .server
@@ -1216,6 +1244,18 @@ async fn advance(
                 _ => {}
             }
             g.counts.finished(usage);
+            // the step's tokens ran out while the model wrote a call or its answer: it goes on
+            // writing; a slot whose context is full does not
+            if stop == Stop::Limit
+                && g.wrote_on < MAX_WRITING_CONTINUATIONS
+                && !g.reader.stopped()
+                && !g.reader.in_reasoning()
+            {
+                if let Err(e) = this.write_on(&mut g).await {
+                    return Some((vec![Err(e)], None));
+                }
+                return Some((batch, Some((this, g))));
+            }
             let limit = matches!(stop, Stop::Limit | Stop::ContextFull);
             // reasoning that ended with neither a call nor an answer goes on to one
             if !limit && g.continued < MAX_CONTINUATIONS && g.reader.bare() {
@@ -1302,8 +1342,11 @@ struct Generation {
     media: Option<Media>,
     sampler: SamplerSpec,
     max_tokens: u32,
-    /// Requests that continued the step.
+    /// Requests that continued the step after its reasoning ([`MAX_CONTINUATIONS`]).
     continued: u8,
+    /// Requests that continued what the model was writing once the step's tokens ran out
+    /// ([`MAX_WRITING_CONTINUATIONS`]): they leave the reasoning's continuations alone.
+    wrote_on: u8,
     /// Tokens of reasoning so far, and how many may come before the reasoning is ended.
     thought: usize,
     budget: usize,
@@ -2200,6 +2243,8 @@ mod tests {
     struct Completion {
         ids: Vec<TokenId>,
         stop: &'static str,
+        /// With `stop` "limit": the slot's context is full, not `n_predict` reached.
+        truncated: bool,
         predicted: usize,
         /// Places of ids the stream leaves out; their text still comes, with the next id's.
         lost: Vec<usize>,
@@ -2221,6 +2266,7 @@ mod tests {
             predicted: ids.len(),
             ids,
             stop: "eos",
+            truncated: false,
             lost: Vec::new(),
             upstream: false,
             progress: false,
@@ -2435,6 +2481,7 @@ mod tests {
                             }
                         }
                         let last = json!({"content": "", "tokens": [], "stop": true, "stop_type": c.stop,
+                            "truncated": c.truncated,
                             "timings": {"predicted_n": c.predicted, "prompt_n": 10, "cache_n": 90}});
                         events.push_str(&format!("data: {last}\n\n"));
                         format!(
@@ -2859,10 +2906,96 @@ mod tests {
         );
     }
 
+    /// A call the step's tokens cut goes on in a request that continues the prompt and the
+    /// generation as they stand, with the step's tokens again, and runs whole: Qwen3.8 writing
+    /// a long file had two steps of 20480 tokens cut and thrown away (2026-11-19). A slot
+    /// whose context is full, writing that keeps running out, and reasoning that runs out
+    /// still end the step as cut.
+    #[tokio::test]
+    async fn a_call_the_steps_tokens_cut_goes_on_and_runs_whole() {
+        let cut = |fixture: &str| Completion {
+            stop: "limit",
+            ..answer(fixture)
+        };
+        let (head, tail) = QWEN_CALL.split_at(QWEN_CALL.find("a.rs").unwrap() + 1);
+        let (url, prompts, bodies) = fake_server_bodies(vec![cut(head), answer(tail)]).await;
+        let f = finished(
+            &run(
+                &qwen_driver(&url, None),
+                request(vec![ChatMessage::user("Read a.rs")], 1),
+            )
+            .await,
+        );
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].arguments, "{\"path\":\"a.rs\"}");
+        let sent = prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        let mut continued = sent[0].clone();
+        continued.extend(generation(head));
+        assert_eq!(sent[1], continued);
+        assert_eq!(bodies.lock().unwrap()[1]["n_predict"], json!(4096));
+        // the step's ids are both requests' as they came, and its count is both requests'
+        assert_eq!(
+            f.tokens,
+            Some([generation(head), generation(tail)].concat())
+        );
+        assert_eq!(
+            f.usage.predicted_n,
+            Some((generation(head).len() + generation(tail).len()) as u32)
+        );
+
+        // writing that keeps running out ends cut after its continuations
+        let mut parts = vec![cut(head)];
+        parts.extend((0..MAX_WRITING_CONTINUATIONS).map(|_| cut("b")));
+        let (url, prompts) = fake_server(parts).await;
+        let f = finished(
+            &run(
+                &qwen_driver(&url, None),
+                request(vec![ChatMessage::user("Read a.rs")], 1),
+            )
+            .await,
+        );
+        assert!(
+            matches!(f.outcome, Outcome::Truncated { .. }),
+            "{:?}",
+            f.outcome
+        );
+        assert_eq!(
+            prompts.lock().unwrap().len(),
+            1 + usize::from(MAX_WRITING_CONTINUATIONS)
+        );
+
+        // a full slot, and reasoning that ran out, do not go on
+        let full = Completion {
+            truncated: true,
+            ..cut(head)
+        };
+        for c in [full, cut("Need the file and")] {
+            let (url, prompts) = fake_server(vec![c]).await;
+            let f = finished(
+                &run(
+                    &qwen_driver(&url, None),
+                    request(vec![ChatMessage::user("Read a.rs")], 1),
+                )
+                .await,
+            );
+            assert!(
+                matches!(f.outcome, Outcome::Truncated { .. }),
+                "{:?}",
+                f.outcome
+            );
+            assert_eq!(prompts.lock().unwrap().len(), 1);
+        }
+    }
+
     #[tokio::test]
     async fn what_cannot_run_does_not() {
+        // cut where the slot's context is full: nothing can go on
         let cut_call = Completion {
             stop: "limit",
+            truncated: true,
             ..answer("«channel»commentary to=functions.read «constrain»json«message»{\"path\":\"a")
         };
         let cases = [

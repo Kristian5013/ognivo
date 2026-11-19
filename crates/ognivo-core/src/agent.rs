@@ -2750,15 +2750,8 @@ impl Agent {
                 Outcome::Truncated { partial } => {
                     self.stats.truncated += 1;
                     unusable += 1;
-                    let what = if partial.is_empty() {
-                        "before it finished"
-                    } else {
-                        "in the middle of a tool call"
-                    };
-                    let note = format!(
-                        "[ognivo] Your last output reached the {} token limit {what}, so nothing was run and it was discarded. Think less, then call the tool directly with complete arguments.",
-                        self.opts.context.max_tokens
-                    );
+                    let note =
+                        truncated_note(&partial, f.usage.predicted_n, self.opts.context.max_tokens);
                     self.emit(on, AgentEvent::Notice { text: note.clone() });
                     self.messages.push(ChatMessage::user(note));
                 }
@@ -4384,6 +4377,32 @@ fn error_text(e: &FileError) -> String {
         } => format!("[error] {e}\nThe most similar lines in the file are:\n{n}"),
         _ => format!("[error] {e}"),
     }
+}
+
+/// What the model hears of a step its tokens cut: nothing of it ran. A call whose arguments
+/// alone took a good part of the step, as a long file does, can only be written in parts
+/// (2026-11-19: Qwen3.8 thought less, as told, and its file was cut again); else the
+/// reasoning took the tokens.
+fn truncated_note(partial: &[ToolCall], generated: Option<u32>, max_tokens: u32) -> String {
+    let tokens = generated.unwrap_or(max_tokens);
+    let arguments: usize = partial.iter().map(|c| c.arguments.len()).sum();
+    let what = if partial.is_empty() {
+        "before it finished"
+    } else {
+        "in the middle of a tool call"
+    };
+    // about three bytes a token, as the prompt is estimated
+    let advice = if arguments / 3 >= max_tokens as usize / 4 {
+        format!(
+            "The call's arguments alone were too long: write a long file in parts. Create it with its first part, then add each next part with an edit that appends it after the file's last lines, each part under {} tokens.",
+            max_tokens / 4
+        )
+    } else {
+        "Think less, then call the tool directly with complete arguments.".to_owned()
+    };
+    format!(
+        "[ognivo] Your last output reached the token limit ({tokens} tokens) {what}, so nothing was run and it was discarded. {advice}"
+    )
 }
 
 #[cfg(test)]
@@ -8443,5 +8462,34 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    /// A step cut in a long call is told to write its file in parts; one whose reasoning took
+    /// the tokens, to think less; each with the tokens the step took.
+    #[test]
+    fn a_cut_step_is_told_what_to_do_by_where_its_tokens_went() {
+        let call = |arguments: String| ToolCall {
+            id: "c1".into(),
+            name: String::new(),
+            arguments,
+        };
+        let before = truncated_note(&[], None, 20480);
+        assert!(
+            before.contains("(20480 tokens) before it finished"),
+            "{before}"
+        );
+        assert!(before.contains("Think less"), "{before}");
+        let short = truncated_note(&[call("<function=Write>\n".into())], Some(20480), 20480);
+        assert!(short.contains("in the middle of a tool call"), "{short}");
+        assert!(short.contains("Think less"), "{short}");
+        // a file of 17 000 tokens or so, after the step's continuations
+        let long = truncated_note(&[call("я".repeat(30_000))], Some(81920), 20480);
+        assert!(
+            long.contains("(81920 tokens) in the middle of a tool call"),
+            "{long}"
+        );
+        assert!(long.contains("write a long file in parts"), "{long}");
+        assert!(long.contains("each part under 5120 tokens"), "{long}");
+        assert!(!long.contains("Think less"), "{long}");
     }
 }
