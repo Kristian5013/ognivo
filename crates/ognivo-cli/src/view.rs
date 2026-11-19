@@ -125,7 +125,7 @@ impl View {
                 self.screen
                     .line(&format!("· {}", short(text, LINE_CHARS)), Paint::Dim)
             }
-            AgentEvent::Restarted { reason } => self
+            AgentEvent::Restarted { reason, .. } => self
                 .screen
                 .line(&format!("· restarted: {}", printable(&reason)), Paint::Dim),
             AgentEvent::Compacting { tokens, limit } => self.screen.line(

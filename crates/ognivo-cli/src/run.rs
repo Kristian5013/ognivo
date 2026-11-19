@@ -365,7 +365,7 @@ fn show(e: &AgentEvent, jsonl: bool) {
         | AgentEvent::CallDraft { .. }
         | AgentEvent::Progress { .. } => {}
         AgentEvent::Steered { text } => eprintln!("↳ {text}"),
-        AgentEvent::Restarted { reason } => eprintln!("\n· restarted: {reason}"),
+        AgentEvent::Restarted { reason, .. } => eprintln!("\n· restarted: {reason}"),
         AgentEvent::ToolStarted {
             tool, arguments, ..
         } => {

@@ -155,10 +155,11 @@ pub enum AgentEvent {
     Text {
         text: String,
     },
-    /// The server rejected the output format; the step restarted and what was shown of it
-    /// is void.
+    /// The step restarted and what was shown of it is void: the server rejected the output
+    /// format, or it dropped the request in the middle (`dropped`).
     Restarted {
         reason: String,
+        dropped: bool,
     },
     ToolStarted {
         /// The model's id for the call.
@@ -2208,10 +2209,12 @@ impl Agent {
                     }
                     continue;
                 }
-                DriverEvent::Restarted { reason, .. } => {
+                DriverEvent::Restarted {
+                    reason, dropped, ..
+                } => {
                     self.stats.restarts += 1;
                     self.drafts = Drafts::default();
-                    AgentEvent::Restarted { reason }
+                    AgentEvent::Restarted { reason, dropped }
                 }
                 DriverEvent::Finished(f) => {
                     finished = Some(*f);
@@ -6273,6 +6276,7 @@ mod tests {
         let restarted = DriverEvent::Restarted {
             seed: 9,
             reason: "the server could not parse it".into(),
+            dropped: false,
         };
         let mut shown = Vec::new();
         for (ms, ev) in [

@@ -49,7 +49,8 @@ use crate::engine::{
 };
 use crate::generic::ToolDecl;
 use crate::generic::{
-    Channel, ChatMessage, ExecutableCalls, FinishReason, Outcome, ToolCall, is_context_exceeded,
+    Channel, ChatMessage, ExecutableCalls, FinishReason, MAX_DROPPED, Outcome, ToolCall,
+    is_context_exceeded, is_draft_split,
 };
 use crate::guard::Guard;
 use crate::harmony::parse::{self, CONTROL, End, Event, Kind, Reader};
@@ -938,9 +939,11 @@ impl NativeDriver {
             max_tokens: req.max_tokens,
             continued: 0,
             wrote_on: 0,
+            resumed: 0,
             thought: 0,
             budget: req.max_tokens as usize * 3 / 4,
             request_start: 0,
+            predict: req.max_tokens,
             counts: Counts::default(),
             constraint,
             tools,
@@ -1020,6 +1023,19 @@ impl NativeDriver {
         self.request_more(g, &ids, g.max_tokens).await
     }
 
+    /// The step goes on after the server dropped its request in the middle
+    /// ([`is_draft_split`]): a new request continues the prompt and the generation the
+    /// dropped one streamed, with the tokens it had left, and the reader reads on where it
+    /// stopped. What the dropped one generated, the server never counted.
+    async fn resume(&self, g: &mut Generation) -> Result<(), DriverError> {
+        let ids = g.reader.ids().to_vec();
+        let generated = u32::try_from(ids.len() - g.request_start).unwrap_or(u32::MAX);
+        g.counts.cut(generated);
+        g.resumed += 1;
+        let n_predict = g.predict.saturating_sub(generated).max(MIN_PREDICT);
+        self.request_more(g, &ids, n_predict).await
+    }
+
     /// A request that continues the step: its prompt, then `ids`, the step's generation so
     /// far, from which the new request generates up to `n_predict` tokens.
     async fn request_more(
@@ -1029,6 +1045,7 @@ impl NativeDriver {
         n_predict: u32,
     ) -> Result<(), DriverError> {
         g.request_start = ids.len();
+        g.predict = n_predict;
         let mut prompt = g.prompt.clone();
         prompt.extend_from_slice(ids);
         let completion = CompletionRequest {
@@ -1267,6 +1284,18 @@ async fn advance(
             let f = g.finish(limit, !limit);
             Some((vec![Ok(DriverEvent::Finished(Box::new(f)))], None))
         }
+        // the server dropped the request, not the generation: what it streamed stands
+        Err(e) if is_draft_split(&e) && g.resumed < MAX_DROPPED => {
+            if g.reader.stopped() {
+                // the end of generation had come: only the server's counts are missing
+                let f = g.finish(false, true);
+                return Some((vec![Ok(DriverEvent::Finished(Box::new(f)))], None));
+            }
+            if let Err(e) = this.resume(&mut g).await {
+                return Some((vec![Err(e)], None));
+            }
+            Some((batch, Some((this, g))))
+        }
         Err(e) => Some((vec![Err(failure(e))], None)),
     }
 }
@@ -1347,11 +1376,15 @@ struct Generation {
     /// Requests that continued what the model was writing once the step's tokens ran out
     /// ([`MAX_WRITING_CONTINUATIONS`]): they leave the reasoning's continuations alone.
     wrote_on: u8,
+    /// Requests that took the step up after the server dropped one ([`MAX_DROPPED`]).
+    resumed: u8,
     /// Tokens of reasoning so far, and how many may come before the reasoning is ended.
     thought: usize,
     budget: usize,
     /// Where the generation of the request in progress began among the reader's ids.
     request_start: usize,
+    /// The tokens the request in progress may generate.
+    predict: u32,
     counts: Counts,
     constraint: Option<Constraint>,
     /// The tools the step declared.
@@ -2255,6 +2288,9 @@ mod tests {
         /// with `return_progress`: at its start and once it is read, each payload with the id
         /// 0 of a token it never sampled.
         progress: bool,
+        /// The stream ends with this error after its ids, as upstream llama.cpp ends a
+        /// request it dropped, instead of with its stop.
+        error: Option<&'static str>,
     }
 
     fn answer(fixture: &str) -> Completion {
@@ -2270,6 +2306,7 @@ mod tests {
             lost: Vec::new(),
             upstream: false,
             progress: false,
+            error: None,
         }
     }
 
@@ -2480,9 +2517,13 @@ mod tests {
                                 events.push_str(&format!("data: {chunk}\n\n"));
                             }
                         }
-                        let last = json!({"content": "", "tokens": [], "stop": true, "stop_type": c.stop,
-                            "truncated": c.truncated,
-                            "timings": {"predicted_n": c.predicted, "prompt_n": 10, "cache_n": 90}});
+                        let last = match c.error {
+                            Some(message) => json!({"error":
+                                {"code": 500, "message": message, "type": "server_error"}}),
+                            None => json!({"content": "", "tokens": [], "stop": true,
+                                "stop_type": c.stop, "truncated": c.truncated,
+                                "timings": {"predicted_n": c.predicted, "prompt_n": 10, "cache_n": 90}}),
+                        };
                         events.push_str(&format!("data: {last}\n\n"));
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{events}"
@@ -2987,6 +3028,94 @@ mod tests {
                 f.outcome
             );
             assert_eq!(prompts.lock().unwrap().len(), 1);
+        }
+    }
+
+    /// What upstream llama.cpp ends a request with when its batch split a speculative draft
+    /// (ggml-org/llama.cpp#24840), as two subagents got it on 2026-11-19.
+    const DRAFT_SPLIT: &str =
+        "got exception: speculative batch index 6 is not inside the current sub-batch [0, 4)";
+
+    /// A request the server dropped in the middle goes on from what it streamed, with the
+    /// tokens it had left, and the call runs whole; after [`MAX_DROPPED`] of them, or on
+    /// another error, the step fails as before.
+    #[tokio::test]
+    async fn a_request_the_server_drops_goes_on_where_it_stopped() {
+        let dropped = |fixture: &str| Completion {
+            error: Some(DRAFT_SPLIT),
+            ..answer(fixture)
+        };
+        let (head, tail) = QWEN_CALL.split_at(QWEN_CALL.find("a.rs").unwrap() + 1);
+        let (url, prompts, bodies) = fake_server_bodies(vec![dropped(head), answer(tail)]).await;
+        let f = finished(
+            &run(
+                &qwen_driver(&url, None),
+                request(vec![ChatMessage::user("Read a.rs")], 1),
+            )
+            .await,
+        );
+        let Outcome::Calls(calls) = &f.outcome else {
+            panic!("{:?}", f.outcome)
+        };
+        assert_eq!(calls.calls()[0].arguments, "{\"path\":\"a.rs\"}");
+        let sent = prompts.lock().unwrap().clone();
+        assert_eq!(sent.len(), 2);
+        let mut continued = sent[0].clone();
+        continued.extend(generation(head));
+        assert_eq!(sent[1], continued);
+        // the step's 4096 tokens, less those the dropped request generated
+        assert_eq!(
+            bodies.lock().unwrap()[1]["n_predict"],
+            json!(4096 - generation(head).len())
+        );
+        assert_eq!(
+            f.tokens,
+            Some([generation(head), generation(tail)].concat())
+        );
+        // the dropped request's ids count, though the server never counted them
+        assert_eq!(
+            f.usage.predicted_n,
+            Some((generation(head).len() + generation(tail).len()) as u32)
+        );
+
+        // dropped once the end of generation had come: nothing is missing but the counts
+        let (url, prompts) = fake_server(vec![dropped(QWEN_CALL)]).await;
+        let f = finished(
+            &run(
+                &qwen_driver(&url, None),
+                request(vec![ChatMessage::user("Read a.rs")], 1),
+            )
+            .await,
+        );
+        assert!(matches!(f.outcome, Outcome::Calls(_)), "{:?}", f.outcome);
+        assert_eq!(prompts.lock().unwrap().len(), 1);
+
+        // a server that keeps dropping it, and any other error, fail the step
+        let mut keeps = vec![dropped(head)];
+        keeps.extend((0..MAX_DROPPED).map(|_| dropped("b")));
+        let other = Completion {
+            error: Some("boom"),
+            ..answer(head)
+        };
+        for (completions, requests) in [(keeps, 1 + usize::from(MAX_DROPPED)), (vec![other], 1)] {
+            let (url, prompts) = fake_server(completions).await;
+            let events = run(
+                &qwen_driver(&url, None),
+                request(vec![ChatMessage::user("Read a.rs")], 1),
+            )
+            .await;
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(Err(DriverError::Engine(EngineError::Status {
+                        status: 500,
+                        ..
+                    })))
+                ),
+                "{:?}",
+                events.last()
+            );
+            assert_eq!(prompts.lock().unwrap().len(), requests);
         }
     }
 

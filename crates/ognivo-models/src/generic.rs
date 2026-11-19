@@ -682,6 +682,23 @@ pub fn is_context_exceeded(e: &EngineError) -> bool {
     matches!(e, EngineError::Status { status: 400, body } if body.contains("exceed_context_size_error"))
 }
 
+/// llama-server dropped the request in the middle of its generation, as HTTP 500 or as an
+/// in-band error chunk. A batch it could not decode whole it decodes in parts, halving the
+/// part, and a request whose speculative draft is not in the part decoded first it drops
+/// with "speculative batch index 6 is not inside the current sub-batch [0, 4)"
+/// (`tools/server/server-context.cpp`, `post_decode`; ggml-org/llama.cpp#24840, open, the
+/// same on master of 2026-11-19). Neither the request nor the output is at fault: the step
+/// goes on, [`MAX_DROPPED`] times at most (§5.2).
+///
+/// Seen 2026-11-19 with Qwen3.8 27B (`--spec-type draft-mtp`) and four slots busy with
+/// subagents: twice in an hour, each time two requests of one batch at once.
+pub fn is_draft_split(e: &EngineError) -> bool {
+    matches!(e, EngineError::Status { status: 500, body } if body.contains("is not inside the current sub-batch"))
+}
+
+/// Requests of one step the server may drop ([`is_draft_split`]) with the step going on.
+pub(crate) const MAX_DROPPED: u8 = 3;
+
 #[cfg(test)]
 mod tests {
     use super::*;

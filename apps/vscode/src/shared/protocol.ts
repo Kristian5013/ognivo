@@ -276,7 +276,7 @@ export type Hunk = {
  */
 old_start: number, new_start: number, removed: Array<string>, added: Array<string>, };
 
-export type VoidReason = "malformed" | "empty" | "truncated" | "repeating" | "restarted";
+export type VoidReason = "malformed" | "empty" | "truncated" | "repeating" | "restarted" | "dropped";
 
 export type RawCall = { name: string, arguments: string, };
 

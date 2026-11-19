@@ -29,6 +29,7 @@ const VOID: Record<string, string> = {
   truncated: "it was cut at its token limit",
   repeating: "it repeated itself",
   restarted: "the server's format check restarted it",
+  dropped: "the server dropped its request, and it started over",
 };
 
 /** What the user can do to the thread's messages: write one again, from its turn on, with

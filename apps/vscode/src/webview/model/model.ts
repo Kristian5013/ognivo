@@ -173,10 +173,11 @@ export interface CompactionItem extends Base {
 }
 
 /** A generation that ran nothing: calls that did not parse, an empty answer, one cut at its
- * token limit or stopped for repeating itself, or one the server's format check restarted. */
+ * token limit or stopped for repeating itself, one the server's format check restarted, or
+ * one whose request the server dropped, which started over. */
 export interface VoidItem extends Base {
   kind: "void";
-  why: "malformed" | "empty" | "truncated" | "repeating" | "restarted";
+  why: "malformed" | "empty" | "truncated" | "repeating" | "restarted" | "dropped";
   /** The calls as the model wrote them, for `malformed`. */
   calls: { name: string; arguments: string }[];
 }

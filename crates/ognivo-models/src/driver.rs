@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use crate::Family;
 use crate::engine::{EngineError, PromptProgress, SamplerSpec, TokenId, Usage};
 use crate::generic::{
-    Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, Outcome, ToolCall,
-    ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded, is_format_error,
+    Channel, ChatCompletion, ChatEvent, ChatMessage, ChatRequest, FinishReason, MAX_DROPPED,
+    Outcome, ToolCall, ToolChoice, ToolDecl, chat_body, chat_events, is_context_exceeded,
+    is_draft_split, is_format_error,
 };
 use crate::guard::{Guard, unescape};
 use crate::llama::{LlamaServer, no_done};
@@ -59,11 +60,13 @@ pub enum DriverEvent {
         name: Option<String>,
         arguments: String,
     },
-    /// The server rejected the output's format and the step starts over with `seed`.
-    /// Everything streamed before this event is void.
+    /// The step starts over with `seed`: the server rejected the output's format, or it
+    /// dropped the request in the middle (`dropped`, [`is_draft_split`]). Everything
+    /// streamed before this event is void.
     Restarted {
         seed: u32,
         reason: String,
+        dropped: bool,
     },
     /// How far the step got as the server says, for display only.
     Progress(Progress),
@@ -306,13 +309,17 @@ fn guard_tool(g: &Guard, mut t: ToolDecl) -> ToolDecl {
 }
 
 enum State {
+    /// `attempt` counts the tries a format error made, `dropped` the requests the server
+    /// dropped.
     Connect {
         attempt: u8,
         seed: u32,
+        dropped: u8,
     },
     Stream {
         attempt: u8,
         seed: u32,
+        dropped: u8,
         chunks: BoxStream<'static, Result<Value, EngineError>>,
         acc: ChatCompletion,
         watch: Box<Watch>,
@@ -376,11 +383,22 @@ fn steps(
         guard,
     });
     stream::unfold(
-        (ctx, State::Connect { attempt: 1, seed }),
+        (
+            ctx,
+            State::Connect {
+                attempt: 1,
+                seed,
+                dropped: 0,
+            },
+        ),
         |(ctx, state)| async move {
             let (batch, next) = match state {
                 State::End => return None,
-                State::Connect { attempt, seed } => {
+                State::Connect {
+                    attempt,
+                    seed,
+                    dropped,
+                } => {
                     let mut body = ctx.body.clone();
                     body["seed"] = json!(seed);
                     match ctx.server.chat_stream(&body, None).await {
@@ -389,17 +407,19 @@ fn steps(
                             State::Stream {
                                 attempt,
                                 seed,
+                                dropped,
                                 chunks,
                                 acc: ChatCompletion::default(),
                                 watch: Box::default(),
                             },
                         ),
-                        Err(e) => failed(e, attempt, seed),
+                        Err(e) => failed(e, attempt, seed, dropped),
                     }
                 }
                 State::Stream {
                     attempt,
                     seed,
+                    dropped,
                     mut chunks,
                     mut acc,
                     mut watch,
@@ -422,6 +442,7 @@ fn steps(
                                     State::Stream {
                                         attempt,
                                         seed,
+                                        dropped,
                                         chunks,
                                         acc,
                                         watch,
@@ -429,9 +450,9 @@ fn steps(
                                 ),
                             }
                         }
-                        Err(e) => failed(e, attempt, seed),
+                        Err(e) => failed(e, attempt, seed, dropped),
                     },
-                    Some(Err(e)) => failed(e, attempt, seed),
+                    Some(Err(e)) => failed(e, attempt, seed, dropped),
                     None => {
                         let done = finished(acc, &ctx.guard, seed);
                         (vec![Ok(DriverEvent::Finished(Box::new(done)))], State::End)
@@ -532,24 +553,42 @@ fn stopped(
     }
 }
 
-/// An attempt failed: retry once on a format error, otherwise end the step with the error.
-fn failed(e: EngineError, attempt: u8, seed: u32) -> (Batch, State) {
-    if is_format_error(&e) {
-        let message = match &e {
-            EngineError::Status { body, .. } => body.clone(),
-            other => other.to_string(),
+/// An attempt failed: retry once on a format error, and where the server dropped the
+/// request, as many times as [`MAX_DROPPED`]; otherwise end the step with the error.
+fn failed(e: EngineError, attempt: u8, seed: u32, dropped: u8) -> (Batch, State) {
+    let message = || match &e {
+        EngineError::Status { body, .. } => body.clone(),
+        other => other.to_string(),
+    };
+    // nothing was wrong with the output: the same seed again, and the prompt is in the cache
+    if is_draft_split(&e) && dropped < MAX_DROPPED {
+        let ev = DriverEvent::Restarted {
+            seed,
+            reason: message(),
+            dropped: true,
         };
+        let next = State::Connect {
+            attempt,
+            seed,
+            dropped: dropped + 1,
+        };
+        return (vec![Ok(ev)], next);
+    }
+    if is_format_error(&e) {
+        let message = message();
         if attempt < MAX_ATTEMPTS {
             let seed = seed.wrapping_add(RETRY_SEED_STEP);
             let ev = DriverEvent::Restarted {
                 seed,
                 reason: message,
+                dropped: false,
             };
             return (
                 vec![Ok(ev)],
                 State::Connect {
                     attempt: attempt + 1,
                     seed,
+                    dropped,
                 },
             );
         }
@@ -899,6 +938,60 @@ mod tests {
                 .any(|e| matches!(e, Ok(DriverEvent::Finished(_))))
         );
         assert_eq!(bodies.lock().unwrap().len(), 2);
+    }
+
+    /// A request the server dropped in the middle (ggml-org/llama.cpp#24840) starts over with
+    /// the same seed, as many times as [`MAX_DROPPED`], and leaves the format's retry alone.
+    #[tokio::test]
+    async fn a_request_the_server_drops_starts_over_with_its_seed() {
+        let split = json!({"error": {"code": 500, "message": "got exception: speculative batch index 8 is not inside the current sub-batch [0, 8)", "type": "server_error"}});
+        let dropped = vec![
+            chunk(json!({"role": "assistant", "content": null}), None),
+            chunk(json!({"reasoning_content": "read"}), None),
+            split.clone(),
+        ];
+        let (url, bodies) = fake_server(vec![
+            sse("200 OK", &dropped, false),
+            sse("200 OK", &[format_error()], false),
+            sse("200 OK", &tool_call_stream(), true),
+        ])
+        .await;
+        let events = run(&driver(&url, Family::QwenXml), request(7)).await;
+        let restarts: Vec<(u32, bool)> = events
+            .iter()
+            .filter_map(|e| match e {
+                Ok(DriverEvent::Restarted { seed, dropped, .. }) => Some((*seed, *dropped)),
+                _ => None,
+            })
+            .collect();
+        let retry_seed = 7u32.wrapping_add(RETRY_SEED_STEP);
+        assert_eq!(restarts, [(7, true), (retry_seed, false)]);
+        let f = finished(&events);
+        assert!(matches!(f.outcome, Outcome::Calls(_)), "{:?}", f.outcome);
+        let seeds: Vec<_> = bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| b["seed"].clone())
+            .collect();
+        assert_eq!(seeds, [json!(7), json!(7), json!(retry_seed)]);
+
+        // a server that keeps dropping it fails the step
+        let again = vec![sse("200 OK", &dropped, false); 1 + usize::from(MAX_DROPPED)];
+        let (url, bodies) = fake_server(again).await;
+        let events = run(&driver(&url, Family::QwenXml), request(7)).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(Err(DriverError::Engine(EngineError::Status {
+                    status: 500,
+                    ..
+                })))
+            ),
+            "{:?}",
+            events.last()
+        );
+        assert_eq!(bodies.lock().unwrap().len(), 1 + usize::from(MAX_DROPPED));
     }
 
     #[tokio::test]

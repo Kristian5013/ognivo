@@ -464,6 +464,9 @@ pub enum VoidReason {
     Repeating,
     /// The server rejected its format, and the step started over: what it showed is void.
     Restarted,
+    /// The server dropped its request in the middle, and the step started over: what it
+    /// showed is void.
+    Dropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

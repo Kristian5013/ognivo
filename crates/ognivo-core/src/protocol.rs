@@ -215,13 +215,18 @@ impl Projector {
                 self.close(&mut out);
                 self.whole(&mut out, None, ItemBody::Steer { text });
             }
-            AgentEvent::Restarted { .. } => {
+            AgentEvent::Restarted { dropped, .. } => {
                 self.close(&mut out);
+                let why = if dropped {
+                    p::VoidReason::Dropped
+                } else {
+                    p::VoidReason::Restarted
+                };
                 self.whole(
                     &mut out,
                     Some(self.generations + 1),
                     ItemBody::Void {
-                        why: p::VoidReason::Restarted,
+                        why,
                         calls: Vec::new(),
                     },
                 );
@@ -1501,6 +1506,45 @@ mod tests {
                 &serde_json::json!("turn_completed"),
                 &serde_json::json!(["and c.rs"])
             )
+        );
+    }
+
+    /// A step that started over is a void item, which says whether the server dropped its
+    /// request or rejected its format.
+    #[test]
+    fn a_step_that_started_over_says_why() {
+        let restarted = |dropped| AgentEvent::Restarted {
+            reason: "the server said so".into(),
+            dropped,
+        };
+        let reasoning = || AgentEvent::Reasoning {
+            text: "Read it".into(),
+        };
+        let events = vec![
+            AgentEvent::TurnStarted {
+                user: "Read a.rs".into(),
+                images: Vec::new(),
+            },
+            reasoning(),
+            restarted(true),
+            reasoning(),
+            restarted(false),
+        ];
+        let mut projector = Projector::resumed(p::ThreadId(11), info(), 0, 0, 4);
+        let whys: Vec<serde_json::Value> = events
+            .into_iter()
+            .flat_map(|e| projector.event(e))
+            .filter_map(|(_, k)| match k {
+                p::EventKind::ItemCompleted { item } => match item.body {
+                    ItemBody::Void { why, .. } => Some(serde_json::to_value(why).unwrap()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            whys,
+            [serde_json::json!("dropped"), serde_json::json!("restarted")]
         );
     }
 
