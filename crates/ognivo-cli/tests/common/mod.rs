@@ -92,14 +92,25 @@ pub type Vision = Arc<Mutex<Option<bool>>>;
 /// Serves `/props` (n_ctx 4096, one slot) whenever asked and `responses` to the chat
 /// requests in order; returns its URL and the bodies of the chat requests.
 pub async fn fake_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let (url, bodies, _) = serve(None, responses, vision(Some(false))).await;
+    let (url, bodies, _) = serve(None, responses, vision(Some(false)), None).await;
+    (url, bodies)
+}
+
+/// [`fake_server`] started with `--api-key key`: every request but `/health` wants
+/// `Authorization: Bearer key`, and gets llama-server's 401 without it.
+#[allow(dead_code)]
+pub async fn fake_keyed_server(
+    key: &'static str,
+    responses: Vec<String>,
+) -> (String, Arc<Mutex<Vec<Value>>>) {
+    let (url, bodies, _) = serve(None, responses, vision(Some(false)), Some(key)).await;
     (url, bodies)
 }
 
 /// [`fake_server`] with a projector: its model takes images.
 #[allow(dead_code)]
 pub async fn fake_seeing_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<Value>>>) {
-    let (url, bodies, _) = serve(None, responses, vision(Some(true))).await;
+    let (url, bodies, _) = serve(None, responses, vision(Some(true)), None).await;
     (url, bodies)
 }
 
@@ -110,7 +121,7 @@ pub async fn fake_switched_server(
     projector: Option<bool>,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Vision) {
     let switch = vision(projector);
-    let (url, bodies, _) = serve(None, responses, switch.clone()).await;
+    let (url, bodies, _) = serve(None, responses, switch.clone(), None).await;
     (url, bodies, switch)
 }
 
@@ -132,7 +143,7 @@ pub async fn fake_router(
     models: Value,
     responses: Vec<String>,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
-    serve(Some(models), responses, vision(Some(false))).await
+    serve(Some(models), responses, vision(Some(false)), None).await
 }
 
 fn json_response(v: &Value) -> String {
@@ -151,6 +162,7 @@ async fn serve(
     router: Option<Value>,
     responses: Vec<String>,
     vision: Vision,
+    key: Option<&'static str>,
 ) -> (String, Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -169,6 +181,19 @@ async fn serve(
             if head.starts_with("GET ") {
                 let line = head.lines().next().unwrap_or_default().to_owned();
                 got.lock().unwrap().push(line);
+            }
+            // llama-server with `--api-key`: each endpoint but /health wants the key
+            if let Some(key) = key
+                && !head.starts_with("GET /health")
+                && !bearer(&head, key)
+            {
+                let refused = json_status(
+                    "401 Unauthorized",
+                    &json!({"error": {"message": "Invalid API Key", "type": "authentication_error", "code": 401}}),
+                );
+                sock.write_all(refused.as_bytes()).await.unwrap();
+                sock.shutdown().await.unwrap();
+                continue;
             }
             let resp = match &router {
                 Some(_) if head.starts_with("GET /props?model=") => json_response(
@@ -227,6 +252,17 @@ async fn serve(
         }
     });
     (url, bodies, gets)
+}
+
+/// Whether the request's headers carry `Authorization: Bearer <key>`.
+fn bearer(head: &str, key: &str) -> bool {
+    head.lines().skip(1).any(|l| match l.split_once(':') {
+        Some((name, value)) => {
+            name.trim().eq_ignore_ascii_case("authorization")
+                && value.trim() == format!("Bearer {key}")
+        }
+        None => false,
+    })
 }
 
 /// The request line with the headers, and the body.

@@ -484,6 +484,14 @@ function request(method: keyof Requests, params: Record<string, unknown>): unkno
       Object.assign(session, { [params.key as string]: params.value });
       setTimeout(() => toPage({ t: "session", session: { ...session } }), 30);
       return null;
+    // as the extension keeps it: the page learns only whether a key is kept
+    case "server/key":
+      session.key = Boolean(params.key);
+      setTimeout(() => {
+        toPage({ t: "session", session: { ...session } });
+        toPage({ t: "keys" });
+      }, 30);
+      return null;
     case "sessions/delete": {
       const thread = params.thread as number;
       // a session deleted already is not there to delete again

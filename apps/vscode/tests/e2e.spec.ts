@@ -8,7 +8,8 @@
 // - the live line as the server reads the prompt and the model thinks and writes;
 // - the ways to ask from VS Code: `@` on any file of the workspace, Ctrl+I on a selection,
 //   a command that failed in the user's terminal, the Quick Fix of a problem;
-// - the panel in the secondary side bar; the settings.
+// - the panel in the secondary side bar; the settings; the API key of a server started with
+//   `--api-key`.
 //
 //   npm run e2e -w apps/vscode       (after cargo build -p ognivo-cli and npm run build)
 
@@ -199,6 +200,32 @@ test("the settings: Exa switched on with a key and off again, the user's instruc
   await expect
     .poll(() => (JSON.parse(readFileSync(join(dir, "vscode", "User", "settings.json"), "utf8")) as Record<string, unknown>)["ognivo.mode"], { timeout: 10_000 })
     .toBe("manual");
+});
+
+test("a server started with --api-key: its key, given in the settings, goes with each request, and no setting holds it", async ({ vscode }) => {
+  const { page, dir, server } = await vscode({ key: "e2e-key", replies: [answer("Done behind the key.")] });
+  const panel = await agent(page);
+  await command(page, "ognivo: Settings, MCP Servers and Instructions");
+  await panel.getByRole("tab", { name: "Model" }).click();
+  // the server answers, but not without its key: not taken for one that does not answer
+  const wants = panel.getByText("The server wants an API key", { exact: true });
+  await expect(wants).toBeVisible({ timeout: 30_000 });
+  await panel.getByRole("textbox", { name: "The server's API key" }).fill("e2e-key");
+  await panel.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(panel.getByRole("button", { name: "Remove", exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(wants).toBeHidden({ timeout: 30_000 });
+  await shot(page, "e2e-server-key");
+  // VS Code's secret storage holds it, not the settings
+  expect(readFileSync(join(dir, "vscode", "User", "settings.json"), "utf8")).not.toContain("e2e-key");
+
+  await panel.getByRole("button", { name: "Back to the agent" }).click();
+  await expect(panel.getByText("· ready")).toBeVisible({ timeout: 30_000 });
+  await composer(panel).fill("say done");
+  await composer(panel).press("Enter");
+  await expect(panel.getByText("Done behind the key.")).toBeVisible({ timeout: 60_000 });
+  const chats = server.requests.filter((r) => r.method === "POST" && r.url === "/v1/chat/completions");
+  expect(chats.length).toBeGreaterThan(0);
+  expect(chats.map((r) => r.auth)).toEqual(chats.map(() => "Bearer e2e-key"));
 });
 
 test("a message written while the agent works: queued, sent into the turn, and the next turn after it", async ({ vscode }) => {

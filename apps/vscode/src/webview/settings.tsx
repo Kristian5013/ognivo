@@ -1,6 +1,7 @@
 // The panel's settings (docs/architecture.md §10), in three tabs:
-// - Model: the server and what it runs, and what a new session works with (the extension's
-//   `ognivo.*` settings);
+// - Model: the server and what it runs, its API key (kept by the extension in VS Code's
+//   secret storage: the page sees only whether one is), and what a new session works with
+//   (the extension's `ognivo.*` settings);
 // - MCP: the servers of the user, the project and Claude Code's config, with Exa ready to
 //   switch on with a key; on and off, added and removed in the config files (the core
 //   writes them: `mcp/config/set`); the session's servers as they run, with their sign-ins;
@@ -16,7 +17,7 @@ import profiles from "../shared/profiles.json";
 import type * as P from "../shared/protocol.ts";
 import type { Core } from "../shared/rpc.ts";
 import { type Choice, Row, Section, Segmented, Select, Switch } from "./controls.tsx";
-import { forget, useDetected } from "./detect.ts";
+import { forget, keyRefused, useDetected } from "./detect.ts";
 import { openLink, request, run } from "./host.ts";
 import { Icon, IconButton } from "./icon.tsx";
 import type { AtifTrace } from "./model/atif.ts";
@@ -35,6 +36,57 @@ function bytes(n: number): string {
 }
 
 // ---------------------------------------------------------------- Model
+
+/** The API key of the server at `server`, as llama-server was started with it (`--api-key`).
+ * The extension keeps it in VS Code's secret storage and puts it into the calls that name
+ * the server; the page sends a key once and learns only whether one is kept. */
+function ServerKey({ server, kept }: { server: string; kept: boolean }) {
+  const [key, setKey] = useState("");
+  const [error, setError] = useState<string>();
+  const keep = (k: string | null) =>
+    request("server/key", { url: server, key: k }).then(
+      () => {
+        setKey("");
+        setError(undefined);
+      },
+      (e: unknown) => setError(message(e)),
+    );
+  return (
+    <Row
+      title="API key"
+      hint={kept ? "Kept in VS Code's secret storage, and sent with each request to this server" : "Where llama-server was started with --api-key"}
+      stack
+    >
+      <form
+        className="inline-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (key.trim()) void keep(key.trim());
+        }}
+      >
+        <input
+          type="password"
+          className="mono"
+          value={key}
+          onChange={(e) => setKey(e.target.value)}
+          placeholder={kept ? "A key is kept: type another to change it" : "None"}
+          aria-label="The server's API key"
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <button type="submit" className="btn primary" disabled={!key.trim()}>
+          {kept ? "Change" : "Save"}
+        </button>
+        {kept && (
+          <button type="button" className="btn ghost" onClick={() => void keep(null)}>
+            Remove
+          </button>
+        )}
+      </form>
+      {error && <p className="error">{error}</p>}
+    </Row>
+  );
+}
 
 function ModelTab({ core, session }: { core: Core; session: NewSession }) {
   const [server, setServer] = useState(session.server);
@@ -65,6 +117,14 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
   const choices = contextChoices(profile?.context, window);
   const native = profile?.native ?? d?.native;
   const state = detected === undefined ? "pending" : detected === "failed" ? "failed" : "ok";
+  // it answered, but not without its API key, or not with the one kept
+  const refused = state === "failed" && keyRefused(session.server, session.model);
+  const failedTitle = refused ? (session.key ? "The server does not take the API key" : "The server wants an API key") : "The server does not answer";
+  const failedHint = refused
+    ? session.key
+      ? "llama-server was started with another --api-key: give that one below"
+      : "llama-server was started with --api-key: give that key below"
+    : "Is llama-server running at this address?";
 
   const profileChoices: Choice<string>[] = [
     { value: "", label: d?.profile ? `Auto: ${d.profile}` : "Auto", hint: "The profile of the model the server runs" },
@@ -90,10 +150,10 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
         <Row
           className={`server-status is-${state}`}
           icon={state === "pending" ? <Icon name="loading" spin className="srow-icon" /> : <span className={`dot is-${state}`} />}
-          title={state === "failed" ? "The server does not answer" : state === "pending" ? "Asking the server…" : (d?.model ?? "Its model")}
+          title={state === "failed" ? failedTitle : state === "pending" ? "Asking the server…" : (d?.model ?? "Its model")}
           hint={
             state === "failed"
-              ? "Is llama-server running at this address?"
+              ? failedHint
               : d
                 ? [d.profile ? `profile ${d.profile}` : "no profile fits it: the Generic path guesses", d.window ? `${contextSize(d.window)} context` : ""]
                     .filter(Boolean)
@@ -119,6 +179,7 @@ function ModelTab({ core, session }: { core: Core; session: NewSession }) {
             spellCheck={false}
           />
         </Row>
+        <ServerKey server={session.server} kept={Boolean(session.key)} />
         {d && d.models.length > 0 && (
           <Row className="choice" title="Model behind the router" hint="llama-server's router runs several">
             <Select

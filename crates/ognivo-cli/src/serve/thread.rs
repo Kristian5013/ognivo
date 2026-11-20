@@ -178,7 +178,12 @@ fn no_thread(thread: p::ThreadId) -> RpcError {
 }
 
 fn not_started(f: Failure) -> RpcError {
-    RpcError::new(rpc::error::NOT_STARTED, f.message)
+    let code = if f.unauthorized {
+        rpc::error::UNAUTHORIZED
+    } else {
+        rpc::error::NOT_STARTED
+    };
+    RpcError::new(code, f.message)
 }
 
 fn store_error(e: impl std::fmt::Display) -> RpcError {

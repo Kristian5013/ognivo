@@ -1,7 +1,8 @@
 // The agent's pages (docs/architecture.md §10): the panel in the secondary side bar, and
 // tabs among the editors (`ognivo: Open the Agent in an Editor Tab`). Each page has a
 // connection of its own to the core: what the core sends goes to the page as it is, and
-// what the page sends goes to the core once core.ts lets it. Besides, a page asks the
+// what the page sends goes to the core once core.ts lets it, a call that names a server
+// with that server's API key put in (keys.ts). Besides, a page asks the
 // extension for its storage (in globalState: a webview's own storage is not kept for sure),
 // the workspace, the settings of a new session, the file the user works in and the commands
 // that failed in the user's terminals, the workspace's files for `@`, to open files, diffs
@@ -20,6 +21,7 @@ import * as vscode from "vscode";
 
 import { allowed, connectCore, lines, refusal } from "./core.ts";
 import * as instructions from "./instructions.ts";
+import { KeyedLines, type ServerKeys } from "./keys.ts";
 import {
   type EditorState,
   type FromPage,
@@ -65,8 +67,18 @@ export interface Host {
 }
 
 /** What the extension answers a page's request with. */
-async function answer<M extends keyof Requests>(host: Host, method: M, params: Requests[M]["params"]): Promise<Requests[M]["result"]> {
+async function answer<M extends keyof Requests>(
+  host: Host,
+  keys: ServerKeys,
+  method: M,
+  params: Requests[M]["params"],
+): Promise<Requests[M]["result"]> {
   switch (method) {
+    case "server/key": {
+      const p = params as Requests["server/key"]["params"];
+      await keys.set(p.url, p.key ?? undefined);
+      return null as Requests[M]["result"];
+    }
     case "settings/set": {
       const p = params as Requests["settings/set"]["params"];
       if (!(SESSION_SETTINGS as readonly string[]).includes(p.key)) throw new Error(`no setting ognivo.${p.key}`);
@@ -139,10 +151,12 @@ export function local(path: string): string {
   return respelled(path, spellings());
 }
 
-export function newSession(): NewSession {
+/** The settings of a new session; `keys` say whether its server has a key kept. */
+export function newSession(keys?: Pick<ServerKeys, "has">): NewSession {
   const c = vscode.workspace.getConfiguration("ognivo");
+  const server = c.get("server", "http://127.0.0.1:8080");
   return {
-    server: c.get("server", "http://127.0.0.1:8080"),
+    server,
     model: c.get("model", ""),
     profile: c.get("profile", ""),
     reasoning: c.get("reasoning", ""),
@@ -150,6 +164,7 @@ export function newSession(): NewSession {
     mode: c.get("mode", "edit_automatically"),
     native: c.get("native", false),
     subagents: c.get("subagents", false),
+    key: keys?.has(server) ?? false,
   };
 }
 
@@ -170,6 +185,8 @@ class Page {
   private outbox: ToPage[] = [];
   /** The thread it shows, with its title and project. */
   shown?: Shown;
+  /** What it sends the core, in order, with the servers' keys put in. */
+  private readonly lines: KeyedLines;
 
   constructor(
     readonly webview: vscode.Webview,
@@ -177,7 +194,13 @@ class Page {
     readonly visible: () => boolean,
     /** Brings it into sight; with the focus unless `preserveFocus`. */
     readonly reveal: (preserveFocus: boolean) => void,
-  ) {}
+    keys: ServerKeys,
+  ) {
+    this.lines = new KeyedLines(keys, (line) => {
+      if (this.socket) this.socket.write(`${line}\n`);
+      else this.queue.push(line);
+    });
+  }
 
   post(m: ToPage): void {
     if (this.ready) {
@@ -229,8 +252,7 @@ class Page {
       if (answer) this.post({ t: "core", data: answer });
       return;
     }
-    if (this.socket) this.socket.write(`${data}\n`);
-    else this.queue.push(data);
+    this.lines.send(data);
   }
 
   dispose(): void {
@@ -287,6 +309,7 @@ export class Pages implements vscode.WebviewViewProvider {
     /** A page connects: the extension's own client first, for the questions only it
      * answers, and to replace a core of another build before the page reaches it. */
     private readonly onConnect: () => Promise<void>,
+    private readonly keys: ServerKeys,
   ) {
     this.state = { ...context.globalState.get<Record<string, string>>(STATE, {}) };
     context.subscriptions.push(
@@ -296,8 +319,13 @@ export class Pages implements vscode.WebviewViewProvider {
         spelled = undefined;
         this.broadcast({ t: "folders", folders: folders() });
       }),
+      // a key kept or dropped here or in another window: the pages ask the servers again
+      keys.onDidChange(() => {
+        this.broadcast({ t: "session", session: newSession(keys) });
+        this.broadcast({ t: "keys" });
+      }),
       vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("ognivo")) this.broadcast({ t: "session", session: newSession() });
+        if (e.affectsConfiguration("ognivo")) this.broadcast({ t: "session", session: newSession(keys) });
       }),
     );
   }
@@ -426,7 +454,7 @@ export class Pages implements vscode.WebviewViewProvider {
     const dist = vscode.Uri.joinPath(this.context.extensionUri, "dist");
     webview.options = { enableScripts: true, localResourceRoots: [dist] };
     webview.html = html(webview, dist, place);
-    const page = new Page(webview, place, visible, reveal);
+    const page = new Page(webview, place, visible, reveal, this.keys);
     this.all.add(page);
     if (!this.last) this.last = page;
     if (view) for (const m of this.waiting.splice(0)) page.post(m);
@@ -466,7 +494,7 @@ export class Pages implements vscode.WebviewViewProvider {
           folders: folders(),
           state: this.state,
           place: page.place,
-          session: newSession(),
+          session: newSession(this.keys),
           editor: this.host.editor(),
           failures: this.host.failures(),
         });
@@ -515,7 +543,7 @@ export class Pages implements vscode.WebviewViewProvider {
         break;
       case "request":
         try {
-          const result = await answer(this.host, m.method, m.params as never);
+          const result = await answer(this.host, this.keys, m.method, m.params as never);
           page.post({ t: "response", id: m.id, result });
         } catch (e) {
           page.post({ t: "response", id: m.id, error: e instanceof Error ? e.message : String(e) });

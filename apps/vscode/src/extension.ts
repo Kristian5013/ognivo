@@ -13,6 +13,7 @@ import { Connection } from "./client.ts";
 import { binary, logPath } from "./core.ts";
 import { EditorTracker, FixWithOgnivo, InlinePrompt, type Prompt, fixPrompt } from "./editor.ts";
 import { WorkspaceFiles } from "./files.ts";
+import { ServerKeys } from "./keys.ts";
 import { BASE, type HunkArg, Review } from "./review.ts";
 import { chooseModel, deleteSession, pickSession } from "./sessions.ts";
 import { pathFor } from "./shared/context.ts";
@@ -54,8 +55,28 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Asks for the API key of the server a new session works with, as llama-server was started
+ * with it (`--api-key`), and keeps it; an empty one drops the key kept. */
+async function askServerKey(keys: ServerKeys): Promise<void> {
+  const server = vscode.workspace.getConfiguration("ognivo").get("server", "http://127.0.0.1:8080").trim();
+  const kept = keys.has(server);
+  const key = await vscode.window.showInputBox({
+    title: `The API key of ${server}`,
+    prompt: kept
+      ? "A key is kept for this server: type another to change it, or leave it empty to drop it"
+      : "The key llama-server was started with (--api-key). VS Code keeps it in its secret storage",
+    password: true,
+    ignoreFocusOut: true,
+  });
+  if (key === undefined || (!key.trim() && !kept)) return;
+  await keys.set(server, key);
+  void vscode.window.showInformationMessage(key.trim() ? `ognivo keeps the API key of ${server}.` : `ognivo keeps no API key for ${server} now.`);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   const bin = () => binary(vscode.workspace.getConfiguration("ognivo").get("path", ""), context.extensionPath);
+  const keys = new ServerKeys(context.secrets);
+  context.subscriptions.push(keys);
   const turns = new Turns();
   const asks = new Asks(
     (thread) => pages.inSight(thread),
@@ -78,7 +99,7 @@ export function activate(context: vscode.ExtensionContext): void {
       () => {},
     );
     review.refreshAll();
-  });
+  }, keys);
   const review = new Review(connection, turns, vscode.Uri.joinPath(context.extensionUri, "media"));
   const commands = new AgentCommands((thread) => turns.root(thread));
   const files = new WorkspaceFiles();
@@ -116,11 +137,16 @@ export function activate(context: vscode.ExtensionContext): void {
     editor: () => editor.current(),
     failures: () => failures.failures(),
   };
-  const pages = new Pages(context, bin, host, () =>
-    connection.get().then(
-      () => undefined,
-      () => undefined,
-    ),
+  const pages = new Pages(
+    context,
+    bin,
+    host,
+    () =>
+      connection.get().then(
+        () => undefined,
+        () => undefined,
+      ),
+    keys,
   );
   const status = new StatusItem({
     asks: () => asks.waiting(),
@@ -216,7 +242,8 @@ export function activate(context: vscode.ExtensionContext): void {
       if (file?.scheme !== "file") return;
       await pages.toPage({ t: "insert", text: `@${named(file)} ` });
     }),
-    command("ognivo.chooseModel", () => chooseModel(connection)),
+    command("ognivo.chooseModel", () => chooseModel(connection, keys)),
+    command("ognivo.serverKey", () => askServerKey(keys)),
     command("ognivo.settings", () => pages.toPage({ t: "settings" })),
     command("ognivo.mcpServers", () => pages.toPage({ t: "settings", tab: "mcp" })),
     command("ognivo.instructions", () => pages.toPage({ t: "settings", tab: "instructions" })),

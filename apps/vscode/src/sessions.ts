@@ -6,6 +6,7 @@
 import * as vscode from "vscode";
 
 import type { Connection } from "./client.ts";
+import type { ServerKeys } from "./keys.ts";
 import { ERRORS } from "./shared/protocol.ts";
 import type * as P from "./shared/protocol.ts";
 import { CoreError } from "./shared/rpc.ts";
@@ -111,8 +112,10 @@ export async function pickSession(connection: Connection, onDeleted: (thread: nu
 }
 
 /** The server and, behind llama-server's router, the model of a new session, kept in the
- * settings; the profile that fits it and its reasoning levels, as the core finds them. */
-export async function chooseModel(connection: Connection): Promise<void> {
+ * settings; the profile that fits it and its reasoning levels, as the core finds them. A
+ * server that wants an API key (or not the one kept) is asked again with the key the user
+ * gives, which the extension keeps (keys.ts). */
+export async function chooseModel(connection: Connection, keys: ServerKeys): Promise<void> {
   const settings = vscode.workspace.getConfiguration("ognivo");
   const server = await vscode.window.showInputBox({
     title: "ognivo: the llama-server of a new session",
@@ -124,15 +127,30 @@ export async function chooseModel(connection: Connection): Promise<void> {
   if (server === undefined) return;
   const url = server.trim();
   const core = await connection.get();
-  let detected: P.Detected;
-  try {
-    detected = await vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Notification, title: unlinked(`ognivo: asking ${url} what it runs`) },
-      () => core.call("server/detect", { url, api_key: null, model: null }),
-    );
-  } catch (e) {
-    void vscode.window.showErrorMessage(unlinked(`ognivo: ${url} did not answer: ${e instanceof Error ? e.message : String(e)}`));
-    return;
+  let detected: P.Detected | undefined;
+  while (!detected) {
+    try {
+      detected = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: unlinked(`ognivo: asking ${url} what it runs`) },
+        () => core.call("server/detect", { url, api_key: null, model: null }),
+      );
+    } catch (e) {
+      if (!(e instanceof CoreError && e.code === ERRORS.unauthorized)) {
+        void vscode.window.showErrorMessage(unlinked(`ognivo: ${url} did not answer: ${e instanceof Error ? e.message : String(e)}`));
+        return;
+      }
+      // it answered, for its API key: the key, and the question again
+      const key = await vscode.window.showInputBox({
+        title: `ognivo: the API key of ${url}`,
+        prompt: keys.has(url)
+          ? "It does not take the key kept: the one llama-server was started with (--api-key)"
+          : "It wants one: the key llama-server was started with (--api-key)",
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (!key?.trim()) return;
+      await keys.set(url, key);
+    }
   }
   await settings.update("server", url, vscode.ConfigurationTarget.Global);
   let model = "";

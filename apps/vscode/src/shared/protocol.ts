@@ -923,4 +923,4 @@ export type Asks = {
 export const NOTIFY_EVENT = "event";
 export const NOTIFY_CANCEL = "$/cancelRequest";
 
-export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005, noTurn: -32006, stale: -32007, idle: -32008 } as const;
+export const ERRORS = { noThread: -32001, busy: -32002, notStarted: -32003, journal: -32004, unsupported: -32005, noTurn: -32006, stale: -32007, idle: -32008, unauthorized: -32009 } as const;

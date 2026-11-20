@@ -77,6 +77,9 @@ const SUMMARY_FILES: usize = 3;
 
 fn fail(f: Failure) -> anyhow::Result<ExitCode> {
     eprintln!("ognivo chat: {}", f.message);
+    if f.unauthorized {
+        eprintln!("ognivo chat: pass --api-key or set OGNIVO_API_KEY");
+    }
     Ok(ExitCode::from(f.code))
 }
 

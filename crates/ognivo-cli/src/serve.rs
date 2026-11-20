@@ -464,7 +464,14 @@ async fn detect(s: rpc::Server) -> Reply {
             ),
         )
     })?
-    .map_err(|e| RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url)))?;
+    .map_err(|e| {
+        if e.is_unauthorized() {
+            let why = ognivo_models::engine::key_refused(&s.url, &e);
+            RpcError::new(rpc::error::UNAUTHORIZED, why)
+        } else {
+            RpcError::new(rpc::error::NOT_STARTED, format!("{}: {e}", s.url))
+        }
+    })?;
     let (p, window, vision, models, model) = found;
     reply(rpc::Detected {
         profile: p.map(|p| p.id.clone()),

@@ -66,6 +66,9 @@ enum Approve {
 
 fn fail(f: Failure) -> anyhow::Result<ExitCode> {
     eprintln!("ognivo run: {}", f.message);
+    if f.unauthorized {
+        eprintln!("ognivo run: pass --api-key or set OGNIVO_API_KEY");
+    }
     Ok(ExitCode::from(f.code))
 }
 

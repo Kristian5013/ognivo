@@ -36,6 +36,7 @@ const listeners = {
   open: new Set<(thread: number) => void>(),
   settings: new Set<(tab?: SettingsTab) => void>(),
   deleted: new Set<(thread: number) => void>(),
+  keys: new Set<() => void>(),
 };
 /** The page's requests that wait for the extension's answer, by their ids. */
 const waiting = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -71,6 +72,9 @@ function receive(m: ToPage): void {
       break;
     case "deleted":
       for (const l of listeners.deleted) l(m.thread);
+      break;
+    case "keys":
+      for (const l of listeners.keys) l();
       break;
     case "editor":
       workspace.setEditor(m.editor);
@@ -167,6 +171,12 @@ export function onInsert(l: (text: string) => void): () => void {
 export function onNew(l: () => void): () => void {
   listeners.new.add(l);
   return () => listeners.new.delete(l);
+}
+
+/** The servers' API keys changed, in this window or another. */
+export function onKeys(l: () => void): () => void {
+  listeners.keys.add(l);
+  return () => listeners.keys.delete(l);
 }
 
 export function onOpen(l: (thread: number) => void): () => void {

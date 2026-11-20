@@ -11,8 +11,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use common::{
-    HANG, answer_stream, call_stream, fake_router, fake_seeing_server, fake_server,
-    fake_switched_server, no_projector, progress_call_stream,
+    HANG, answer_stream, call_stream, fake_keyed_server, fake_router, fake_seeing_server,
+    fake_server, fake_switched_server, no_projector, progress_call_stream,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, Lines, ReadHalf, WriteHalf};
@@ -1457,6 +1457,92 @@ async fn turn_end(a: &mut Client, thread: &Value, text: &str) -> Value {
         .await;
     let got = a.until(|m| event(m, "turn_completed")).await;
     got.last().unwrap()["params"]["end"].clone()
+}
+
+/// A server started with `--api-key` (2026-11-20, the owner: «нужно добавить поддержку API
+/// ключей для llama server»): a client without its key, or with another, is told so, apart
+/// from a server that does not answer, by `server/detect` and by a thread that would start
+/// there, its profile named or not; with the key the thread runs. The store keeps no key,
+/// so a thread resumed without it is told the same, and with it goes on.
+#[tokio::test]
+async fn a_server_with_an_api_key_serves_the_clients_that_bring_it() {
+    const UNAUTHORIZED: i64 = -32009;
+    let (url, bodies) = fake_keyed_server(
+        "sekret",
+        vec![answer_stream("Hi."), answer_stream("Again.")],
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let root = ognivo_os::canonicalize(&root).unwrap();
+    let mut child = core(dir.path(), "30");
+    let mut a = Client::connect(&socket(dir.path())).await;
+    a.ok("initialize", json!({"client": "test", "protocol": 1}))
+        .await;
+    let keyed = |key: Option<&str>| json!({"url": url, "api_key": key, "model": null});
+    let started = |key: Option<&str>, profile: Value| {
+        let mut params = start(&root, &url);
+        params["server"] = keyed(key);
+        params["profile"] = profile;
+        params
+    };
+    for key in [None, Some("another")] {
+        let refused = a.call("server/detect", keyed(key)).await.unwrap_err();
+        assert_eq!(refused["code"], UNAUTHORIZED, "{refused}");
+        assert_eq!(
+            refused["message"],
+            format!(
+                "{url} wants an API key, or does not take the one given (HTTP 401: Invalid API Key)"
+            )
+        );
+        for profile in [Value::Null, json!("gpt-oss-20b")] {
+            let refused = a
+                .call("thread/start", started(key, profile))
+                .await
+                .unwrap_err();
+            assert_eq!(refused["code"], UNAUTHORIZED, "{refused}");
+        }
+    }
+    assert!(bodies.lock().unwrap().is_empty());
+
+    let detected = a.ok("server/detect", keyed(Some("sekret"))).await;
+    assert_eq!(detected["profile"], "gpt-oss-20b", "{detected}");
+    let opened = a
+        .ok("thread/start", started(Some("sekret"), Value::Null))
+        .await;
+    let thread = opened["thread"].clone();
+    assert_eq!(opened["info"]["server"], url.as_str(), "{opened}");
+    assert_eq!(turn_end(&mut a, &thread, "Hi").await, "answer");
+    assert_eq!(bodies.lock().unwrap().len(), 1);
+
+    a.ok("thread/close", json!({"thread": thread})).await;
+    let resume = |server: Value| {
+        json!({"thread": thread, "server": server, "native": false, "priors": false,
+            "subagents": false, "context": null, "mode": null})
+    };
+    let refused = a
+        .call("thread/resume", resume(Value::Null))
+        .await
+        .unwrap_err();
+    assert_eq!(refused["code"], UNAUTHORIZED, "{refused}");
+    a.ok("thread/resume", resume(keyed(Some("sekret")))).await;
+    assert_eq!(turn_end(&mut a, &thread, "Again").await, "answer");
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    // nothing of the key is kept: not in the store, nor in its log of writes
+    for entry in std::fs::read_dir(dir.path().join("data")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(
+                !bytes.windows(6).any(|w| w == b"sekret"),
+                "{}",
+                path.display()
+            );
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 /// A thread opened while its llama-server still loaded the model, or ran without its

@@ -97,6 +97,11 @@
         "category": "ognivo"
       },
       {
+        "command": "ognivo.serverKey",
+        "title": "Set the Server's API Key…",
+        "category": "ognivo"
+      },
+      {
         "command": "ognivo.settings",
         "title": "Settings, MCP Servers and Instructions",
         "category": "ognivo",

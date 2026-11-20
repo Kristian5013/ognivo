@@ -148,6 +148,8 @@ export interface Received {
   url: string;
   /** The body, parsed when it is JSON. */
   body: unknown;
+  /** Its `Authorization` header, if it had one. */
+  auth?: string;
 }
 
 /** A chat request's messages, as the core sends them. */
@@ -173,7 +175,9 @@ function probe(): { text: string; id: number } {
 }
 
 /** A llama-server of one slot and `window` tokens of context, of gpt-oss's vocabulary, that
- * answers the chat requests with `replies` in order (and "Nothing more." after them). */
+ * answers the chat requests with `replies` in order (and "Nothing more." after them); with
+ * `key`, as one started with `--api-key`: each request but `/health` without that key gets
+ * its 401. */
 export class FakeServer {
   readonly requests: Received[] = [];
   url = "";
@@ -185,6 +189,7 @@ export class FakeServer {
   private constructor(
     private readonly replies: Reply[],
     private readonly window: number,
+    private readonly key?: string,
   ) {
     this.closing = new Promise((done) => (this.close$ = done));
     const gptOss = probe();
@@ -199,16 +204,17 @@ export class FakeServer {
         } catch {
           // not JSON: kept as it came
         }
-        this.requests.push({ method: req.method ?? "", url: req.url ?? "", body });
+        this.requests.push({ method: req.method ?? "", url: req.url ?? "", body, auth: req.headers.authorization });
         void this.answer(req, res, body, gptOss);
       });
     });
   }
 
-  static async start(replies: (Reply | Piece[])[], window = 4096): Promise<FakeServer> {
+  static async start(replies: (Reply | Piece[])[], window = 4096, key?: string): Promise<FakeServer> {
     const s = new FakeServer(
       replies.map((r) => (Array.isArray(r) ? { pieces: r } : r)),
       window,
+      key,
     );
     await new Promise<void>((done) => s.server.listen(0, "127.0.0.1", done));
     const address = s.server.address();
@@ -232,6 +238,10 @@ export class FakeServer {
       res.setHeader("content-type", "application/json");
       res.end(JSON.stringify(v));
     };
+    if (this.key && req.url !== "/health" && req.headers.authorization !== `Bearer ${this.key}`) {
+      res.statusCode = 401;
+      return json({ error: { message: "Invalid API Key", type: "authentication_error", code: 401 } });
+    }
     if (req.method === "GET" && req.url?.startsWith("/props")) {
       return json({ default_generation_settings: { n_ctx: this.window }, total_slots: 1, modalities: { vision: false }, build_info: META.system_fingerprint });
     }
@@ -285,6 +295,8 @@ export interface LaunchOptions {
   settings?: Record<string, unknown>;
   /** The server's context window (`/props` n_ctx). */
   window?: number;
+  /** The server's API key (llama-server `--api-key`): it wants it with each request. */
+  key?: string;
 }
 
 export interface VsCode {
@@ -348,7 +360,7 @@ export async function launch(o: LaunchOptions = {}): Promise<VsCode> {
     mkdirSync(dirname(join(project, path)), { recursive: true });
     writeFileSync(join(project, path), text);
   }
-  const server = await FakeServer.start(o.replies ?? [], o.window);
+  const server = await FakeServer.start(o.replies ?? [], o.window, o.key);
   const user = join(dir, "vscode");
   mkdirSync(join(user, "User"), { recursive: true });
   writeFileSync(
@@ -397,6 +409,8 @@ export async function launch(o: LaunchOptions = {}): Promise<VsCode> {
         `--user-data-dir=${user}`,
         `--extensions-dir=${join(dir, "extensions")}`,
         "--disable-workspace-trust",
+        // the extension's secret storage without a keychain to ask (Linux runs have none)
+        ...(WINDOWS ? [] : ["--password-store=basic"]),
         "--skip-welcome",
         "--skip-release-notes",
         "--disable-gpu",

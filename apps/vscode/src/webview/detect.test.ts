@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
+import { ERRORS } from "../shared/protocol.ts";
 import type * as P from "../shared/protocol.ts";
 import { Core, CoreError, type Port } from "../shared/rpc.ts";
-import { detect, detectAgain, forget } from "./detect.ts";
+import { detect, detectAgain, forget, keyRefused } from "./detect.ts";
 
 type Request = { id: number; method: string; params: P.Server };
 
@@ -15,7 +16,8 @@ function core(answer: (r: Request, n: number) => Partial<P.Detected> | Error) {
       const r = JSON.parse(text) as Request;
       asked.push(r);
       const a = answer(r, asked.length);
-      const reply = a instanceof Error ? { error: { code: -32003, message: a.message } } : { result: a };
+      const code = a instanceof CoreError ? a.code : ERRORS.notStarted;
+      const reply = a instanceof Error ? { error: { code, message: a.message } } : { result: a };
       queueMicrotask(() => port.onmessage?.({ data: JSON.stringify({ jsonrpc: "2.0", id: r.id, ...reply }) }));
     },
   };
@@ -47,6 +49,20 @@ describe("what a new session's server runs", () => {
     forget();
     expect((await detect(c.core, "http://127.0.0.1:8080", "")).vision).toBe(true);
     expect(c.asked).toHaveLength(3);
+  });
+
+  it("tells a server that wants an API key from one that does not answer, as each said last", async () => {
+    const url = "http://127.0.0.1:8080";
+    const c = core((_, n) =>
+      n === 1 ? new CoreError(ERRORS.unauthorized, `${url} wants an API key`) : n === 2 ? new Error("connection refused") : { vision: false },
+    );
+    await expect(detect(c.core, url, "")).rejects.toBeInstanceOf(CoreError);
+    expect([keyRefused(url, ""), keyRefused(url, "qwen")]).toEqual([true, false]);
+    await expect(detect(c.core, url, "")).rejects.toBeInstanceOf(CoreError);
+    expect(keyRefused(url, "")).toBe(false);
+    // given its key at last
+    await detect(c.core, url, "");
+    expect(keyRefused(url, "")).toBe(false);
   });
 
   it("is asked again next time when the server did not answer", async () => {

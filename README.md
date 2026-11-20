@@ -176,6 +176,11 @@ directory; the extension starts it when none runs, and every VS Code window shar
   a session in the workspace's folder with the `ognivo.*` settings (the server, the model
   behind a router, the profile, the reasoning level, the context, the mode);
   `ognivo: Choose the Server and the Model…` asks the server what it runs.
+- **A server started with `--api-key`**: give its key in the panel's settings (Model › API
+  key) or with `ognivo: Set the Server's API Key…`; `ognivo: Choose the Server and the
+  Model…` asks for it when the server wants one. VS Code keeps the key in its secret
+  storage, the system's keychain, not in the settings, and the extension sends it with each
+  request to that server; the core keeps none.
 - **The conversation** goes a line a step. Reads and searches in a row fold into one
   "Explored 3 files, 1 search", the model's reasoning into "Thought for 6 s"; an edit is a
   card (`parse.rs +15 −2`) that opens the file, or its diff; a command is a line with how

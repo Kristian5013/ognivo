@@ -24,6 +24,37 @@ pub enum EngineError {
     Protocol(String),
 }
 
+impl EngineError {
+    /// The server refused the request for its API key (HTTP 401 or 403): llama-server
+    /// started with `--api-key` got none, or one it does not take. It answers so on every
+    /// endpoint but `/health`, `/props` and `/models` too.
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(
+            self,
+            Self::Status {
+                status: 401 | 403,
+                ..
+            }
+        )
+    }
+}
+
+/// What a client is told of the server at `url` that refused its API key
+/// ([`EngineError::is_unauthorized`]), with what the server said.
+pub fn key_refused(url: &str, e: &EngineError) -> String {
+    let said = match e {
+        EngineError::Status { status, body } => {
+            let message = serde_json::from_str::<Value>(body)
+                .ok()
+                .and_then(|v| v["error"]["message"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| body.trim().to_owned());
+            format!("HTTP {status}: {message}")
+        }
+        other => other.to_string(),
+    };
+    format!("{url} wants an API key, or does not take the one given ({said})")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SamplerSpec {
     pub temperature: f32,

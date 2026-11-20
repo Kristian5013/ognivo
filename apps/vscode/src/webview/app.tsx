@@ -24,13 +24,14 @@ import { type Core, CoreError } from "../shared/rpc.ts";
 import { samePath } from "../shared/text.ts";
 import { type ApprovalAsk, ApprovalCard } from "./approval.tsx";
 import { Composer, type Incoming, NotesButton, QueueList } from "./composer.tsx";
-import { detect, detectAgain, useDetected } from "./detect.ts";
+import { detect, detectAgain, forget, useDetected } from "./detect.ts";
 import { forgetDraft, keepUnsent } from "./drafts.ts";
 import {
   type Hello,
   load,
   newSession,
   onDeleted,
+  onKeys,
   onNew,
   onOpen,
   onSettings,
@@ -58,6 +59,8 @@ import { Welcome, workspaceSessions } from "./welcome.tsx";
 const LAST = "ognivo.last";
 
 function message(e: unknown): string {
+  // the core's words, and where the user gives the server its key
+  if (e instanceof CoreError && e.code === P.ERRORS.unauthorized) return `${e.message}. Set its API key in the settings, under Model.`;
   return e instanceof Error ? e.message : String(e);
 }
 
@@ -194,6 +197,8 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
 
   useEffect(() => onNew(fresh), [fresh]);
   useEffect(() => onOpen((t) => select(t)), [select]);
+  // another API key: what the servers run is asked again
+  useEffect(() => onKeys(forget), []);
   // a deleted session: let go of it, of the page that showed it, of its queue, and of the
   // message being written to it
   useEffect(
@@ -246,10 +251,13 @@ export function App({ core, threads, hello }: { core: Core; threads: Threads; he
           () => profileOf(),
           () => "",
         ));
+      // its own server, by name, so that the extension puts in that server's key (the core
+      // keeps none); as the core has it when nothing here says
+      const at = list?.find((s) => s.thread === t) ?? threads.info(t) ?? threads.store(t)?.info;
       opening(
         await core.call("thread/resume", {
           thread: t,
-          server: null,
+          server: at ? { url: at.server, api_key: null, model: at.model ?? null } : null,
           native: nativeFor(session.native, profile),
           priors: false,
           subagents: session.subagents,

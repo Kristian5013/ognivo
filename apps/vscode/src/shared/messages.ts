@@ -13,6 +13,8 @@ export interface NewSession {
   mode: string;
   native: boolean;
   subagents: boolean;
+  /** Whether an API key is kept for `server` (src/keys.ts); the key stays the extension's. */
+  key?: boolean;
 }
 
 /** The settings of a new session a page may change, by their names under `ognivo.`. */
@@ -93,6 +95,9 @@ export interface Requests {
   "changes/revert": { params: { thread: number; path: string | null }; result: boolean };
   /** Deletes a session once the user agrees in VS Code's dialog; whether it did. */
   "sessions/delete": { params: { thread: number; title: string }; result: boolean };
+  /** Keeps `key` as the API key of the server at `url` (llama-server `--api-key`), in VS
+   * Code's secret storage, or none (`null`): calls that name the server bring it. */
+  "server/key": { params: { url: string; key: string | null }; result: null };
   /** Whether Exa takes the key: one search of a result, as its MCP server would make. */
   "exa/check": { params: { key: string }; result: { ok: boolean; says: string } };
   /** The workspace's files that match `query`, fuzzily, the best first: at most `limit`
@@ -150,6 +155,8 @@ export type ToPage =
   | { t: "settings"; tab?: SettingsTab }
   /** A session was deleted: a page that shows it goes to a new one. */
   | { t: "deleted"; thread: number }
+  /** The servers' API keys changed: what the servers were asked is asked again. */
+  | { t: "keys" }
   | { t: "response"; id: number; result?: unknown; error?: string };
 
 export type SettingsTab = "model" | "mcp" | "instructions";

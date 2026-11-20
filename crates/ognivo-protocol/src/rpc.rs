@@ -77,6 +77,10 @@ pub mod error {
     pub const STALE: i64 = -32007;
     /// No turn of the thread runs: the client starts one instead.
     pub const IDLE: i64 = -32008;
+    /// The server wants an API key (llama-server `--api-key`), or does not take the one
+    /// given: it answered HTTP 401 or 403. `server/detect`, and a thread that could not
+    /// start or resume so.
+    pub const UNAUTHORIZED: i64 = -32009;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

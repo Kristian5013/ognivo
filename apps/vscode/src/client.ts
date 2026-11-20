@@ -15,6 +15,7 @@ import type { Socket } from "node:net";
 import { isAbsolute } from "node:path";
 
 import { connectCore, lines, staleCores } from "./core.ts";
+import { KeyedLines, type ServerKeys } from "./keys.ts";
 import { Core, CoreError, type Port } from "./shared/rpc.ts";
 import { ERRORS } from "./shared/protocol.ts";
 import { samePath } from "./shared/text.ts";
@@ -42,6 +43,8 @@ export class Connection {
   constructor(
     private readonly bin: () => string,
     private readonly listen: (core: Core) => void,
+    /** The servers' API keys, which its calls that name a server bring (keys.ts). */
+    private readonly keys: ServerKeys,
   ) {}
 
   get(): Promise<Core> {
@@ -69,7 +72,8 @@ export class Connection {
     const socket = await connectCore(this.bin());
     this.socket = socket;
     socket.setEncoding("utf8");
-    const port: Port = { onmessage: null, postMessage: (m) => socket.write(`${m}\n`) };
+    const out = new KeyedLines(this.keys, (line) => socket.write(`${line}\n`));
+    const port: Port = { onmessage: null, postMessage: (m) => out.send(m) };
     socket.on(
       "data",
       lines((line) => port.onmessage?.({ data: line })),

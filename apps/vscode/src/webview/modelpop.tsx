@@ -11,7 +11,7 @@ import type { NewSession, SESSION_SETTINGS, SettingsTab } from "../shared/messag
 import profiles from "../shared/profiles.json";
 import type * as P from "../shared/protocol.ts";
 import { type Choice, type Place, Segmented, Select, placeByComposer, useAway } from "./controls.tsx";
-import type { Detection } from "./detect.ts";
+import { type Detection, keyRefused } from "./detect.ts";
 import { request } from "./host.ts";
 import { Icon } from "./icon.tsx";
 import { type Budget, byThinking, contextChoices, contextSize, levelHint, profileLevels, startLevel, windowChoice } from "./model/context.ts";
@@ -158,7 +158,17 @@ export function ModelPill({
               {address(session.server)}
             </span>
             <span className="mp-what">
-              {state === "failed" ? "does not answer" : state === "pending" ? "asking…" : d?.models.length ? "llama-server, router" : "llama-server"}
+              {state === "failed"
+                ? keyRefused(session.server, session.model)
+                  ? session.key
+                    ? "does not take the API key"
+                    : "wants an API key"
+                  : "does not answer"
+                : state === "pending"
+                  ? "asking…"
+                  : d?.models.length
+                    ? "llama-server, router"
+                    : "llama-server"}
             </span>
             <span className="spacer" />
             <button type="button" className="mp-link" title="The server's address, in the settings" onClick={() => onSettings("model")}>

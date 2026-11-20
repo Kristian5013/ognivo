@@ -11,7 +11,7 @@ import type { ContextChip, EditorState, NewSession, SettingsTab, TerminalFailure
 import type * as P from "../shared/protocol.ts";
 import type { Core } from "../shared/rpc.ts";
 import { ago, samePath } from "../shared/text.ts";
-import { type Detection, useDetected } from "./detect.ts";
+import { type Detection, keyRefused, useDetected } from "./detect.ts";
 import { request, run, subscribeFolders, workspaceFolders } from "./host.ts";
 import { Icon, IconButton } from "./icon.tsx";
 import { profileLevels, startLevel } from "./model/context.ts";
@@ -213,6 +213,10 @@ export function serverLine(detected: Detection, session: NewSession): ServerLine
   const host = hostOf(session.server);
   const line = (state: ServerLine["state"], name: string, where: string, says: string, hint: string): ServerLine => ({ state, name, where, says, hint });
   if (detected === undefined) return line("pending", `Looking at ${host}…`, "", "", session.server);
+  if (detected === "failed" && keyRefused(session.server, session.model)) {
+    const says = session.key ? " does not take the API key" : " wants an API key";
+    return line("failed", host, "", says, `${session.server}: set its API key in the settings, under Model`);
+  }
   if (detected === "failed") return line("failed", host, "", " does not answer", `${session.server}: no llama-server answers there`);
   const profile = session.profile || detected.profile;
   // the level a new session gets: not one of another model's profile (model/context.ts)

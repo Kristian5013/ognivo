@@ -14,12 +14,13 @@ use ognivo_core::instructions::UserInstructions;
 use ognivo_core::rules::{self, Pending, Places};
 use ognivo_core::session::Session;
 use ognivo_core::skills::{self, Scope, Skills};
+use ognivo_models::engine::key_refused;
 use ognivo_models::image::{self, Image};
 use ognivo_models::llama::{LlamaServer, RouterModel};
 use ognivo_models::profile::ContextBudget;
 use ognivo_models::{
-    AnswerNow, ChatDriver, Endpoint, Family, ModelDriver, ModelProfile, NativeDriver, Priority,
-    Router, Scheduled, doctor, native, profile,
+    AnswerNow, ChatDriver, Endpoint, EngineError, Family, ModelDriver, ModelProfile, NativeDriver,
+    Priority, Router, Scheduled, doctor, native, profile,
 };
 use ognivo_store::{NewSession, SessionRow, Store};
 
@@ -158,6 +159,8 @@ pub async fn vision(server: &LlamaServer) -> Option<bool> {
 pub struct Failure {
     pub code: u8,
     pub message: String,
+    /// The server refused the session's API key, or wanted one ([`EngineError::is_unauthorized`]).
+    pub unauthorized: bool,
 }
 
 impl Failure {
@@ -165,6 +168,7 @@ impl Failure {
         Self {
             code: 2,
             message: message.to_string(),
+            unauthorized: false,
         }
     }
 
@@ -172,7 +176,20 @@ impl Failure {
         Self {
             code: 3,
             message: message.to_string(),
+            unauthorized: false,
         }
+    }
+
+    /// The server at `url` failed with `e`, `what` naming what was asked, if anything.
+    fn of_server(url: &str, what: &str, e: &EngineError) -> Self {
+        if e.is_unauthorized() {
+            return Self {
+                code: 3,
+                message: key_refused(url, e),
+                unauthorized: true,
+            };
+        }
+        Self::server(format!("{url}: {what}{e}"))
     }
 }
 
@@ -520,7 +537,7 @@ impl SessionArgs {
             None => {
                 let found = doctor::identify(&server, &profiles)
                     .await
-                    .map_err(|e| Failure::server(format!("{}: {e}", self.url)))?
+                    .map_err(|e| Failure::of_server(&self.url, "", &e))?
                     .map(|(p, _)| p);
                 if let (Some(row), Some(p)) = (stored, found)
                     && p.id != row.profile
@@ -682,11 +699,14 @@ impl SessionArgs {
         profiles: &[ModelProfile],
         profile: Option<&str>,
     ) -> Result<Option<String>, Failure> {
-        let role = tokio::time::timeout(PROPS_TIMEOUT, base.props())
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .and_then(|p| p.role);
+        let props = tokio::time::timeout(PROPS_TIMEOUT, base.props()).await.ok();
+        // a server that wants a key it did not get says so first: nothing else will come
+        if let Some(Err(e)) = &props
+            && e.is_unauthorized()
+        {
+            return Err(Failure::of_server(&self.url, "", e));
+        }
+        let role = props.and_then(Result::ok).and_then(|p| p.role);
         if role.as_deref() != Some("router") {
             return match &self.model {
                 Some(_) => Err(Failure::usage(format!(
@@ -699,7 +719,7 @@ impl SessionArgs {
         let models = base
             .models()
             .await
-            .map_err(|e| Failure::server(format!("{}: /models: {e}", self.url)))?;
+            .map_err(|e| Failure::of_server(&self.url, "/models: ", &e))?;
         let all = || {
             models
                 .iter()
@@ -745,26 +765,26 @@ impl SessionArgs {
 
     /// Has the router start `model`, and waits until it runs.
     async fn load(&self, base: &LlamaServer, model: &str) -> Result<(), Failure> {
-        let failed = |e: String| Failure::server(format!("{}: {model}: {e}", self.url));
+        let what = format!("{model}: ");
+        let failed = |e: &EngineError| Failure::of_server(&self.url, &what, e);
+        let gave_up = |why: &str| Failure::server(format!("{}: {model}: {why}", self.url));
         eprintln!("ognivo: the router at {} starts {model}…", self.url);
-        base.load(model).await.map_err(|e| failed(e.to_string()))?;
+        base.load(model).await.map_err(|e| failed(&e))?;
         let began = Instant::now();
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
-            let models = base.models().await.map_err(|e| failed(e.to_string()))?;
+            let models = base.models().await.map_err(|e| failed(&e))?;
             match models.iter().find(|m| m.id == model) {
                 Some(m) if m.status == "loaded" || m.status == "sleeping" => return Ok(()),
                 Some(m) if m.failed => {
-                    return Err(failed("the router could not start it".into()));
+                    return Err(gave_up("the router could not start it"));
                 }
                 Some(_) => {}
-                None => return Err(failed("the router no longer has it".into())),
+                None => return Err(gave_up("the router no longer has it")),
             }
             if began.elapsed() > LOAD_TIMEOUT {
-                return Err(failed(format!(
-                    "not running after {} s",
-                    LOAD_TIMEOUT.as_secs()
-                )));
+                let waited = format!("not running after {} s", LOAD_TIMEOUT.as_secs());
+                return Err(gave_up(&waited));
             }
         }
     }
