@@ -1529,6 +1529,9 @@ async fn a_server_with_an_api_key_serves_the_clients_that_bring_it() {
     a.ok("thread/resume", resume(keyed(Some("sekret")))).await;
     assert_eq!(turn_end(&mut a, &thread, "Again").await, "answer");
     assert_eq!(bodies.lock().unwrap().len(), 2);
+    // the core gone first: on Windows a file SQLite has open is locked against reading
+    child.kill().unwrap();
+    child.wait().unwrap();
     // nothing of the key is kept: not in the store, nor in its log of writes
     for entry in std::fs::read_dir(dir.path().join("data")).unwrap() {
         let path = entry.unwrap().path();
@@ -1541,8 +1544,6 @@ async fn a_server_with_an_api_key_serves_the_clients_that_bring_it() {
             );
         }
     }
-    child.kill().unwrap();
-    child.wait().unwrap();
 }
 
 /// A thread opened while its llama-server still loaded the model, or ran without its
